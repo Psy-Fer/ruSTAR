@@ -4,9 +4,9 @@ pub mod error;
 pub mod params;
 
 pub mod genome;
+pub mod index;
 
 // Future module stubs — uncomment as implemented:
-// pub mod index;
 // pub mod align;
 // pub mod junction;
 // pub mod io;

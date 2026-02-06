@@ -81,9 +81,9 @@ Phase 1 (CLI) ✅
 
 ---
 
-## Phase 3: Suffix Array Generation
+## Phase 3: Suffix Array Generation ✅
 
-**Status**: Not started
+**Status**: Complete (including SAindex refinement)
 
 **Goal**: Build suffix array from packed genome, matching STAR's SA format. Write `SA` and `SAindex` binary files.
 

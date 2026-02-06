@@ -34,7 +34,7 @@ pub fn run(params: &Parameters) -> anyhow::Result<()> {
 }
 
 fn genome_generate(params: &Parameters) -> anyhow::Result<()> {
-    use genome::Genome;
+    use index::GenomeIndex;
 
     info!("genomeDir: {}", params.genome_dir.display());
     info!(
@@ -46,19 +46,14 @@ fn genome_generate(params: &Parameters) -> anyhow::Result<()> {
             .collect::<Vec<_>>()
     );
 
-    info!("Loading FASTA files...");
-    let genome = Genome::from_fasta(params)?;
+    info!("Building genome index...");
+    let index = GenomeIndex::build(params)?;
 
     info!(
-        "Loaded {} chromosomes, total padded genome size: {} bytes",
-        genome.n_chr_real, genome.n_genome
-    );
-
-    info!(
-        "Writing genome index files to {}...",
+        "Writing index files to {}...",
         params.genome_dir.display()
     );
-    genome.write_index_files(&params.genome_dir, params)?;
+    index.write(&params.genome_dir, params)?;
 
     info!("Genome generation complete!");
     Ok(())

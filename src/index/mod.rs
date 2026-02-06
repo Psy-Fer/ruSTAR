@@ -1,4 +1,5 @@
 pub mod packed_array;
+pub mod sa_index;
 pub mod suffix_array;
 
 use std::fs;
@@ -7,15 +8,14 @@ use std::path::Path;
 use crate::error::Error;
 use crate::genome::Genome;
 use crate::params::Parameters;
+use sa_index::SaIndex;
 use suffix_array::SuffixArray;
 
-// Future submodules for Phase 3:
-// pub mod sa_index;
-
-/// Complete genome index (genome + suffix array + metadata).
+/// Complete genome index (genome + suffix array + SA index).
 pub struct GenomeIndex {
     pub genome: Genome,
     pub suffix_array: SuffixArray,
+    pub sa_index: SaIndex,
 }
 
 impl GenomeIndex {
@@ -33,19 +33,28 @@ impl GenomeIndex {
         log::info!("Building suffix array...");
         let suffix_array = SuffixArray::build(&genome)?;
 
+        log::info!("Suffix array built: {} entries", suffix_array.len());
+
+        log::info!("Building SA index...");
+        let sa_index = SaIndex::build(&genome, &suffix_array, params.genome_sa_index_nbases)?;
+
         log::info!(
-            "Suffix array built: {} entries",
-            suffix_array.len()
+            "SA index built: nbases={}, {} indices",
+            sa_index.nbases,
+            sa_index.data.len()
         );
 
         Ok(GenomeIndex {
             genome,
             suffix_array,
+            sa_index,
         })
     }
 
     /// Write index files to directory.
     pub fn write(&self, dir: &Path, params: &Parameters) -> Result<(), Error> {
+        use std::io::Write;
+
         // Write genome files
         self.genome.write_index_files(dir, params)?;
 
@@ -53,6 +62,27 @@ impl GenomeIndex {
         let sa_path = dir.join("SA");
         fs::write(&sa_path, self.suffix_array.data.data())
             .map_err(|e| Error::io(e, &sa_path))?;
+
+        // Write SAindex file
+        let sai_path = dir.join("SAindex");
+        let mut sai_file = fs::File::create(&sai_path).map_err(|e| Error::io(e, &sai_path))?;
+
+        // Write header: gSAindexNbases as u64
+        sai_file
+            .write_all(&(self.sa_index.nbases as u64).to_le_bytes())
+            .map_err(|e| Error::io(e, &sai_path))?;
+
+        // Write genomeSAindexStart array
+        for &val in &self.sa_index.genome_sa_index_start {
+            sai_file
+                .write_all(&val.to_le_bytes())
+                .map_err(|e| Error::io(e, &sai_path))?;
+        }
+
+        // Write packed SAindex data
+        sai_file
+            .write_all(self.sa_index.data.data())
+            .map_err(|e| Error::io(e, &sai_path))?;
 
         // Update genomeParameters.txt with SA file size
         let genome_params_path = dir.join("genomeParameters.txt");

@@ -1,0 +1,36 @@
+use std::path::PathBuf;
+
+/// Errors that can occur in ruSTAR.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("invalid parameter: {0}")]
+    Parameter(String),
+
+    #[error("I/O error: {source} ({path})")]
+    Io {
+        source: std::io::Error,
+        path: PathBuf,
+    },
+
+    #[error("FASTA parsing error: {0}")]
+    Fasta(String),
+
+    #[error("genome index error: {0}")]
+    Index(String),
+
+    #[error("alignment error: {0}")]
+    Alignment(String),
+
+    #[error("GTF parsing error: {0}")]
+    Gtf(String),
+}
+
+impl Error {
+    /// Convenience for wrapping an `io::Error` with a path context.
+    pub fn io(source: std::io::Error, path: impl Into<PathBuf>) -> Self {
+        Self::Io {
+            source,
+            path: path.into(),
+        }
+    }
+}

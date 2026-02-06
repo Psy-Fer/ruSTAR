@@ -3,6 +3,7 @@
 pub mod error;
 pub mod params;
 
+pub mod align;
 pub mod genome;
 pub mod index;
 

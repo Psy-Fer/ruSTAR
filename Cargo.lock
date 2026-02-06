@@ -106,6 +106,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -284,6 +290,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 
 [[package]]
+name = "memmap2"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "744133e4a0e0a658e1374cf3bf8e415c4052a15a111acd372764c55b4177d490"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "normalize-line-endings"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -414,9 +429,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "byteorder",
  "clap",
  "env_logger",
  "log",
+ "memmap2",
  "predicates",
  "tempfile",
  "thiserror",

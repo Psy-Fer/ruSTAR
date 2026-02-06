@@ -220,7 +220,7 @@ mod tests {
         let sa = SuffixArray::build(&genome).unwrap();
 
         // Should have suffixes for forward + reverse (excluding padding)
-        assert!(sa.len() > 0);
+        assert!(!sa.is_empty());
         assert_eq!(sa.gstrand_bit, 32); // Small genome
     }
 
@@ -244,7 +244,7 @@ mod tests {
         let sa = SuffixArray::build(&genome).unwrap();
 
         // Verify we have entries
-        assert!(sa.len() > 0);
+        assert!(!sa.is_empty());
 
         // The lexicographically first suffix should start with the smallest base
         let first_entry = sa.get(0);

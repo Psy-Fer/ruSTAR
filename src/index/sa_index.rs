@@ -226,7 +226,7 @@ mod tests {
 
         assert_eq!(sai.nbases, 2);
         assert_eq!(sai.genome_sa_index_start, vec![0, 4, 20]);
-        assert!(sai.data.len() > 0);
+        assert!(!sai.data.is_empty());
     }
 
     #[test]

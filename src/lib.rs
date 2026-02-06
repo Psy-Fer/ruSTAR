@@ -3,8 +3,9 @@
 pub mod error;
 pub mod params;
 
+pub mod genome;
+
 // Future module stubs — uncomment as implemented:
-// pub mod genome;
 // pub mod index;
 // pub mod align;
 // pub mod junction;
@@ -33,6 +34,8 @@ pub fn run(params: &Parameters) -> anyhow::Result<()> {
 }
 
 fn genome_generate(params: &Parameters) -> anyhow::Result<()> {
+    use genome::Genome;
+
     info!("genomeDir: {}", params.genome_dir.display());
     info!(
         "genomeFastaFiles: {:?}",
@@ -43,7 +46,22 @@ fn genome_generate(params: &Parameters) -> anyhow::Result<()> {
             .collect::<Vec<_>>()
     );
 
-    anyhow::bail!("genomeGenerate is not yet implemented (Phase 2+3)")
+    info!("Loading FASTA files...");
+    let genome = Genome::from_fasta(params)?;
+
+    info!(
+        "Loaded {} chromosomes, total padded genome size: {} bytes",
+        genome.n_chr_real, genome.n_genome
+    );
+
+    info!(
+        "Writing genome index files to {}...",
+        params.genome_dir.display()
+    );
+    genome.write_index_files(&params.genome_dir, params)?;
+
+    info!("Genome generation complete!");
+    Ok(())
 }
 
 fn align_reads(params: &Parameters) -> anyhow::Result<()> {

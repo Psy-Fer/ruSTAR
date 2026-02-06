@@ -25,7 +25,9 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. Currently on **Phase 2**.
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. Currently on **Phase 3** (Suffix Array Generation).
+
+**Completed**: Phase 1 (CLI/params), Phase 2 (FASTA loading + genome generation)
 
 ## Source Layout
 
@@ -35,7 +37,9 @@ src/
   lib.rs           -- run() dispatches on RunMode (AlignReads | GenomeGenerate)
   params.rs        -- ~40 STAR CLI params via clap derive, --camelCase long names
   error.rs         -- Error enum with thiserror (Parameter, Io, Fasta, Index, Alignment, Gtf)
-  genome/mod.rs    -- (stub) Phase 2: Genome struct, FASTA loading, packed sequence
+  genome/
+    mod.rs         -- ✅ Genome struct, padding logic, reverse complement, file writing
+    fasta.rs       -- ✅ FASTA parser, base encoding (A=0,C=1,G=2,T=3,N=4)
   index/mod.rs     -- (stub) Phase 3-4: GenomeIndex, suffix array, SA index
   align/mod.rs     -- (stub) Phase 4-6: Alignment orchestration
   junction/mod.rs  -- (stub) Phase 7: Splice junctions, motif detection

@@ -48,31 +48,36 @@ Phase 1 (CLI) ✅
 
 ---
 
-## Phase 2: FASTA Loading + Packed Genome
+## Phase 2: FASTA Loading + Packed Genome ✅
 
-**Status**: Not started
+**Status**: Complete
 
-**Goal**: Parse multi-FASTA, concatenate chromosomes with padding (matching STAR's layout), 2-bit pack, append reverse complement, write binary `Genome` file matching STAR's format.
+**Goal**: Parse multi-FASTA, concatenate chromosomes with padding (matching STAR's layout), encode bases, append reverse complement, write binary `Genome` file matching STAR's format.
 
-**Files to create/modify**:
-- `src/genome/mod.rs` — `Genome` struct: packed sequence, chromosome metadata (names, lengths, start positions)
-- `src/genome/fasta.rs` — FASTA parser, chromosome concatenation with padding
-- `src/genome/pack.rs` — 2-bit base encoding/decoding (A=0, C=1, G=2, T=3), 4 bases per byte
+**Files created**:
+- `src/genome/mod.rs` — `Genome` struct with padding logic, reverse complement, file writing, chromosome lookup
+- `src/genome/fasta.rs` — FASTA parser with base encoding (A=0, C=1, G=2, T=3, N=4)
 
-**STAR reference files**: `genomeFasta.cpp`, `Genome.cpp`, `PackedArray.cpp`
+**Key implementation details**:
+- **NOT 2-bit packed** — STAR's Genome file uses 1 byte per base, not 2 bits
+- Base encoding: A=0, C=1, G=2, T=3, N/other=4, padding=5 (GENOME_SPACING_CHAR)
+- Padding formula: `n = ((n+1)/binSize + 1) * binSize` where `binSize = 1 << genomeChrBinNbits`
+- This formula always advances to at least the next bin boundary (not a simple ceiling)
+- Reverse complement stored in second half of buffer (positions `n_genome..2*n_genome-1`), NOT written to Genome file
+- `chrStart.txt` has `n_chr_real + 1` entries (last entry = n_genome)
+- All padding bytes initialized to value 5, not 0
+- Metadata files: `chrName.txt`, `chrLength.txt`, `chrStart.txt`, `chrNameLength.txt`, `genomeParameters.txt`
 
-**Key details (from STAR source)**:
-- Chromosomes are concatenated with padding of `2^genomeChrBinNbits` boundary alignment
-- After forward genome, reverse complement is appended (total length = 2 * padded genome length)
-- STAR stores packed genome in `Genome` binary file; `genomeParameters.txt` has metadata
-- Also writes `chrName.txt`, `chrLength.txt`, `chrStart.txt`, `chrNameLength.txt`
+**Tests**: 19 unit tests covering:
+- FASTA parsing (single/multi-chromosome, case insensitivity, error handling)
+- Padding calculations (verified with multiple bin sizes)
+- Reverse complement correctness
+- Chromosome position lookups
+- End-to-end genome generation validated with synthetic 2-chromosome FASTA
 
-**Tests**:
-- Round-trip: pack then unpack every base combination
-- Byte-for-byte comparison of `Genome` file vs STAR output on a small synthetic FASTA
-- Verify chromosome start positions match STAR's padding logic
+**Verified**: `cargo test` (19/19 pass), `cargo clippy` (clean), manual inspection of output files matches STAR format
 
-**New dependencies**: none expected (2-bit packing is trivial bit math)
+**New dependencies**: none
 
 ---
 

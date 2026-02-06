@@ -61,8 +61,7 @@ impl GenomeIndex {
 
         // Write SA file
         let sa_path = dir.join("SA");
-        fs::write(&sa_path, self.suffix_array.data.data())
-            .map_err(|e| Error::io(e, &sa_path))?;
+        fs::write(&sa_path, self.suffix_array.data.data()).map_err(|e| Error::io(e, &sa_path))?;
 
         // Write SAindex file
         let sai_path = dir.join("SAindex");

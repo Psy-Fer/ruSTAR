@@ -176,7 +176,7 @@ mod tests {
         let mut arr = PackedArray::new(5, 10);
 
         arr.write(0, 31); // 11111 in 5 bits
-        arr.write(1, 0);  // 00000
+        arr.write(1, 0); // 00000
         arr.write(2, 17); // 10001
 
         assert_eq!(arr.read(0), 31);

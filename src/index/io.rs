@@ -6,10 +6,10 @@ use byteorder::{LittleEndian, ReadBytesExt};
 
 use crate::error::Error;
 use crate::genome::Genome;
+use crate::index::GenomeIndex;
 use crate::index::packed_array::PackedArray;
 use crate::index::sa_index::SaIndex;
 use crate::index::suffix_array::SuffixArray;
-use crate::index::GenomeIndex;
 use crate::params::Parameters;
 
 impl GenomeIndex {
@@ -48,24 +48,24 @@ impl GenomeIndex {
 }
 
 /// Load genome from disk.
-fn load_genome(genome_dir: &Path, params: &Parameters) -> Result<Genome, Error> {
+fn load_genome(genome_dir: &Path, _params: &Parameters) -> Result<Genome, Error> {
     // Read chromosome metadata
     let chr_name_path = genome_dir.join("chrName.txt");
-    let chr_name_contents = std::fs::read_to_string(&chr_name_path)
-        .map_err(|e| Error::io(e, &chr_name_path))?;
+    let chr_name_contents =
+        std::fs::read_to_string(&chr_name_path).map_err(|e| Error::io(e, &chr_name_path))?;
     let chr_name: Vec<String> = chr_name_contents.lines().map(|s| s.to_string()).collect();
 
     let chr_length_path = genome_dir.join("chrLength.txt");
-    let chr_length_contents = std::fs::read_to_string(&chr_length_path)
-        .map_err(|e| Error::io(e, &chr_length_path))?;
+    let chr_length_contents =
+        std::fs::read_to_string(&chr_length_path).map_err(|e| Error::io(e, &chr_length_path))?;
     let chr_length: Vec<u64> = chr_length_contents
         .lines()
         .map(|s| s.parse().unwrap())
         .collect();
 
     let chr_start_path = genome_dir.join("chrStart.txt");
-    let chr_start_contents = std::fs::read_to_string(&chr_start_path)
-        .map_err(|e| Error::io(e, &chr_start_path))?;
+    let chr_start_contents =
+        std::fs::read_to_string(&chr_start_path).map_err(|e| Error::io(e, &chr_start_path))?;
     let chr_start: Vec<u64> = chr_start_contents
         .lines()
         .map(|s| s.parse().unwrap())
@@ -127,8 +127,7 @@ fn load_suffix_array(genome_dir: &Path, genome: &Genome) -> Result<SuffixArray, 
         0
     } else {
         let total_bits = (length_byte - 8) * 8;
-        // Ceiling division: (a + b - 1) / b
-        let entries = (total_bits + word_length as usize - 1) / word_length as usize;
+        let entries = total_bits.div_ceil(word_length as usize);
         entries + 1
     };
 
@@ -221,19 +220,13 @@ mod tests {
         // Verify
         assert_eq!(loaded_index.genome.n_genome, index.genome.n_genome);
         assert_eq!(loaded_index.genome.n_chr_real, index.genome.n_chr_real);
-        assert_eq!(
-            loaded_index.suffix_array.len(),
-            index.suffix_array.len()
-        );
+        assert_eq!(loaded_index.suffix_array.len(), index.suffix_array.len());
         assert_eq!(loaded_index.sa_index.nbases, index.sa_index.nbases);
         assert_eq!(loaded_index.sa_index.data.len(), index.sa_index.data.len());
 
         // Verify first few SA entries match
         for i in 0..loaded_index.suffix_array.len().min(5) {
-            assert_eq!(
-                loaded_index.suffix_array.get(i),
-                index.suffix_array.get(i)
-            );
+            assert_eq!(loaded_index.suffix_array.get(i), index.suffix_array.get(i));
         }
     }
 }

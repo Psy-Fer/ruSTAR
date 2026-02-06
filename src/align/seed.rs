@@ -40,13 +40,9 @@ impl Seed {
 
         // Search forward strand
         for read_pos in 0..read_seq.len() {
-            if let Some(seed) = find_seed_at_position(
-                read_seq,
-                read_pos,
-                index,
-                min_seed_length,
-                false,
-            )? {
+            if let Some(seed) =
+                find_seed_at_position(read_seq, read_pos, index, min_seed_length, false)?
+            {
                 seeds.push(seed);
             }
         }
@@ -116,13 +112,8 @@ fn find_seed_at_position(
     }
 
     // Binary search to find exact range
-    let (sa_start, sa_end) = binary_search_sa(
-        read_seq,
-        read_pos,
-        index,
-        sa_pos as usize,
-        lookup_len,
-    )?;
+    let (sa_start, sa_end) =
+        binary_search_sa(read_seq, read_pos, index, sa_pos as usize, lookup_len)?;
 
     if sa_start >= sa_end {
         return Ok(None);
@@ -149,7 +140,7 @@ fn binary_search_sa(
     read_seq: &[u8],
     read_pos: usize,
     index: &GenomeIndex,
-    hint_pos: usize,
+    _hint_pos: usize,
     min_match: usize,
 ) -> Result<(usize, usize), Error> {
     let sa_len = index.suffix_array.len();
@@ -172,8 +163,8 @@ fn binary_search_sa(
     let sa_start = left;
 
     // Find upper bound (first position where suffix > query)
-    let mut left = sa_start;
-    let mut right = sa_len;
+    // Reuse left starting from sa_start
+    right = sa_len;
 
     while left < right {
         let mid = (left + right) / 2;

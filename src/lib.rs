@@ -50,10 +50,7 @@ fn genome_generate(params: &Parameters) -> anyhow::Result<()> {
     info!("Building genome index...");
     let index = GenomeIndex::build(params)?;
 
-    info!(
-        "Writing index files to {}...",
-        params.genome_dir.display()
-    );
+    info!("Writing index files to {}...", params.genome_dir.display());
     index.write(&params.genome_dir, params)?;
 
     info!("Genome generation complete!");

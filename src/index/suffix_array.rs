@@ -66,9 +66,7 @@ impl SuffixArray {
         );
 
         // Sort suffixes using custom comparator
-        suffixes.sort_by(|a, b| {
-            compare_suffixes(genome, a.0 as usize, a.1, b.0 as usize, b.1)
-        });
+        suffixes.sort_by(|a, b| compare_suffixes(genome, a.0 as usize, a.1, b.0 as usize, b.1));
 
         // Pack into PackedArray
         let mut packed = PackedArray::new(word_length, sa_length);
@@ -132,16 +130,8 @@ fn compare_suffixes(
     let sequence = &genome.sequence;
 
     // Adjust positions for reverse complement
-    let start_a = if reverse_a {
-        pos_a + n_genome
-    } else {
-        pos_a
-    };
-    let start_b = if reverse_b {
-        pos_b + n_genome
-    } else {
-        pos_b
-    };
+    let start_a = if reverse_a { pos_a + n_genome } else { pos_a };
+    let start_b = if reverse_b { pos_b + n_genome } else { pos_b };
 
     // Maximum comparison length
     let max_len = n_genome.min(1000); // Limit to prevent excessive comparisons

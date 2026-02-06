@@ -25,3 +25,6 @@ target
 
 /target
 /test/output/
+/test/simple_rustar/
+/test/simple_star/
+/test/star_output/

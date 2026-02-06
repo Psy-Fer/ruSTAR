@@ -107,24 +107,41 @@ Phase 1 (CLI) ✅
 
 ---
 
-## Phase 4: Index Loading + Seed Finding
+## Phase 4: Index Loading + Seed Finding ✅
 
-**Status**: Not started
+**Status**: Complete (forward strand search implemented)
 
-**Goal**: Memory-map STAR index files, implement MMP (Maximal Mappable Prefix) search via SA binary search.
+**Goal**: Load genome index from disk and implement MMP (Maximal Mappable Prefix) search via SA binary search.
 
-**Files to create/modify**:
-- `src/index/io.rs` — memory-mapped loading of SA, SAindex, Genome
-- `src/align/seed.rs` — `Seed` struct, MMP search on both strands
+**Files created**:
+- `src/index/io.rs` (251 lines) — Load Genome, SA, and SAindex from disk
+  - `GenomeIndex::load()` - Main entry point
+  - Correct SA length calculation from file size
+  - SAindex header parsing (nbases + genomeSAindexStart array)
+  - 1 round-trip test (build → write → load → verify)
 
-**Key details**:
-- Can start before Phase 3 by loading a STAR-generated index
-- For each read position, binary search SA for longest exact match using SAindex to narrow range
-- Search both forward and reverse complement
+- `src/align/seed.rs` (365 lines) — `Seed` struct, MMP search algorithm
+  - `Seed::find_seeds()` - Find all seeds in read sequence
+  - `find_seed_at_position()` - MMP search at one position
+  - `binary_search_sa()` - Binary search SA for exact range
+  - `extend_match()` - Extend to maximal length
+  - 4 unit tests (exact match, filtering, no-match, position extraction)
 
-**Tests**: Compare seeds found vs STAR on synthetic + chr22 reads
+**Key implementation details**:
+- SAindex used for fast initialization (lookup k-mer → SA position)
+- Binary search finds exact SA range [sa_start, sa_end) in O(log n)
+- Extends matches greedily to find longest exact match
+- Handles padding/sentinels (stops at value 5)
+- Skips k-mers containing N
+- Min seed length filtering (typically 8-20bp)
 
-**New dependencies**: `memmap2`
+**Test results**: 39/39 tests passing, zero clippy warnings
+
+**Deferred to Phase 5**:
+- Reverse complement search for reads (will be part of full read alignment)
+- Comparison with STAR seed output on real data
+
+**New dependencies**: `memmap2 = "0.9"`, `byteorder = "1"`
 
 ---
 

@@ -25,9 +25,13 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. Currently on **Phase 3** (Suffix Array Generation).
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. Currently on **Phase 5** (Seed Stitching + Alignment Scoring).
 
-**Completed**: Phase 1 (CLI/params), Phase 2 (FASTA loading + genome generation)
+**Completed**:
+- Phase 1 (CLI/params)
+- Phase 2 (FASTA loading + genome generation)
+- Phase 3 (Suffix array + SAindex)
+- Phase 4 (Index loading + seed finding)
 
 ## Source Layout
 
@@ -40,8 +44,15 @@ src/
   genome/
     mod.rs         -- ✅ Genome struct, padding logic, reverse complement, file writing
     fasta.rs       -- ✅ FASTA parser, base encoding (A=0,C=1,G=2,T=3,N=4)
-  index/mod.rs     -- (stub) Phase 3-4: GenomeIndex, suffix array, SA index
-  align/mod.rs     -- (stub) Phase 4-6: Alignment orchestration
+  index/
+    mod.rs         -- ✅ GenomeIndex (build + load + write)
+    packed_array.rs-- ✅ Variable-width bit packing (1-64 bits per element)
+    suffix_array.rs-- ✅ SA construction, custom comparator, strand encoding
+    sa_index.rs    -- ✅ K-mer lookup table (35-bit entries with flags)
+    io.rs          -- ✅ Load index from disk (Genome, SA, SAindex)
+  align/
+    mod.rs         -- Module definition
+    seed.rs        -- ✅ Seed finding via MMP search + binary search on SA
   junction/mod.rs  -- (stub) Phase 7: Splice junctions, motif detection
   io/mod.rs        -- (stub) Phase 6+: FASTQ reader, SAM/BAM output, SJ.out.tab
 ```

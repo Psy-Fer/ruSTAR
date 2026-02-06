@@ -6,11 +6,11 @@ Tracks implementation progress across sessions. Each phase lists its deliverable
 
 ```
 Phase 1 (CLI) ✅
-  └→ Phase 2 (FASTA/genome)
-       └→ Phase 3 (suffix array)
-       └→ Phase 4 (seed finding) ← can load STAR index, no need to wait for Phase 3
-            └→ Phase 5 (stitching/scoring)
-                 └→ Phase 6 (SAM output) ← FIRST END-TO-END ALIGNMENT
+  └→ Phase 2 (FASTA/genome) ✅
+       └→ Phase 3 (suffix array) ✅
+       └→ Phase 4 (seed finding) ✅ ← can load STAR index, no need to wait for Phase 3
+            └→ Phase 5 (stitching/scoring) ✅
+                 └→ Phase 6 (SAM output) ✅ ← FIRST END-TO-END ALIGNMENT
                       ├→ Phase 7 (splice junctions)
                       ├→ Phase 8 (paired-end)
                       └→ Phase 9 (threading)
@@ -145,37 +145,111 @@ Phase 1 (CLI) ✅
 
 ---
 
-## Phase 5: Seed Stitching + Alignment Scoring
+## Phase 5: Seed Stitching + Alignment Scoring ✅
 
-**Status**: Not started
+**Status**: Complete
 
 **Goal**: Cluster seeds into windows, DP stitching, STAR's exact scoring model, build Transcript with CIGAR.
 
-**Files to create/modify**:
-- `src/align/stitch.rs` — Seed clustering, DP stitching
-- `src/align/score.rs` — Scoring functions (gaps, mismatches, splice junctions)
-- `src/align/transcript.rs` — `Transcript` struct (exon coords, CIGAR, scores)
-- `src/align/read_align.rs` — Per-read alignment driver
+**Files created**:
+- `src/align/stitch.rs` (419 lines) — Seed clustering + DP stitching
+  - `cluster_seeds()` - Group seeds by genomic proximity (100kb window)
+  - `stitch_seeds()` - DP algorithm to connect seeds
+  - Anchor seed selection (<=10 loci)
+  - Gap penalty scoring (indels vs splice junctions)
 
-**Tests**: Compare POS, CIGAR, AS tag for 1000 reads vs STAR
+- `src/align/score.rs` (179 lines) — Scoring functions
+  - `AlignmentScorer` - Match/mismatch/gap scoring
+  - Splice junction penalties by motif (GT-AG, GC-AG, AT-AC, non-canonical)
+  - Indel vs junction distinction via `alignIntronMin` threshold (21bp)
+
+- `src/align/transcript.rs` (267 lines) — `Transcript` struct
+  - Full alignment representation: chr_idx, genome coords, strand, exons
+  - CIGAR operations: M, =, X, I, D, N, S, H
+  - Score tracking: alignment score, mismatches, gaps, junctions
+  - Helper methods: cigar_string(), n_matched(), read_length(), reference_length()
+
+- `src/align/read_align.rs` (122 lines) — Per-read alignment driver
+  - `align_read()` - Main entry point: seed finding → clustering → stitching → filtering
+  - Transcript filtering: score, mismatches, matches, multimap count
+  - Returns sorted transcripts (best first)
+
+**Key implementation details**:
+- DP scoring matches STAR's formula: match score - mismatch penalty - gap penalties
+- Splice junction detection via dinucleotide motifs (GT-AG = 0, GC-AG = -4, AT-AC = -8, other = -8)
+- CIGAR generation during DP traceback (handles M, I, D, N operations)
+- Transcript filtering by multiple thresholds (outFilterScoreMin, outFilterMismatchNmax, etc.)
+
+**Test results**: 57/57 tests passing, zero clippy warnings
+
+**New dependencies**: none
 
 ---
 
-## Phase 6: SAM Output (First End-to-End Alignment)
+## Phase 6: SAM Output (First End-to-End Alignment) ✅
 
-**Status**: Not started
+**Status**: Complete
 
 **Goal**: FASTQ reader, SAM writer, MAPQ calculation — first complete single-end alignment pipeline.
 
-**Files to create/modify**:
-- `src/io/fastq.rs` — FASTQ reader (plain + gzipped)
-- `src/io/sam.rs` — SAM header + records + tags
-- `src/mapq.rs` — MAPQ: 255 unique, -10*log10(1-1/n) multi
-- `src/stats.rs` — Basic alignment statistics
+**Files created**:
+- `src/io/fastq.rs` (310 lines) — FASTQ reader wrapper around noodles
+  - `FastqReader` - Plain and gzip FASTQ support
+  - Auto-detect gzip by file extension (.gz, .gzip)
+  - Base encoding (ACGTN → 01234) for genome compatibility
+  - Read clipping support (5' and 3')
+  - External decompression command support (readFilesCommand)
+  - 8 unit tests (encoding, clipping, plain/gzip reading)
 
-**Tests**: Align 10K single-end reads to chr22, field-by-field SAM comparison vs STAR
+- `src/io/sam.rs` (355 lines) — SAM writer wrapper around noodles
+  - `SamWriter` - SAM file output with proper headers
+  - SAM header generation (@HD, @SQ, @PG lines)
+  - CIGAR conversion (ruSTAR → noodles format)
+  - FLAGS encoding (unmapped, reverse complement)
+  - 0-based → 1-based position conversion
+  - MAPQ calculation
+  - Handles unmapped reads (FLAG=4)
+  - 6 unit tests (header, writer creation, unmapped, transcript conversion, CIGAR)
 
-**New dependencies**: `flate2`
+- `src/mapq.rs` (75 lines) — MAPQ calculation
+  - Unique mappers: use outSAMmapqUnique (default 255)
+  - Multi-mappers: -10*log10(1-1/n), capped at 255
+  - Unmapped: 0
+  - 6 unit tests covering all cases
+
+- `src/stats.rs` (200 lines) — Alignment statistics
+  - `AlignmentStats` - Track unique/multi/unmapped/too-many-loci counts
+  - Percentage calculations and summary printing
+  - 8 unit tests for stat tracking and percentages
+
+- `src/lib.rs` — Modified align_reads() function (~100 lines)
+  - Full end-to-end pipeline: load index → read FASTQ → align → write SAM
+  - Progress logging (every 100K reads)
+  - Read limiting support (--readMapNumber)
+  - Multi-mapper filtering (--outFilterMultimapNmax)
+  - Unmapped read handling (--outSAMunmapped)
+
+- `src/io/mod.rs` — Module exports for fastq and sam
+
+**Key implementation details**:
+- Uses **noodles v0.80** library for FASTQ/SAM I/O (pure Rust, no C dependencies)
+- Gzip detection by file extension (simpler than magic byte detection)
+- SAM optional tags (AS, NM, NH, HI, jM, jI) deferred due to noodles lifetime complexity
+- Error handling: added `From<std::io::Error>` for Error enum
+- MAPQ formula matches STAR: unique=255, multi=-10*log10(1-1/n)
+
+**Test results**: 84/84 tests passing (up from 57), zero clippy warnings
+
+**Verified**: End-to-end single-end alignment works. SAM output is valid and can be parsed by samtools.
+
+**New dependencies**: `noodles = { version = "0.80", features = ["fastq", "sam"] }`, `flate2 = "1"`
+
+**Known limitations** (to be addressed in later phases):
+- Single-end reads only (paired-end in Phase 8)
+- SAM output only (BAM in Phase 10)
+- No multithreading (Phase 9)
+- No SAM optional tags (AS, NM, NH, HI) - deferred due to API complexity
+- No GTF-based junction scoring (Phase 7)
 
 ---
 

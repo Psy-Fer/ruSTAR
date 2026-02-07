@@ -5,6 +5,104 @@ use crate::align::transcript::{CigarOp, Transcript};
 use crate::error::Error;
 use crate::index::GenomeIndex;
 
+/// Verify match length at a specific genome position with correct strand handling.
+///
+/// Seeds found via binary search guarantee `sa_nbases` matching bases at `sa_start`,
+/// but other positions in the SA range may match fewer bases. This function re-verifies
+/// the actual match length at each specific genome position.
+///
+/// For reverse-strand positions, adds `n_genome` offset to access the reverse-complement
+/// region of the genome (which is stored at `[n_genome, 2*n_genome)`).
+fn verify_match_at_position(
+    read_seq: &[u8],
+    read_pos: usize,
+    genome_pos: u64,
+    is_reverse: bool,
+    max_length: usize,
+    index: &GenomeIndex,
+) -> usize {
+    let actual_genome_pos = if is_reverse {
+        genome_pos + index.genome.n_genome
+    } else {
+        genome_pos
+    };
+    let mut length = 0;
+    for i in 0..max_length {
+        if read_pos + i >= read_seq.len() {
+            break;
+        }
+        match index.genome.get_base(actual_genome_pos + i as u64) {
+            Some(gb) if gb < 5 && gb == read_seq[read_pos + i] => length += 1,
+            _ => break,
+        }
+    }
+    length
+}
+
+/// Count mismatches in an alignment by comparing read sequence to genome sequence.
+///
+/// The read sequence is always in forward orientation. For reverse-strand alignments,
+/// the genome is accessed at `pos + n_genome` (the reverse-complement region) rather
+/// than reverse-complementing the read.
+///
+/// # Arguments
+/// * `read_seq` - Read sequence in forward orientation (encoded as 0=A, 1=C, 2=G, 3=T, 4=N)
+/// * `cigar_ops` - CIGAR operations
+/// * `genome_start` - Starting position in genome (decoded SA position, WITHOUT n_genome offset)
+/// * `read_start` - Starting position in read
+/// * `index` - Genome index (contains genome sequence)
+/// * `is_reverse` - Whether this is a reverse-strand alignment
+///
+/// # Returns
+/// Number of mismatched bases (excluding N bases)
+fn count_mismatches(
+    read_seq: &[u8],
+    cigar_ops: &[CigarOp],
+    genome_start: u64,
+    read_start: usize,
+    index: &GenomeIndex,
+    is_reverse: bool,
+) -> u32 {
+    // Add n_genome offset for reverse-strand genome access
+    let genome_offset = if is_reverse { index.genome.n_genome } else { 0 };
+
+    let mut n_mismatch = 0u32;
+    let mut read_pos = read_start;
+    let mut genome_pos = genome_start;
+
+    for op in cigar_ops {
+        match op {
+            CigarOp::Match(len) | CigarOp::Equal(len) | CigarOp::Diff(len) => {
+                for _i in 0..*len {
+                    if read_pos < read_seq.len() {
+                        let read_base = read_seq[read_pos];
+                        if let Some(genome_base) = index.genome.get_base(genome_pos + genome_offset)
+                        {
+                            if read_base != genome_base && read_base != 4 && genome_base != 4 {
+                                n_mismatch += 1;
+                            }
+                        }
+                    }
+                    read_pos += 1;
+                    genome_pos += 1;
+                }
+            }
+            CigarOp::Ins(len) => {
+                read_pos += *len as usize;
+            }
+            CigarOp::Del(len) | CigarOp::RefSkip(len) => {
+                genome_pos += *len as u64;
+            }
+            CigarOp::SoftClip(len) => {
+                read_pos += *len as usize;
+            }
+            CigarOp::HardClip(_) => {}
+        }
+    }
+
+    n_mismatch
+}
+
 /// A cluster of seeds mapping to the same genomic region
 #[derive(Debug, Clone)]
 pub struct SeedCluster {
@@ -215,18 +313,28 @@ pub fn stitch_seeds(
                 continue;
             }
 
-            // Check if within cluster bounds
-            let seed_end = pos + seed.length as u64;
-            if pos >= cluster.genome_start && seed_end <= cluster.genome_end + 1000000 {
-                // Allow some slack
-                expanded_seeds.push(ExpandedSeed {
-                    read_pos: seed.read_pos,
-                    read_end: seed.read_pos + seed.length,
-                    genome_pos: pos,
-                    genome_end: seed_end,
-                    length: seed.length,
-                });
+            // Check if within cluster bounds (allow some slack)
+            if pos < cluster.genome_start || pos > cluster.genome_end + 1000000 {
+                continue;
             }
+
+            // Re-verify match length at this specific genome position.
+            // Binary search only guarantees `sa_nbases` matching bases at `sa_start`;
+            // other positions in the SA range may match fewer bases.
+            let actual_length =
+                verify_match_at_position(read_seq, seed.read_pos, pos, strand, seed.length, index);
+
+            if actual_length < 8 {
+                continue; // Too short after verification
+            }
+
+            expanded_seeds.push(ExpandedSeed {
+                read_pos: seed.read_pos,
+                read_end: seed.read_pos + actual_length,
+                genome_pos: pos,
+                genome_end: pos + actual_length as u64,
+                length: actual_length,
+            });
         }
     }
 
@@ -293,26 +401,73 @@ pub fn stitch_seeds(
                 best_score = transition_score;
                 best_prev = Some(j);
 
-                // Build CIGAR: previous CIGAR + gap + current match
+                // Build CIGAR: previous CIGAR + gap operations + current match
                 let mut cigar = dp[j].cigar_ops.clone();
 
-                // Add gap operation
-                match gap_type {
-                    GapType::Insertion(len) => {
-                        cigar.push(CigarOp::Ins(len));
-                    }
-                    GapType::Deletion(len) => {
-                        if len > 0 {
-                            cigar.push(CigarOp::Del(len));
+                // Emit CIGAR operations for the gap between seeds.
+                // Both read_gap and genome_gap can be positive simultaneously.
+                // The shared portion (min of the two) is a Match region (may have mismatches).
+                // The excess is an insertion or deletion/intron.
+                let rg = read_gap as u32;
+                let gg = genome_gap as u32;
+                let has_gap;
+
+                if rg == 0 && gg == 0 {
+                    // Seeds are adjacent — no gap
+                    has_gap = false;
+                } else if rg == 0 && gg > 0 {
+                    // Pure genome gap: deletion or intron
+                    match gap_type {
+                        GapType::SpliceJunction { intron_len, .. } => {
+                            cigar.push(CigarOp::RefSkip(intron_len));
+                        }
+                        _ => {
+                            cigar.push(CigarOp::Del(gg));
                         }
                     }
-                    GapType::SpliceJunction { intron_len, .. } => {
-                        cigar.push(CigarOp::RefSkip(intron_len));
+                    has_gap = true;
+                } else if rg > 0 && gg == 0 {
+                    // Pure read gap: insertion
+                    cigar.push(CigarOp::Ins(rg));
+                    has_gap = true;
+                } else {
+                    // Both gaps positive: shared match + excess indel
+                    let shared = rg.min(gg);
+                    let excess_genome = gg.saturating_sub(rg);
+                    let excess_read = rg.saturating_sub(gg);
+
+                    // Add match for shared portion
+                    if shared > 0 {
+                        cigar.push(CigarOp::Match(shared));
                     }
+                    // Add excess as indel
+                    if excess_genome > 0 {
+                        match gap_type {
+                            GapType::SpliceJunction { intron_len, .. } => {
+                                cigar.push(CigarOp::RefSkip(intron_len));
+                            }
+                            _ => {
+                                cigar.push(CigarOp::Del(excess_genome));
+                            }
+                        }
+                    }
+                    if excess_read > 0 {
+                        cigar.push(CigarOp::Ins(excess_read));
+                    }
+                    has_gap = true;
                 }
 
-                // Add current seed match
-                cigar.push(CigarOp::Match(curr.length as u32));
+                // Add current seed match (or merge if no gap)
+                if !has_gap && !cigar.is_empty() {
+                    // No gap between seeds - merge with previous Match operation
+                    if let Some(CigarOp::Match(prev_len)) = cigar.last_mut() {
+                        *prev_len += curr.length as u32;
+                    } else {
+                        cigar.push(CigarOp::Match(curr.length as u32));
+                    }
+                } else {
+                    cigar.push(CigarOp::Match(curr.length as u32));
+                }
 
                 best_cigar = cigar;
 
@@ -332,7 +487,7 @@ pub fn stitch_seeds(
         dp[i].prev_seed = best_prev;
         dp[i].genome_pos = curr.genome_pos;
         dp[i].cigar_ops = best_cigar;
-        dp[i].n_mismatch = 0; // TODO: count mismatches in gaps
+        dp[i].n_mismatch = 0; // Will be counted after finalizing CIGAR
         dp[i].n_gap = best_n_gap;
         dp[i].n_junction = best_n_junction;
     }
@@ -346,11 +501,16 @@ pub fn stitch_seeds(
         .unwrap();
 
     let best_state = &dp[best_final_idx];
-    let final_seed = &expanded_seeds[best_final_idx];
+
+    // Find the first seed in the DP chain by tracing back through prev_seed
+    let mut chain_start_idx = best_final_idx;
+    while let Some(prev) = dp[chain_start_idx].prev_seed {
+        chain_start_idx = prev;
+    }
+    let chain_start_seed = &expanded_seeds[chain_start_idx];
 
     // Calculate the read region covered by the alignment
-    let first_seed = expanded_seeds.first().unwrap();
-    let alignment_start = first_seed.read_pos;
+    let alignment_start = chain_start_seed.read_pos;
 
     // Calculate aligned read length from CIGAR operations
     let mut aligned_read_len = 0usize;
@@ -384,7 +544,7 @@ pub fn stitch_seeds(
     use crate::align::transcript::Exon;
     let mut exons = Vec::new();
     let mut read_pos = 0usize; // Start from 0, will be adjusted by soft clips
-    let mut genome_pos = first_seed.genome_pos;
+    let mut genome_pos = chain_start_seed.genome_pos;
 
     for op in &final_cigar {
         match op {
@@ -436,17 +596,39 @@ pub fn stitch_seeds(
         merged_exons.push(exon);
     }
 
+    // Get the actual genome start position from exons
+    let actual_genome_start = merged_exons
+        .first()
+        .map(|e| e.genome_start)
+        .unwrap_or(chain_start_seed.genome_pos);
+
+    // Count mismatches in the final alignment
+    let n_mismatch = count_mismatches(
+        read_seq,
+        &final_cigar,
+        actual_genome_start, // Use actual alignment start, not first seed position!
+        0,                   // Read starts at position 0 (CIGAR includes soft clips)
+        index,
+        cluster.is_reverse, // Pass reverse-strand flag for correct sequence comparison
+    );
+
     // Build transcript
     let final_seed = &expanded_seeds[best_final_idx];
     let transcript = Transcript {
         chr_idx: cluster.chr_idx,
-        genome_start: merged_exons.first().map(|e| e.genome_start).unwrap_or(cluster.genome_start),
-        genome_end: merged_exons.last().map(|e| e.genome_end).unwrap_or(final_seed.genome_end),
+        genome_start: merged_exons
+            .first()
+            .map(|e| e.genome_start)
+            .unwrap_or(cluster.genome_start),
+        genome_end: merged_exons
+            .last()
+            .map(|e| e.genome_end)
+            .unwrap_or(final_seed.genome_end),
         is_reverse: cluster.is_reverse,
         exons: merged_exons,
         cigar: final_cigar, // Use CIGAR with soft clips
         score: best_state.score,
-        n_mismatch: best_state.n_mismatch,
+        n_mismatch,
         n_gap: best_state.n_gap,
         n_junction: best_state.n_junction,
         read_seq: read_seq.to_vec(),

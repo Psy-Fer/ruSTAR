@@ -266,6 +266,10 @@ pub struct Parameters {
     #[arg(long = "outFilterMultimapNmax", default_value_t = 10)]
     pub out_filter_multimap_nmax: u32,
 
+    /// Score range for multi-mapping (keep alignments within this range of best score)
+    #[arg(long = "outFilterMultimapScoreRange", default_value_t = 1)]
+    pub out_filter_multimap_score_range: i32,
+
     /// Max mismatches per pair
     #[arg(long = "outFilterMismatchNmax", default_value_t = 10)]
     pub out_filter_mismatch_nmax: u32,
@@ -358,11 +362,11 @@ pub struct Parameters {
     pub seed_multimap_nmax: usize,
 
     /// Max number of loci anchors are allowed to map to
-    #[arg(long = "winAnchorMultimapNmax", default_value_t = 200)]
+    #[arg(long = "winAnchorMultimapNmax", default_value_t = 50)]
     pub win_anchor_multimap_nmax: usize,
 
     /// Max number of seed loci per window
-    #[arg(long = "seedNoneLociPerWindow", default_value_t = 50)]
+    #[arg(long = "seedNoneLociPerWindow", default_value_t = 10)]
     pub seed_none_loci_per_window: usize,
 
     // ── Splice junction database ────────────────────────────────────────
@@ -519,8 +523,8 @@ mod tests {
         assert_eq!(p.score_ins_base, -2);
         assert_eq!(p.score_stitch_sj_shift, 1);
         assert_eq!(p.seed_multimap_nmax, 10000);
-        assert_eq!(p.win_anchor_multimap_nmax, 200);
-        assert_eq!(p.seed_none_loci_per_window, 50);
+        assert_eq!(p.win_anchor_multimap_nmax, 50);
+        assert_eq!(p.seed_none_loci_per_window, 10);
         assert!(p.sjdb_gtf_file.is_none());
         assert_eq!(p.sjdb_overhang, 100);
         assert_eq!(p.sjdb_score, 2);

@@ -104,7 +104,37 @@ impl AlignmentScorer {
                     (score, GapType::Deletion(len))
                 }
             }
-            // Both advance: not a simple gap (mismatches/matches)
+            // Both advance: combined gap (handled by CIGAR builder in stitch.rs)
+            // Score the net indel portion
+            (gg, rg) if gg > 0 && rg > 0 => {
+                let excess = gg - rg;
+                if excess > 0 {
+                    let del_len = excess as u32;
+                    if del_len >= self.align_intron_min {
+                        let motif =
+                            self.detect_splice_motif(genome_pos + rg as u64, del_len, genome);
+                        let score = self.score_splice_junction(&motif);
+                        (
+                            score,
+                            GapType::SpliceJunction {
+                                intron_len: del_len,
+                                motif,
+                            },
+                        )
+                    } else {
+                        let score = self.score_del_open + self.score_del_base * del_len as i32;
+                        (score, GapType::Deletion(del_len))
+                    }
+                } else if excess < 0 {
+                    let ins_len = (-excess) as u32;
+                    let score = self.score_ins_open + self.score_ins_base * ins_len as i32;
+                    (score, GapType::Insertion(ins_len))
+                } else {
+                    // Equal gaps: no net indel
+                    (0, GapType::Deletion(0))
+                }
+            }
+            // Other cases (negative gaps, etc.)
             _ => (0, GapType::Deletion(0)),
         }
     }

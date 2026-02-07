@@ -49,12 +49,11 @@ pub fn align_read(
     // Step 1: Find seeds
     // Use a reasonable default min seed length (typically 8-20bp)
     let min_seed_length = 8;
-    let seeds = Seed::find_seeds(read_seq, index, min_seed_length)?;
+    let seeds = Seed::find_seeds(read_seq, index, min_seed_length, params)?;
 
     if seeds.is_empty() {
         return Ok((Vec::new(), Vec::new())); // No seeds found
     }
-
 
     // Step 2: Cluster seeds
     let max_cluster_dist = 100000; // 100kb window (TODO: make configurable)
@@ -67,7 +66,6 @@ pub fn align_read(
         params.win_anchor_multimap_nmax,
         params.seed_none_loci_per_window,
     );
-
 
     if clusters.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -95,41 +93,80 @@ pub fn align_read(
     // Step 4: Filter transcripts
     let read_length = read_seq.len() as f64;
 
+    // Log filtering statistics
+    let pre_filter_count = transcripts.len();
+    let mut filter_reasons = std::collections::HashMap::new();
 
     transcripts.retain(|t| {
         // Absolute score threshold
         if t.score < params.out_filter_score_min {
+            *filter_reasons.entry("score_min").or_insert(0) += 1;
             return false;
         }
 
         // Relative score threshold (score / read_length)
         if (t.score as f64) < params.out_filter_score_min_over_lread * read_length {
+            *filter_reasons.entry("score_min_relative").or_insert(0) += 1;
             return false;
         }
 
         // Absolute mismatch count
         if t.n_mismatch > params.out_filter_mismatch_nmax {
+            *filter_reasons.entry("mismatch_max").or_insert(0) += 1;
+            log::debug!(
+                "Filtered {}: {} mismatches > {} max (read_len={}, score={})",
+                read_name,
+                t.n_mismatch,
+                params.out_filter_mismatch_nmax,
+                read_length,
+                t.score
+            );
             return false;
         }
 
         // Relative mismatch count (mismatches / read_length)
-        if (t.n_mismatch as f64) > params.out_filter_mismatch_nover_lmax * read_length {
+        let mismatch_rate = t.n_mismatch as f64 / read_length;
+        if mismatch_rate > params.out_filter_mismatch_nover_lmax {
+            *filter_reasons.entry("mismatch_rate").or_insert(0) += 1;
+            log::debug!(
+                "Filtered {}: {:.1}% mismatch rate > {:.1}% max ({}/{} bases, score={})",
+                read_name,
+                mismatch_rate * 100.0,
+                params.out_filter_mismatch_nover_lmax * 100.0,
+                t.n_mismatch,
+                read_length,
+                t.score
+            );
             return false;
         }
 
         // Absolute matched bases
         let n_matched = t.n_matched();
         if n_matched < params.out_filter_match_nmin {
+            *filter_reasons.entry("match_min").or_insert(0) += 1;
             return false;
         }
 
         // Relative matched bases (matched / read_length)
         if (n_matched as f64) < params.out_filter_match_nmin_over_lread * read_length {
+            *filter_reasons.entry("match_min_relative").or_insert(0) += 1;
             return false;
         }
 
         true
     });
+
+    // Log filtering summary if anything was filtered
+    if pre_filter_count > transcripts.len() {
+        let filtered = pre_filter_count - transcripts.len();
+        log::debug!(
+            "Read {}: Filtered {}/{} transcripts: {:?}",
+            read_name,
+            filtered,
+            pre_filter_count,
+            filter_reasons
+        );
+    }
 
     // Step 3b: Detect chimeric alignments from soft-clips (Tier 1)
     if params.chim_segment_min > 0 {
@@ -144,8 +181,37 @@ pub fn align_read(
         }
     }
 
-    // Step 5: Sort by score (descending) and limit to top N
+    // Step 5: Deduplicate transcripts with identical genomic coordinates
+    // Keep only the highest-scoring transcript for each unique location
+    // Sort by (chr, start, end, strand, score_descending) so dedup_by keeps the best
+    transcripts.sort_by(|a, b| {
+        (a.chr_idx, a.genome_start, a.genome_end, a.is_reverse)
+            .cmp(&(b.chr_idx, b.genome_start, b.genome_end, b.is_reverse))
+            .then_with(|| b.score.cmp(&a.score)) // Higher score first
+    });
+
+    // Dedup consecutive entries with same coordinates (keeps first = highest score)
+    transcripts.dedup_by(|a, b| {
+        a.chr_idx == b.chr_idx
+            && a.genome_start == b.genome_start
+            && a.genome_end == b.genome_end
+            && a.is_reverse == b.is_reverse
+    });
+
+    // Step 5b: Re-sort by score (descending) for final output
     transcripts.sort_by(|a, b| b.score.cmp(&a.score));
+
+    // Step 5b: Filter to keep only alignments within score range of the best
+    // This is CRITICAL for unique vs multi-mapped classification
+    if !transcripts.is_empty() {
+        let max_score = transcripts[0].score;
+        let score_threshold = max_score - params.out_filter_multimap_score_range;
+
+        // Keep only transcripts within score range of the best
+        transcripts.retain(|t| t.score >= score_threshold);
+    }
+
+    // Step 5c: Truncate to max multimap count
     transcripts.truncate(params.out_filter_multimap_nmax as usize);
 
     // Step 6: Filter chimeric alignments
@@ -184,7 +250,8 @@ pub fn align_paired_read(
 ) -> Result<Vec<PairedAlignment>, Error> {
     // Step 1: Find seeds from both mates (pooled together)
     let min_seed_length = 8;
-    let pooled_seeds = Seed::find_paired_seeds(mate1_seq, mate2_seq, index, min_seed_length)?;
+    let pooled_seeds =
+        Seed::find_paired_seeds(mate1_seq, mate2_seq, index, min_seed_length, params)?;
 
     if pooled_seeds.is_empty() {
         return Ok(Vec::new());

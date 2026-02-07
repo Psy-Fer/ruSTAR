@@ -1,5 +1,6 @@
 use crate::error::Error;
 use crate::index::GenomeIndex;
+use crate::params::Parameters;
 
 /// A seed represents an exact match between a read position and genome location(s).
 #[derive(Debug, Clone)]
@@ -32,6 +33,7 @@ impl Seed {
     /// * `read_seq` - Read sequence (encoded as 0=A, 1=C, 2=G, 3=T)
     /// * `index` - Genome index with SA and SAindex
     /// * `min_seed_length` - Minimum seed length to report (typically 8-20)
+    /// * `params` - Parameters including seedMultimapNmax
     ///
     /// # Returns
     /// Vector of seeds found in the read
@@ -39,13 +41,14 @@ impl Seed {
         read_seq: &[u8],
         index: &GenomeIndex,
         min_seed_length: usize,
+        params: &Parameters,
     ) -> Result<Vec<Seed>, Error> {
         let mut seeds = Vec::new();
 
         // Search forward strand
         for read_pos in 0..read_seq.len() {
             if let Some(seed) =
-                find_seed_at_position(read_seq, read_pos, index, min_seed_length, false)?
+                find_seed_at_position(read_seq, read_pos, index, min_seed_length, false, params)?
             {
                 seeds.push(seed);
             }
@@ -65,6 +68,7 @@ impl Seed {
     /// * `mate2_seq` - Second mate sequence (encoded)
     /// * `index` - Genome index with SA and SAindex
     /// * `min_seed_length` - Minimum seed length to report
+    /// * `params` - Parameters including seedMultimapNmax
     ///
     /// # Returns
     /// Vector of seeds from both mates, tagged with mate_id (0 or 1)
@@ -73,16 +77,17 @@ impl Seed {
         mate2_seq: &[u8],
         index: &GenomeIndex,
         min_seed_length: usize,
+        params: &Parameters,
     ) -> Result<Vec<Seed>, Error> {
         // Find seeds from mate1 (tag with mate_id = 0)
-        let mut seeds = Self::find_seeds(mate1_seq, index, min_seed_length)?;
+        let mut seeds = Self::find_seeds(mate1_seq, index, min_seed_length, params)?;
         for seed in &mut seeds {
             seed.mate_id = 0;
         }
 
         // Find seeds from mate2 (tag with mate_id = 1)
         // IMPORTANT: read_pos is relative to mate2 start (will be adjusted during stitching)
-        let mut seeds2 = Self::find_seeds(mate2_seq, index, min_seed_length)?;
+        let mut seeds2 = Self::find_seeds(mate2_seq, index, min_seed_length, params)?;
         for seed in &mut seeds2 {
             seed.mate_id = 1;
         }
@@ -116,6 +121,7 @@ fn find_seed_at_position(
     index: &GenomeIndex,
     min_seed_length: usize,
     is_reverse: bool,
+    params: &Parameters,
 ) -> Result<Option<Seed>, Error> {
     if read_pos >= read_seq.len() {
         return Ok(None);
@@ -160,6 +166,12 @@ fn find_seed_at_position(
 
     if sa_start >= sa_end {
         return Ok(None);
+    }
+
+    // Check seedMultimapNmax: filter seeds that map to too many loci
+    let n_loci = sa_end - sa_start;
+    if n_loci > params.seed_multimap_nmax {
+        return Ok(None); // Skip this seed - maps to too many places
     }
 
     // Extend match as far as possible
@@ -359,7 +371,10 @@ mod tests {
         let index = make_test_index("ACGTACGT");
         let read = encode_sequence("ACGT");
 
-        let seeds = Seed::find_seeds(&read, &index, 4).unwrap();
+        let args = vec!["ruSTAR", "--runMode", "alignReads"];
+        let params = Parameters::parse_from(args);
+
+        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
 
         // Should find at least one seed
         assert!(!seeds.is_empty());
@@ -374,12 +389,15 @@ mod tests {
         let index = make_test_index("AAAAAAAA");
         let read = encode_sequence("AAA");
 
+        let args = vec!["ruSTAR", "--runMode", "alignReads"];
+        let params = Parameters::parse_from(args);
+
         // With min_seed_length=4, should find nothing (read is only 3bp)
-        let seeds = Seed::find_seeds(&read, &index, 4).unwrap();
+        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
         assert!(seeds.is_empty());
 
         // With min_seed_length=2, should find seeds
-        let seeds = Seed::find_seeds(&read, &index, 2).unwrap();
+        let seeds = Seed::find_seeds(&read, &index, 2, &params).unwrap();
         assert!(!seeds.is_empty());
     }
 
@@ -388,7 +406,10 @@ mod tests {
         let index = make_test_index("ACAC");
         let read = encode_sequence("GGGG");
 
-        let seeds = Seed::find_seeds(&read, &index, 2).unwrap();
+        let args = vec!["ruSTAR", "--runMode", "alignReads"];
+        let params = Parameters::parse_from(args);
+
+        let seeds = Seed::find_seeds(&read, &index, 2, &params).unwrap();
 
         // No seeds should be found (GGGG not in ACAC or its reverse complement GTGT)
         assert!(seeds.is_empty());
@@ -399,7 +420,10 @@ mod tests {
         let index = make_test_index("ACGTACGT");
         let read = encode_sequence("ACGT");
 
-        let seeds = Seed::find_seeds(&read, &index, 4).unwrap();
+        let args = vec!["ruSTAR", "--runMode", "alignReads"];
+        let params = Parameters::parse_from(args);
+
+        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
         assert!(!seeds.is_empty());
 
         // Get positions for first seed
@@ -417,7 +441,10 @@ mod tests {
         let index = make_test_index("ACGTACGT");
         let read = encode_sequence("ACGT");
 
-        let seeds = Seed::find_seeds(&read, &index, 4).unwrap();
+        let args = vec!["ruSTAR", "--runMode", "alignReads"];
+        let params = Parameters::parse_from(args);
+
+        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
         assert!(!seeds.is_empty());
 
         // Single-end seeds should have mate_id = 2
@@ -432,7 +459,10 @@ mod tests {
         let mate1 = encode_sequence("ACGT");
         let mate2 = encode_sequence("TTGG");
 
-        let seeds = Seed::find_paired_seeds(&mate1, &mate2, &index, 4).unwrap();
+        let args = vec!["ruSTAR", "--runMode", "alignReads"];
+        let params = Parameters::parse_from(args);
+
+        let seeds = Seed::find_paired_seeds(&mate1, &mate2, &index, 4, &params).unwrap();
 
         // Should have seeds from both mates
         let mate1_seeds: Vec<_> = seeds.iter().filter(|s| s.mate_id == 0).collect();
@@ -458,7 +488,10 @@ mod tests {
         let mate1 = encode_sequence("ACGT");
         let mate2 = encode_sequence("ACGT");
 
-        let seeds = Seed::find_paired_seeds(&mate1, &mate2, &index, 4).unwrap();
+        let args = vec!["ruSTAR", "--runMode", "alignReads"];
+        let params = Parameters::parse_from(args);
+
+        let seeds = Seed::find_paired_seeds(&mate1, &mate2, &index, 4, &params).unwrap();
 
         // Should have roughly double the seeds (one set from each mate)
         let mate1_count = seeds.iter().filter(|s| s.mate_id == 0).count();

@@ -11,15 +11,19 @@ Phase 1 (CLI) ✅
        └→ Phase 4 (seed finding) ✅ ← can load STAR index, no need to wait for Phase 3
             └→ Phase 5 (stitching/scoring) ✅
                  └→ Phase 6 (SAM output) ✅ ← FIRST END-TO-END ALIGNMENT
-                      ├→ Phase 7 (splice junctions)
-                      ├→ Phase 8 (paired-end)
-                      └→ Phase 9 (threading)
-                           └→ Phase 10 (BAM output)
-                                └→ Phase 11 (two-pass)
-                                     └→ Phase 12 (chimeric)
-                                          └→ Phase 13 (optimization)
-                                               └→ Phase 14 (STARsolo)
+                      └→ Phase 9 (threading) ← NEXT: Parallel architecture foundation
+                           └→ Phase 8 (paired-end) ← Build paired-end on threaded base
+                                └→ Phase 7 (splice junctions) ← Additive enhancement
+                                     └→ Phase 10 (BAM output)
+                                          └→ Phase 11 (two-pass)
+                                               └→ Phase 12 (chimeric)
+                                                    └→ Phase 13 (optimization)
+                                                         └→ Phase 14 (STARsolo)
 ```
+
+**Phase ordering rationale**: Threading (Phase 9) done first to establish parallel architecture foundation.
+Paired-end (Phase 8) builds on threaded infrastructure. GTF/junctions (Phase 7) is mostly additive and
+less architecturally disruptive, so done after core parallelism and paired-end are in place.
 
 ---
 
@@ -253,29 +257,55 @@ Phase 1 (CLI) ✅
 
 ---
 
-## Phase 7: Splice Junction Handling
+## Phase 9: Threading (NEXT)
 
 **Status**: Not started
 
-**Goal**: GTF parsing, canonical motif detection, JunctionDb, SJ.out.tab output.
+**Goal**: Rayon chunk-based parallelism matching `--runThreadN`. Establish parallel architecture foundation.
 
-**Files**: `src/junction/mod.rs`, `src/junction/motif.rs`, `src/junction/gtf.rs`, `src/io/sj_out.rs`
+**Why this phase order**: Threading affects the entire execution model and is much harder to retrofit
+into complex features later. By implementing threading now (before paired-end and GTF features), we
+ensure all future features are built with parallelism from the start.
+
+**Key decisions**:
+- Use Rayon for data parallelism (chunk-based work distribution)
+- Maintain deterministic output regardless of thread count
+- Thread-safe statistics aggregation
+- Careful handling of SAM output ordering (if required)
+
+**Files to create/modify**:
+- `src/lib.rs` — Parallelize main alignment loop with Rayon
+- `src/stats.rs` — Thread-safe statistics collection (Arc<Mutex<>> or atomic counters)
+- `src/io/sam.rs` — Thread-safe SAM writing (may need buffering/ordering)
+- Tests to verify deterministic output with different thread counts
+
+**New dependencies**: `rayon = "1"`
 
 ---
 
 ## Phase 8: Paired-End Reads
 
-**Status**: Not started
+**Status**: Not started (blocked by Phase 9)
 
 **Goal**: Paired FASTQ, concordant/discordant pairing, proper SAM FLAG/TLEN/mate fields.
 
+**Why after threading**: Implementing paired-end on top of established parallel infrastructure
+ensures we don't have to retrofit threading into paired-end logic later.
+
+**Files to modify**: `src/io/fastq.rs`, `src/align/read_align.rs`, `src/io/sam.rs`, `src/lib.rs`
+
 ---
 
-## Phase 9: Threading
+## Phase 7: Splice Junction Handling
 
-**Status**: Not started
+**Status**: Not started (blocked by Phase 8)
 
-**Goal**: Rayon chunk-based parallelism matching `--runThreadN`. Identical output regardless of thread count.
+**Goal**: GTF parsing, canonical motif detection, JunctionDb, SJ.out.tab output.
+
+**Why after paired-end**: Mostly additive enhancement that works equally well with single-end,
+paired-end, threaded or not. Less architecturally disruptive, so done after core features are stable.
+
+**Files to create**: `src/junction/mod.rs`, `src/junction/motif.rs`, `src/junction/gtf.rs`, `src/io/sj_out.rs`
 
 ---
 

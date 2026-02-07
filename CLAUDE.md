@@ -25,7 +25,10 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Currently on Phase 7** (GTF/Splice Junction Annotation).
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Currently on Phase 9** (Threading).
+
+**Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
+before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
 
 **Completed**:
 - Phase 1 (CLI/params)

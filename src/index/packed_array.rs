@@ -106,17 +106,24 @@ impl PackedArray {
         let byte_offset = b / 8;
         let bit_shift = (b % 8) as u32;
 
-        // Read 8-byte word
-        let word = u64::from_le_bytes([
-            self.data.get(byte_offset).copied().unwrap_or(0),
-            self.data.get(byte_offset + 1).copied().unwrap_or(0),
-            self.data.get(byte_offset + 2).copied().unwrap_or(0),
-            self.data.get(byte_offset + 3).copied().unwrap_or(0),
-            self.data.get(byte_offset + 4).copied().unwrap_or(0),
-            self.data.get(byte_offset + 5).copied().unwrap_or(0),
-            self.data.get(byte_offset + 6).copied().unwrap_or(0),
-            self.data.get(byte_offset + 7).copied().unwrap_or(0),
-        ]);
+        let word = if byte_offset + 8 <= self.data.len() {
+            // Fast path: read 8 bytes directly (no per-byte bounds checks)
+            // SAFETY: We just verified byte_offset + 8 <= data.len()
+            let bytes = &self.data[byte_offset..byte_offset + 8];
+            u64::from_le_bytes(bytes.try_into().unwrap())
+        } else {
+            // Slow path: near end of array, read byte-by-byte with bounds checks
+            u64::from_le_bytes([
+                self.data.get(byte_offset).copied().unwrap_or(0),
+                self.data.get(byte_offset + 1).copied().unwrap_or(0),
+                self.data.get(byte_offset + 2).copied().unwrap_or(0),
+                self.data.get(byte_offset + 3).copied().unwrap_or(0),
+                self.data.get(byte_offset + 4).copied().unwrap_or(0),
+                self.data.get(byte_offset + 5).copied().unwrap_or(0),
+                self.data.get(byte_offset + 6).copied().unwrap_or(0),
+                self.data.get(byte_offset + 7).copied().unwrap_or(0),
+            ])
+        };
 
         // Extract and mask the value
         (word >> bit_shift) & self.bit_rec_mask

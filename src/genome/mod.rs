@@ -135,18 +135,23 @@ impl Genome {
 
     /// Get the chromosome containing a given genomic position.
     ///
+    /// Uses binary search on chr_start for O(log n) lookup.
+    ///
     /// # Returns
     /// `(chr_index, offset_within_chr)` or None if position is in padding.
     pub fn position_to_chr(&self, pos: u64) -> Option<(usize, u64)> {
-        // Binary search to find the chromosome
-        for i in 0..self.n_chr_real {
-            let start = self.chr_start[i];
-            let end = start + self.chr_length[i];
-            if pos >= start && pos < end {
-                return Some((i, pos - start));
-            }
+        // Binary search: find the last chr_start that is <= pos
+        let idx = self.chr_start[..self.n_chr_real].partition_point(|&start| start <= pos);
+        if idx == 0 {
+            return None;
         }
-        None
+        let i = idx - 1;
+        let start = self.chr_start[i];
+        if pos < start + self.chr_length[i] {
+            Some((i, pos - start))
+        } else {
+            None // Position is in padding between chromosomes
+        }
     }
 
     /// Write genome index files to the specified directory.

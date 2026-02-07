@@ -102,15 +102,20 @@ impl Seed {
     ///
     /// Expands the SA range to actual genome positions.
     pub fn get_genome_positions(&self, index: &GenomeIndex) -> Vec<(u64, bool)> {
-        let mut positions = Vec::new();
+        self.genome_positions(index).collect()
+    }
 
-        for sa_idx in self.sa_start..self.sa_end {
+    /// Iterate over genome positions for this seed without allocating.
+    ///
+    /// Returns an iterator that lazily decodes SA entries.
+    pub fn genome_positions<'a>(
+        &'a self,
+        index: &'a GenomeIndex,
+    ) -> impl Iterator<Item = (u64, bool)> + 'a {
+        (self.sa_start..self.sa_end).map(move |sa_idx| {
             let sa_entry = index.suffix_array.get(sa_idx);
-            let (pos, is_reverse) = index.suffix_array.decode(sa_entry);
-            positions.push((pos, is_reverse));
-        }
-
-        positions
+            index.suffix_array.decode(sa_entry)
+        })
     }
 }
 

@@ -140,10 +140,10 @@ pub fn cluster_seeds(
     win_anchor_multimap_nmax: usize,
     seed_none_loci_per_window: usize,
 ) -> Vec<SeedCluster> {
-    let mut clusters = Vec::new();
+    let mut clusters = Vec::with_capacity(seeds.len());
 
     // Find anchor seeds (seeds that map to few genomic locations)
-    let mut anchors: Vec<usize> = Vec::new();
+    let mut anchors: Vec<usize> = Vec::with_capacity(seeds.len());
     for (i, seed) in seeds.iter().enumerate() {
         let n_loci = seed.sa_end - seed.sa_start;
         if n_loci <= max_loci_for_anchor {
@@ -169,16 +169,11 @@ pub fn cluster_seeds(
             continue;
         }
 
-        let anchor_positions = anchor.get_genome_positions(index);
-
         // Limit number of positions per anchor (STAR: seedNoneLociPerWindow)
-        let max_positions = seed_none_loci_per_window.min(anchor_positions.len());
+        let max_positions = seed_none_loci_per_window.min(n_anchor_loci);
 
-        // For each genomic position of the anchor (limited)
-        for (anchor_pos, anchor_strand) in anchor_positions.iter().take(max_positions) {
-            let anchor_pos = *anchor_pos;
-            let anchor_strand = *anchor_strand;
-
+        // For each genomic position of the anchor (limited, using iterator)
+        for (anchor_pos, anchor_strand) in anchor.genome_positions(index).take(max_positions) {
             // Find chromosome
             let chr_info = match index.genome.position_to_chr(anchor_pos) {
                 Some(info) => info,
@@ -187,7 +182,8 @@ pub fn cluster_seeds(
             let chr_idx = chr_info.0;
 
             // Collect seeds within clustering window
-            let mut seed_indices = vec![anchor_idx];
+            let mut seed_indices = Vec::with_capacity(seeds.len());
+            seed_indices.push(anchor_idx);
             let mut genome_start = anchor_pos;
             let mut genome_end = anchor_pos + anchor.length as u64;
 
@@ -196,14 +192,11 @@ pub fn cluster_seeds(
                     continue;
                 }
 
-                // Check if seed overlaps with window
-                let seed_positions = seed.get_genome_positions(index);
-                // Limit positions per seed (STAR: seedNoneLociPerWindow)
-                let max_seed_positions = seed_none_loci_per_window.min(seed_positions.len());
-                for (pos, strand) in seed_positions.iter().take(max_seed_positions) {
-                    let pos = *pos;
-                    let strand = *strand;
-
+                // Check if seed overlaps with window (using iterator, no Vec alloc)
+                let n_seed_loci = seed.sa_end - seed.sa_start;
+                let max_seed_positions = seed_none_loci_per_window.min(n_seed_loci);
+                let mut found = false;
+                for (pos, strand) in seed.genome_positions(index).take(max_seed_positions) {
                     if strand != anchor_strand {
                         continue;
                     }
@@ -230,9 +223,11 @@ pub fn cluster_seeds(
                         seed_indices.push(i);
                         genome_start = genome_start.min(pos);
                         genome_end = genome_end.max(seed_end);
+                        found = true;
                         break; // Only add each seed once per cluster
                     }
                 }
+                let _ = found;
             }
 
             // Create cluster if it has at least one seed
@@ -293,13 +288,12 @@ pub fn stitch_seeds(
     scorer: &AlignmentScorer,
 ) -> Result<Vec<Transcript>, Error> {
     // Expand seeds to specific genome positions matching the cluster
-    let mut expanded_seeds = Vec::new();
+    let mut expanded_seeds = Vec::with_capacity(cluster.seed_indices.len() * 4);
 
     for &seed_idx in &cluster.seed_indices {
         let seed = &seeds[seed_idx];
-        let positions = seed.get_genome_positions(index);
 
-        for (pos, strand) in positions {
+        for (pos, strand) in seed.genome_positions(index) {
             if strand != cluster.is_reverse {
                 continue;
             }
@@ -342,8 +336,20 @@ pub fn stitch_seeds(
         return Ok(Vec::new());
     }
 
-    // Sort by read position
-    expanded_seeds.sort_by_key(|s| s.read_pos);
+    // Sort by read position, then by length descending (longest first for dedup)
+    expanded_seeds.sort_by(|a, b| a.read_pos.cmp(&b.read_pos).then(b.length.cmp(&a.length)));
+
+    // Deduplicate: keep only the longest seed per (read_pos, genome_pos) pair
+    expanded_seeds.dedup_by(|a, b| a.read_pos == b.read_pos && a.genome_pos == b.genome_pos);
+
+    // Cap expanded seeds to prevent pathological O(n²) DP on repetitive regions
+    const MAX_EXPANDED_SEEDS: usize = 200;
+    if expanded_seeds.len() > MAX_EXPANDED_SEEDS {
+        // Keep longest seeds (re-sort by length descending, take top N, re-sort by read_pos)
+        expanded_seeds.sort_by(|a, b| b.length.cmp(&a.length));
+        expanded_seeds.truncate(MAX_EXPANDED_SEEDS);
+        expanded_seeds.sort_by_key(|s| s.read_pos);
+    }
 
     // Initialize DP: one state per expanded seed
     let n = expanded_seeds.len();
@@ -365,13 +371,15 @@ pub fn stitch_seeds(
     }
 
     // DP: for each seed, try connecting to all compatible previous seeds
+    // Optimization: find best j first, then build CIGAR only once (avoids repeated cloning)
     for i in 1..n {
         let curr = &expanded_seeds[i];
         let mut best_score = dp[i].score;
-        let mut best_prev = dp[i].prev_seed;
-        let mut best_cigar = dp[i].cigar_ops.clone();
-        let mut best_n_gap = dp[i].n_gap;
-        let mut best_n_junction = dp[i].n_junction;
+        let mut best_j: Option<usize> = None;
+        let mut best_gap_score = 0i32;
+        let mut best_gap_type = GapType::Deletion(0);
+        let mut best_read_gap = 0i64;
+        let mut best_genome_gap = 0i64;
 
         for j in 0..i {
             let prev = &expanded_seeds[j];
@@ -399,97 +407,90 @@ pub fn stitch_seeds(
 
             if transition_score > best_score {
                 best_score = transition_score;
-                best_prev = Some(j);
+                best_j = Some(j);
+                best_gap_score = gap_score;
+                best_gap_type = gap_type;
+                best_read_gap = read_gap;
+                best_genome_gap = genome_gap;
+            }
+        }
 
-                // Build CIGAR: previous CIGAR + gap operations + current match
-                let mut cigar = dp[j].cigar_ops.clone();
+        // Build CIGAR only once for the best transition (instead of cloning per candidate)
+        if let Some(j) = best_j {
+            let mut cigar = dp[j].cigar_ops.clone();
 
-                // Emit CIGAR operations for the gap between seeds.
-                // Both read_gap and genome_gap can be positive simultaneously.
-                // The shared portion (min of the two) is a Match region (may have mismatches).
-                // The excess is an insertion or deletion/intron.
-                let rg = read_gap as u32;
-                let gg = genome_gap as u32;
-                let has_gap;
+            // Emit CIGAR operations for the gap between seeds
+            let rg = best_read_gap as u32;
+            let gg = best_genome_gap as u32;
+            let has_gap;
 
-                if rg == 0 && gg == 0 {
-                    // Seeds are adjacent — no gap
-                    has_gap = false;
-                } else if rg == 0 && gg > 0 {
-                    // Pure genome gap: deletion or intron
-                    match gap_type {
+            if rg == 0 && gg == 0 {
+                has_gap = false;
+            } else if rg == 0 && gg > 0 {
+                match best_gap_type {
+                    GapType::SpliceJunction { intron_len, .. } => {
+                        cigar.push(CigarOp::RefSkip(intron_len));
+                    }
+                    _ => {
+                        cigar.push(CigarOp::Del(gg));
+                    }
+                }
+                has_gap = true;
+            } else if rg > 0 && gg == 0 {
+                cigar.push(CigarOp::Ins(rg));
+                has_gap = true;
+            } else {
+                let shared = rg.min(gg);
+                let excess_genome = gg.saturating_sub(rg);
+                let excess_read = rg.saturating_sub(gg);
+
+                if shared > 0 {
+                    cigar.push(CigarOp::Match(shared));
+                }
+                if excess_genome > 0 {
+                    match best_gap_type {
                         GapType::SpliceJunction { intron_len, .. } => {
                             cigar.push(CigarOp::RefSkip(intron_len));
                         }
                         _ => {
-                            cigar.push(CigarOp::Del(gg));
+                            cigar.push(CigarOp::Del(excess_genome));
                         }
                     }
-                    has_gap = true;
-                } else if rg > 0 && gg == 0 {
-                    // Pure read gap: insertion
-                    cigar.push(CigarOp::Ins(rg));
-                    has_gap = true;
-                } else {
-                    // Both gaps positive: shared match + excess indel
-                    let shared = rg.min(gg);
-                    let excess_genome = gg.saturating_sub(rg);
-                    let excess_read = rg.saturating_sub(gg);
-
-                    // Add match for shared portion
-                    if shared > 0 {
-                        cigar.push(CigarOp::Match(shared));
-                    }
-                    // Add excess as indel
-                    if excess_genome > 0 {
-                        match gap_type {
-                            GapType::SpliceJunction { intron_len, .. } => {
-                                cigar.push(CigarOp::RefSkip(intron_len));
-                            }
-                            _ => {
-                                cigar.push(CigarOp::Del(excess_genome));
-                            }
-                        }
-                    }
-                    if excess_read > 0 {
-                        cigar.push(CigarOp::Ins(excess_read));
-                    }
-                    has_gap = true;
                 }
+                if excess_read > 0 {
+                    cigar.push(CigarOp::Ins(excess_read));
+                }
+                has_gap = true;
+            }
 
-                // Add current seed match (or merge if no gap)
-                if !has_gap && !cigar.is_empty() {
-                    // No gap between seeds - merge with previous Match operation
-                    if let Some(CigarOp::Match(prev_len)) = cigar.last_mut() {
-                        *prev_len += curr.length as u32;
-                    } else {
-                        cigar.push(CigarOp::Match(curr.length as u32));
-                    }
+            // Add current seed match (or merge if no gap)
+            if !has_gap && !cigar.is_empty() {
+                if let Some(CigarOp::Match(prev_len)) = cigar.last_mut() {
+                    *prev_len += curr.length as u32;
                 } else {
                     cigar.push(CigarOp::Match(curr.length as u32));
                 }
-
-                best_cigar = cigar;
-
-                // Update gap and junction counts
-                best_n_gap = dp[j].n_gap;
-                best_n_junction = dp[j].n_junction;
-
-                match gap_type {
-                    GapType::Insertion(_) | GapType::Deletion(_) => best_n_gap += 1,
-                    GapType::SpliceJunction { .. } => best_n_junction += 1,
-                }
+            } else {
+                cigar.push(CigarOp::Match(curr.length as u32));
             }
-        }
 
-        // Update DP state
-        dp[i].score = best_score;
-        dp[i].prev_seed = best_prev;
-        dp[i].genome_pos = curr.genome_pos;
-        dp[i].cigar_ops = best_cigar;
-        dp[i].n_mismatch = 0; // Will be counted after finalizing CIGAR
-        dp[i].n_gap = best_n_gap;
-        dp[i].n_junction = best_n_junction;
+            let mut n_gap = dp[j].n_gap;
+            let mut n_junction = dp[j].n_junction;
+            match best_gap_type {
+                GapType::Insertion(_) | GapType::Deletion(_) => n_gap += 1,
+                GapType::SpliceJunction { .. } => n_junction += 1,
+            }
+            let _ = best_gap_score;
+
+            dp[i].score = best_score;
+            dp[i].prev_seed = Some(j);
+            dp[i].genome_pos = curr.genome_pos;
+            dp[i].cigar_ops = cigar;
+            dp[i].n_mismatch = 0;
+            dp[i].n_gap = n_gap;
+            dp[i].n_junction = n_junction;
+        }
+        // If no best_j, dp[i] keeps its initial state (single seed)
     }
 
     // Backtrack from best final state

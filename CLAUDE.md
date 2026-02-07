@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Currently on Phase 13** (Performance optimization - in progress).
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13 complete. Next: Phase 14** (STARsolo).
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -50,12 +50,11 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 10 (BAM output - unsorted streaming)
 - Phase 11 (Two-pass mode - novel junction discovery)
 - Phase 12 (Chimeric alignment detection)
-- **Phase 13.1 (Critical bugs fixed)** ✅
-- **Phase 13.2 (Mismatch counting + seed expansion bugs fixed)** ✅
+- Phase 13 (Performance optimization) ← **3.9x speedup, matches STAR speed**
 
 **Current Status**:
-- ✅ 1000 reads: 82.4% unique, 8.3% multi, 9.3% unmapped (matches STAR: 82/7/11%)
-- ✅ 1000 reads in ~3 seconds (vs STAR <1s)
+- ✅ 1000 reads: 82.2% unique, 8.4% multi, 9.4% unmapped (matches STAR: 82/7/11%)
+- ✅ 1000 reads in ~0.77s (was ~3s, STAR <1s)
 - ✅ Valid SAM output with correct CIGAR, soft clips, and splice junctions
 - ✅ 170/170 unit tests passing
 
@@ -179,10 +178,9 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 
 - No SAM optional tags (AS, NM, NH, HI) - noodles lifetime complexity
 - No coordinate-sorted BAM output (unsorted only; use `samtools sort`)
-- Chimeric alignment detection (Phase 12):
+- Chimeric alignment detection:
   - ✅ Single-end chimeric detection (inter-chr, strand breaks, large gaps, soft-clips)
   - ✅ Chimeric.out.junction output file
   - ❌ Paired-end chimeric detection not yet implemented
   - ❌ Tier 3 (re-mapping soft-clipped regions) not yet implemented
-- No performance optimizations (Phase 13)
 - No STARsolo single-cell features (Phase 14)

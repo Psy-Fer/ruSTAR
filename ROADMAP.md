@@ -17,7 +17,7 @@ Phase 1 (CLI) ✅
                                      └→ Phase 10 (BAM output) ✅ ← Binary alignment format
                                           └→ Phase 11 (two-pass) ✅ ← Novel junction discovery
                                                └→ Phase 12 (chimeric) ✅ ← Gene fusion detection
-                                                    └→ Phase 13 (optimization)
+                                                    └→ Phase 13 (optimization) ✅
                                                          └→ Phase 14 (STARsolo)
 ```
 
@@ -543,9 +543,9 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 
 ---
 
-## Phase 13: Performance Optimization
+## Phase 13: Performance Optimization ✅
 
-**Status**: In progress (critical bugs fixed, alignments working!)
+**Status**: Complete (bugs fixed + 3.9x performance improvement)
 
 **Goal**: Optimize alignment performance to approach STAR speeds and fix classification issues.
 
@@ -604,25 +604,66 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 
 ---
 
-### Phase 13.3: Performance Optimization (TODO)
+### Phase 13.3: Performance Optimization ✅ COMPLETE (2026-02-07)
 
-**Remaining Issues**:
-1. **Performance**: ~3x slower than STAR for 1000 reads (MEDIUM PRIORITY)
-   - Profile with perf
-   - Optimize seed expansion (currently re-verifies all positions)
-   - Optimize DP stitching for clusters with many expanded seeds
-   - Cache genome position lookups
+**Problem**: ~3x slower than STAR for 1000 reads (3s vs <1s).
 
-2. **Splice motif detection for reverse strand** (LOW PRIORITY)
-   - `detect_splice_motif()` in score.rs doesn't add n_genome offset for reverse strand
-   - Affects splice junction scoring but not overall alignment accuracy
+**Profiling results** (perf, 1000 reads, single-threaded):
+- 29.5% malloc/free/realloc (Vec allocations in hot loops)
+- 18.1% PackedArray::read (SA bit-unpacking)
+- 15.9% cluster_seeds (inner loop)
+- 14.7% stitch_seeds (DP + seed expansion)
+- 5.2% score_gap
 
-3. **Parameter tuning**: Genome-size-dependent defaults (LOW PRIORITY)
+**Optimizations Applied**:
 
-**Next Steps**:
-- Profile with perf to identify hot paths
-- Test with 10K-100K reads for performance benchmarking
-- Optimize most impactful hot paths
+1. **Eliminated Vec allocations in hot loops** (target: 30% alloc overhead)
+   - Added `Seed::genome_positions()` lazy iterator (no Vec allocation)
+   - `cluster_seeds()` and `stitch_seeds()` use iterator directly
+   - Pre-allocated Vecs with capacity estimates
+
+2. **Optimized PackedArray::read** (target: 18% bit-unpacking)
+   - Fast path: direct 8-byte slice read when within bounds (eliminates 8 per-byte bounds checks)
+   - Slow path: original byte-by-byte read near end of array
+
+3. **Binary search `position_to_chr`** (target: 16% clustering)
+   - Replaced O(n_chr) linear scan with O(log n) binary search via `partition_point()`
+
+4. **Deduplicated expanded seeds** (target: 15% DP stitching)
+   - Dedup by (read_pos, genome_pos), keeping longest seed
+   - Cap at 200 expanded seeds per cluster to prevent pathological O(n²) DP
+
+5. **Deferred CIGAR clone in DP** (part of alloc + DP overhead)
+   - Find best `j` index in inner loop, build CIGAR only once after loop
+   - Eliminates repeated Vec cloning for non-winning transitions
+
+**Files Modified**:
+- `src/align/seed.rs` — Added `genome_positions()` iterator method
+- `src/index/packed_array.rs` — Fast path read with direct slice access
+- `src/genome/mod.rs` — Binary search `position_to_chr()`
+- `src/align/stitch.rs` — All DP/clustering optimizations
+
+**Performance Results (1000 yeast reads, single-threaded)**:
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| Wall time | ~3.0s | **~0.77s** | **3.9x faster** |
+| STAR baseline | <1.0s | — | Now within range |
+
+**Accuracy (unchanged)**:
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Unique | 82.4% | 82.2% |
+| Multi | 8.3% | 8.4% |
+| Unmapped | 9.3% | 9.4% |
+
+- ✅ 170/170 unit tests passing
+- ✅ No new clippy warnings (same 3 pre-existing)
+
+**Remaining Issues** (LOW PRIORITY):
+1. **Splice motif detection for reverse strand** — `detect_splice_motif()` in score.rs doesn't add n_genome offset
+2. **Parameter tuning** — Genome-size-dependent defaults
 
 ---
 

@@ -31,3 +31,5 @@ target
 /test/data/
 /test/threading_test/
 /test/*_test*/
+/test/results/
+/test/debug/

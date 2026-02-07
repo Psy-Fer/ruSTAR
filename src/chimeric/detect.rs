@@ -142,6 +142,11 @@ impl<'a> ChimericDetector<'a> {
         let t1 = &transcripts1[0];
         let t2 = &transcripts2[0];
 
+        // Check that both transcripts have exons
+        if t1.exons.is_empty() || t2.exons.is_empty() {
+            return Ok(None);
+        }
+
         // Determine donor/acceptor based on read position
         let (donor_t, acceptor_t) = if t1.exons[0].read_start < t2.exons[0].read_start {
             (t1, t2)

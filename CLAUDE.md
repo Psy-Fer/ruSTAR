@@ -49,14 +49,24 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 7 (GTF/splice junction annotation)
 - Phase 10 (BAM output - unsorted streaming)
 - Phase 11 (Two-pass mode - novel junction discovery)
-- Phase 12 (Chimeric alignment detection - COMPLETE)
-- Phase 13.1 (Critical performance fix - clustering explosion bug - FIXED)
+- Phase 12 (Chimeric alignment detection)
+- **Phase 13.1 (Critical bugs fixed - ALIGNMENTS NOW WORKING!)** ✅
 
-**Recent Performance Fix** (2026-02-07):
-- Fixed clustering algorithm creating 11,982 clusters for pathological reads (should be ~20-200)
-- Implemented STAR parameters: `seedMultimapNmax`, `winAnchorMultimapNmax`, `seedNoneLociPerWindow`
-- **Result**: 250x+ speedup (100 reads: >60s → 0.23s)
-- See [PERFORMANCE_FIX.md](PERFORMANCE_FIX.md) for details
+**Critical Bugs Fixed** (2026-02-07 session):
+1. **Clustering explosion**: Limited by STAR parameters (winAnchorMultimapNmax=200, seedNoneLociPerWindow=50)
+2. **Missing exons**: Exons were never built from CIGAR (line 354 in stitch.rs had `TODO`)
+3. **Zero match scores**: Seeds started with score=0, preventing stitching
+4. **No soft clips**: Partial alignments didn't add soft clips for uncovered regions
+
+**Current Status**:
+- ✅ 100 reads align in ~5 seconds (vs STAR: <0.1s)
+- ✅ 100% mapped (STAR: 95%)
+- ✅ Valid SAM output with stitched alignments, soft clips, and splice junctions
+- ⚠️ All reads classified as multi-mapped (should be ~88% unique)
+- ⚠️ Still 50x slower than STAR
+- ⚠️ Some pathological reads still create thousands of clusters
+
+See [ALIGNMENT_FIXES.md](ALIGNMENT_FIXES.md) for detailed debugging session
 
 ## Source Layout
 

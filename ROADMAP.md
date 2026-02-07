@@ -545,7 +545,55 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 
 ## Phase 13: Performance Optimization
 
-**Status**: Not started
+**Status**: In progress (critical bugs fixed, alignments working!)
+
+**Goal**: Optimize alignment performance to approach STAR speeds and fix classification issues.
+
+### Phase 13.1: Critical Bug Fixes ✅ COMPLETE (2026-02-07)
+
+**Deliverables**:
+- Fixed clustering explosion (11,982 clusters → ~200 with STAR limits)
+- Implemented exon building from CIGAR (line 354 TODO completed)
+- Added match scoring (+1 per matched base for DP stitching)
+- Implemented soft clip logic for partial alignments
+
+**Test Results**:
+- ✅ 100 reads: 100% mapped in ~5s (was: >60s, 0% mapped)
+- ✅ Valid SAM output with stitched alignments
+- ✅ Soft clips working
+- ✅ 10 splice junctions detected
+- ⚠️ All reads classified as multi-mapped (should be ~88% unique)
+- ⚠️ 50x slower than STAR (5s vs 0.1s for 100 reads)
+
+**Files Modified**:
+- `src/params.rs` - Added seedMultimapNmax, winAnchorMultimapNmax, seedNoneLociPerWindow
+- `src/align/stitch.rs` - Fixed scoring, exon building, soft clips (~200 lines)
+- `src/align/read_align.rs` - Cleaned up debug output
+
+**See**: [ALIGNMENT_FIXES.md](ALIGNMENT_FIXES.md) for detailed debugging session
+
+---
+
+### Phase 13.2: Classification and Performance (TODO)
+
+**Remaining Issues**:
+1. **Unique/multi classification**: All reads marked as multi (HIGH PRIORITY)
+   - Check outFilterMultimapNmax logic
+   - Verify stats.record_alignment() counting
+
+2. **Performance**: 50x slower than STAR (MEDIUM PRIORITY)
+   - Profile with perf
+   - Add cluster quality filtering
+   - Optimize seed position lookups
+   - Some reads still create thousands of clusters
+
+3. **Parameter tuning**: Genome-size-dependent defaults (LOW PRIORITY)
+
+**Next Steps**:
+- Fix unique/multi classification (~30 min)
+- Profile with perf and optimize hotspots (~2-3 hours)
+- Test with 100K reads
+- Compare accuracy metrics with STAR
 
 ---
 

@@ -408,6 +408,7 @@ mod tests {
                 sa_start: 0,
                 sa_end: 0, // Empty range
                 is_reverse: false,
+                mate_id: 2,
             },
             Seed {
                 read_pos: 10,
@@ -415,6 +416,7 @@ mod tests {
                 sa_start: 0,
                 sa_end: 0, // Empty range
                 is_reverse: false,
+                mate_id: 2,
             },
         ];
 

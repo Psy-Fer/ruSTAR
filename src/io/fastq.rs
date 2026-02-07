@@ -18,6 +18,17 @@ pub struct EncodedRead {
     pub quality: Vec<u8>,
 }
 
+/// A paired-end read from two FASTQ files
+#[derive(Debug, Clone)]
+pub struct PairedRead {
+    /// Base read name (without /1 or /2 suffix)
+    pub name: String,
+    /// First mate in pair
+    pub mate1: EncodedRead,
+    /// Second mate in pair
+    pub mate2: EncodedRead,
+}
+
 /// FASTQ reader that handles decompression and base encoding
 pub struct FastqReader {
     inner: fastq::Reader<Box<dyn BufRead + Send>>,
@@ -120,6 +131,125 @@ impl FastqReader {
             }
         }
         Ok(batch)
+    }
+}
+
+/// Paired-end FASTQ reader that reads from two files synchronously
+pub struct PairedFastqReader {
+    reader1: FastqReader,
+    reader2: FastqReader,
+}
+
+impl PairedFastqReader {
+    /// Open two FASTQ files for paired-end reading
+    ///
+    /// # Arguments
+    /// * `path1` - Path to first mate FASTQ file
+    /// * `path2` - Path to second mate FASTQ file
+    /// * `decompress_cmd` - Optional decompression command
+    ///
+    /// # Returns
+    /// A PairedFastqReader that iterates over paired reads with name validation
+    pub fn open(path1: &Path, path2: &Path, decompress_cmd: Option<&str>) -> Result<Self, Error> {
+        let reader1 = FastqReader::open(path1, decompress_cmd)?;
+        let reader2 = FastqReader::open(path2, decompress_cmd)?;
+
+        Ok(Self { reader1, reader2 })
+    }
+
+    /// Get next paired read with name validation
+    ///
+    /// # Returns
+    /// - Ok(Some(PairedRead)) if both mates available and names match
+    /// - Ok(None) if both files are exhausted
+    /// - Err if only one file exhausted or names don't match
+    pub fn next_paired(&mut self) -> Result<Option<PairedRead>, Error> {
+        let read1_opt = self.reader1.next_encoded()?;
+        let read2_opt = self.reader2.next_encoded()?;
+
+        match (read1_opt, read2_opt) {
+            (Some(read1), Some(read2)) => {
+                // Strip mate suffixes for comparison
+                let name1_base = strip_mate_suffix(&read1.name);
+                let name2_base = strip_mate_suffix(&read2.name);
+
+                if name1_base != name2_base {
+                    return Err(Error::from(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "Paired FASTQ read names do not match: '{}' vs '{}'",
+                            read1.name, read2.name
+                        ),
+                    )));
+                }
+
+                Ok(Some(PairedRead {
+                    name: name1_base,
+                    mate1: read1,
+                    mate2: read2,
+                }))
+            }
+            (None, None) => Ok(None),
+            (Some(_), None) => Err(Error::from(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Paired FASTQ files have different lengths: mate1 file has more reads",
+            ))),
+            (None, Some(_)) => Err(Error::from(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Paired FASTQ files have different lengths: mate2 file has more reads",
+            ))),
+        }
+    }
+
+    /// Read a batch of paired reads for parallel processing
+    ///
+    /// # Arguments
+    /// * `batch_size` - Maximum number of pairs to return
+    ///
+    /// # Returns
+    /// Vector of paired reads (may be shorter than batch_size at end of file)
+    pub fn read_paired_batch(&mut self, batch_size: usize) -> Result<Vec<PairedRead>, Error> {
+        let mut batch = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
+            match self.next_paired()? {
+                Some(paired) => batch.push(paired),
+                None => break,
+            }
+        }
+        Ok(batch)
+    }
+}
+
+/// Strip mate suffix from read name for pairing
+///
+/// Removes common paired-end suffixes:
+/// - /1 or /2 (Illumina convention)
+/// - .R1 or .R2 (alternative convention)
+/// - _1 or _2 (another convention)
+/// - space and everything after (e.g., "READ_NAME 1:N:0:0" -> "READ_NAME")
+///
+/// # Arguments
+/// * `name` - Original read name from FASTQ
+///
+/// # Returns
+/// Base name with mate suffix removed
+pub fn strip_mate_suffix(name: &str) -> String {
+    // First, strip space and everything after (Illumina format)
+    let name = if let Some(pos) = name.find(' ') {
+        &name[..pos]
+    } else {
+        name
+    };
+
+    // Strip common mate suffixes
+    if name.ends_with("/1") || name.ends_with("/2") {
+        name[..name.len() - 2].to_string()
+    } else if name.ends_with(".R1") || name.ends_with(".R2") {
+        name[..name.len() - 3].to_string()
+    } else if name.ends_with("_1") || name.ends_with("_2") {
+        name[..name.len() - 2].to_string()
+    } else {
+        name.to_string()
     }
 }
 
@@ -316,5 +446,213 @@ mod tests {
         assert_eq!(read1.name, "read1");
         assert_eq!(read1.sequence, vec![0, 1, 2, 3]); // ACGT
         assert_eq!(read1.quality.len(), 4);
+    }
+
+    #[test]
+    fn test_strip_mate_suffix_slash() {
+        assert_eq!(strip_mate_suffix("read123/1"), "read123");
+        assert_eq!(strip_mate_suffix("read123/2"), "read123");
+    }
+
+    #[test]
+    fn test_strip_mate_suffix_dot() {
+        assert_eq!(strip_mate_suffix("read123.R1"), "read123");
+        assert_eq!(strip_mate_suffix("read123.R2"), "read123");
+    }
+
+    #[test]
+    fn test_strip_mate_suffix_underscore() {
+        assert_eq!(strip_mate_suffix("read123_1"), "read123");
+        assert_eq!(strip_mate_suffix("read123_2"), "read123");
+    }
+
+    #[test]
+    fn test_strip_mate_suffix_with_space() {
+        assert_eq!(strip_mate_suffix("read123 1:N:0:AGCT"), "read123");
+        assert_eq!(strip_mate_suffix("read123/1 1:N:0:AGCT"), "read123");
+    }
+
+    #[test]
+    fn test_strip_mate_suffix_no_suffix() {
+        assert_eq!(strip_mate_suffix("read123"), "read123");
+    }
+
+    #[test]
+    fn test_paired_reader_matching_names() {
+        let mut tmpfile1 = NamedTempFile::new().unwrap();
+        writeln!(tmpfile1, "@read1/1").unwrap();
+        writeln!(tmpfile1, "ACGT").unwrap();
+        writeln!(tmpfile1, "+").unwrap();
+        writeln!(tmpfile1, "IIII").unwrap();
+        writeln!(tmpfile1, "@read2/1").unwrap();
+        writeln!(tmpfile1, "TGCA").unwrap();
+        writeln!(tmpfile1, "+").unwrap();
+        writeln!(tmpfile1, "HHHH").unwrap();
+        tmpfile1.flush().unwrap();
+
+        let mut tmpfile2 = NamedTempFile::new().unwrap();
+        writeln!(tmpfile2, "@read1/2").unwrap();
+        writeln!(tmpfile2, "GGCC").unwrap();
+        writeln!(tmpfile2, "+").unwrap();
+        writeln!(tmpfile2, "JJJJ").unwrap();
+        writeln!(tmpfile2, "@read2/2").unwrap();
+        writeln!(tmpfile2, "AATT").unwrap();
+        writeln!(tmpfile2, "+").unwrap();
+        writeln!(tmpfile2, "KKKK").unwrap();
+        tmpfile2.flush().unwrap();
+
+        let mut reader = PairedFastqReader::open(tmpfile1.path(), tmpfile2.path(), None).unwrap();
+
+        let pair1 = reader.next_paired().unwrap().unwrap();
+        assert_eq!(pair1.name, "read1");
+        assert_eq!(pair1.mate1.name, "read1/1");
+        assert_eq!(pair1.mate1.sequence, vec![0, 1, 2, 3]); // ACGT
+        assert_eq!(pair1.mate2.name, "read1/2");
+        assert_eq!(pair1.mate2.sequence, vec![2, 2, 1, 1]); // GGCC
+
+        let pair2 = reader.next_paired().unwrap().unwrap();
+        assert_eq!(pair2.name, "read2");
+
+        let pair3 = reader.next_paired().unwrap();
+        assert!(pair3.is_none());
+    }
+
+    #[test]
+    fn test_paired_reader_name_mismatch() {
+        let mut tmpfile1 = NamedTempFile::new().unwrap();
+        writeln!(tmpfile1, "@read1/1").unwrap();
+        writeln!(tmpfile1, "ACGT").unwrap();
+        writeln!(tmpfile1, "+").unwrap();
+        writeln!(tmpfile1, "IIII").unwrap();
+        tmpfile1.flush().unwrap();
+
+        let mut tmpfile2 = NamedTempFile::new().unwrap();
+        writeln!(tmpfile2, "@read2/2").unwrap();
+        writeln!(tmpfile2, "GGCC").unwrap();
+        writeln!(tmpfile2, "+").unwrap();
+        writeln!(tmpfile2, "JJJJ").unwrap();
+        tmpfile2.flush().unwrap();
+
+        let mut reader = PairedFastqReader::open(tmpfile1.path(), tmpfile2.path(), None).unwrap();
+
+        let result = reader.next_paired();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("read names do not match")
+        );
+    }
+
+    #[test]
+    fn test_paired_reader_length_mismatch_mate1_longer() {
+        let mut tmpfile1 = NamedTempFile::new().unwrap();
+        writeln!(tmpfile1, "@read1/1").unwrap();
+        writeln!(tmpfile1, "ACGT").unwrap();
+        writeln!(tmpfile1, "+").unwrap();
+        writeln!(tmpfile1, "IIII").unwrap();
+        writeln!(tmpfile1, "@read2/1").unwrap();
+        writeln!(tmpfile1, "TGCA").unwrap();
+        writeln!(tmpfile1, "+").unwrap();
+        writeln!(tmpfile1, "HHHH").unwrap();
+        tmpfile1.flush().unwrap();
+
+        let mut tmpfile2 = NamedTempFile::new().unwrap();
+        writeln!(tmpfile2, "@read1/2").unwrap();
+        writeln!(tmpfile2, "GGCC").unwrap();
+        writeln!(tmpfile2, "+").unwrap();
+        writeln!(tmpfile2, "JJJJ").unwrap();
+        tmpfile2.flush().unwrap();
+
+        let mut reader = PairedFastqReader::open(tmpfile1.path(), tmpfile2.path(), None).unwrap();
+
+        // First pair succeeds
+        let _ = reader.next_paired().unwrap().unwrap();
+
+        // Second pair fails (mate1 has read but mate2 doesn't)
+        let result = reader.next_paired();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("different lengths")
+        );
+    }
+
+    #[test]
+    fn test_paired_reader_length_mismatch_mate2_longer() {
+        let mut tmpfile1 = NamedTempFile::new().unwrap();
+        writeln!(tmpfile1, "@read1/1").unwrap();
+        writeln!(tmpfile1, "ACGT").unwrap();
+        writeln!(tmpfile1, "+").unwrap();
+        writeln!(tmpfile1, "IIII").unwrap();
+        tmpfile1.flush().unwrap();
+
+        let mut tmpfile2 = NamedTempFile::new().unwrap();
+        writeln!(tmpfile2, "@read1/2").unwrap();
+        writeln!(tmpfile2, "GGCC").unwrap();
+        writeln!(tmpfile2, "+").unwrap();
+        writeln!(tmpfile2, "JJJJ").unwrap();
+        writeln!(tmpfile2, "@read2/2").unwrap();
+        writeln!(tmpfile2, "AATT").unwrap();
+        writeln!(tmpfile2, "+").unwrap();
+        writeln!(tmpfile2, "KKKK").unwrap();
+        tmpfile2.flush().unwrap();
+
+        let mut reader = PairedFastqReader::open(tmpfile1.path(), tmpfile2.path(), None).unwrap();
+
+        // First pair succeeds
+        let _ = reader.next_paired().unwrap().unwrap();
+
+        // Second pair fails (mate2 has read but mate1 doesn't)
+        let result = reader.next_paired();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("different lengths")
+        );
+    }
+
+    #[test]
+    fn test_paired_batch_reading() {
+        let mut tmpfile1 = NamedTempFile::new().unwrap();
+        for i in 1..=5 {
+            writeln!(tmpfile1, "@read{}/1", i).unwrap();
+            writeln!(tmpfile1, "ACGT").unwrap();
+            writeln!(tmpfile1, "+").unwrap();
+            writeln!(tmpfile1, "IIII").unwrap();
+        }
+        tmpfile1.flush().unwrap();
+
+        let mut tmpfile2 = NamedTempFile::new().unwrap();
+        for i in 1..=5 {
+            writeln!(tmpfile2, "@read{}/2", i).unwrap();
+            writeln!(tmpfile2, "GGCC").unwrap();
+            writeln!(tmpfile2, "+").unwrap();
+            writeln!(tmpfile2, "JJJJ").unwrap();
+        }
+        tmpfile2.flush().unwrap();
+
+        let mut reader = PairedFastqReader::open(tmpfile1.path(), tmpfile2.path(), None).unwrap();
+
+        // Read batch of 3
+        let batch1 = reader.read_paired_batch(3).unwrap();
+        assert_eq!(batch1.len(), 3);
+        assert_eq!(batch1[0].name, "read1");
+        assert_eq!(batch1[2].name, "read3");
+
+        // Read remaining batch (should be 2)
+        let batch2 = reader.read_paired_batch(3).unwrap();
+        assert_eq!(batch2.len(), 2);
+        assert_eq!(batch2[0].name, "read4");
+        assert_eq!(batch2[1].name, "read5");
+
+        // EOF batch
+        let batch3 = reader.read_paired_batch(3).unwrap();
+        assert_eq!(batch3.len(), 0);
     }
 }

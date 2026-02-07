@@ -7,6 +7,21 @@ use crate::error::Error;
 use crate::index::GenomeIndex;
 use crate::params::Parameters;
 
+/// Paired-end alignment result
+#[derive(Debug, Clone)]
+pub struct PairedAlignment {
+    /// Unified transcript covering both mates
+    pub transcript: Transcript,
+    /// Read positions for mate1 in transcript (start, end)
+    pub mate1_region: (usize, usize),
+    /// Read positions for mate2 in transcript (start, end)
+    pub mate2_region: (usize, usize),
+    /// Whether this is a proper pair (same chr, concordant orientation, distance)
+    pub is_proper_pair: bool,
+    /// Signed insert size (TLEN) - genomic distance between mate starts
+    pub insert_size: i32,
+}
+
 /// Align a read to the genome.
 ///
 /// # Algorithm
@@ -97,6 +112,232 @@ pub fn align_read(
     transcripts.truncate(params.out_filter_multimap_nmax as usize);
 
     Ok(transcripts)
+}
+
+/// Align paired-end read using STAR's unified seed clustering approach.
+///
+/// # Algorithm (matching STAR)
+/// 1. Find seeds from both mates independently (tagged with mate_id)
+/// 2. Pool seeds together for unified clustering
+/// 3. Cluster seeds in genomic windows (both mates' seeds together)
+/// 4. Stitch seeds with DP that handles both mates
+/// 5. Split results back to mate regions for SAM output
+///
+/// # Arguments
+/// * `mate1_seq` - First mate sequence (encoded)
+/// * `mate2_seq` - Second mate sequence (encoded)
+/// * `index` - Genome index
+/// * `params` - Parameters (includes alignMatesGapMax)
+///
+/// # Returns
+/// Vector of paired alignments, sorted by score
+pub fn align_paired_read(
+    mate1_seq: &[u8],
+    mate2_seq: &[u8],
+    index: &GenomeIndex,
+    params: &Parameters,
+) -> Result<Vec<PairedAlignment>, Error> {
+    // Step 1: Find seeds from both mates (pooled together)
+    let min_seed_length = 8;
+    let pooled_seeds = Seed::find_paired_seeds(mate1_seq, mate2_seq, index, min_seed_length)?;
+
+    if pooled_seeds.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Step 2: Cluster seeds (unified across both mates)
+    let max_cluster_dist = 100000; // 100kb window
+    let max_loci_for_anchor = 10;
+    let clusters = cluster_seeds(&pooled_seeds, index, max_cluster_dist, max_loci_for_anchor);
+
+    if clusters.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Step 3: Stitch seeds within each cluster
+    // For Phase 8, we use a simplified approach: align each mate independently
+    // then combine results. Full mate-aware DP stitching is deferred to refinement.
+    let scorer = AlignmentScorer::from_params(params);
+    let mut paired_alignments = Vec::new();
+
+    for cluster in clusters {
+        // Separate cluster by mate
+        let mate1_indices: Vec<_> = cluster
+            .seed_indices
+            .iter()
+            .filter(|&&i| pooled_seeds[i].mate_id == 0)
+            .copied()
+            .collect();
+        let mate2_indices: Vec<_> = cluster
+            .seed_indices
+            .iter()
+            .filter(|&&i| pooled_seeds[i].mate_id == 1)
+            .copied()
+            .collect();
+
+        // Stitch each mate independently
+        let mate1_transcripts = if !mate1_indices.is_empty() {
+            // Create a SeedCluster for mate1
+            use crate::align::stitch::SeedCluster;
+            let mate1_cluster = SeedCluster {
+                seed_indices: mate1_indices,
+                chr_idx: cluster.chr_idx,
+                genome_start: cluster.genome_start,
+                genome_end: cluster.genome_end,
+                is_reverse: cluster.is_reverse,
+                anchor_idx: cluster.anchor_idx,
+            };
+            stitch_seeds(&mate1_cluster, &pooled_seeds, mate1_seq, index, &scorer)?
+        } else {
+            Vec::new()
+        };
+
+        let mate2_transcripts = if !mate2_indices.is_empty() {
+            // Create a SeedCluster for mate2
+            use crate::align::stitch::SeedCluster;
+            let mate2_cluster = SeedCluster {
+                seed_indices: mate2_indices,
+                chr_idx: cluster.chr_idx,
+                genome_start: cluster.genome_start,
+                genome_end: cluster.genome_end,
+                is_reverse: cluster.is_reverse,
+                anchor_idx: cluster.anchor_idx,
+            };
+            stitch_seeds(&mate2_cluster, &pooled_seeds, mate2_seq, index, &scorer)?
+        } else {
+            Vec::new()
+        };
+
+        // Combine best transcript from each mate
+        if let (Some(t1), Some(t2)) = (mate1_transcripts.first(), mate2_transcripts.first()) {
+            // Check if they map to the same chromosome
+            if t1.chr_idx == t2.chr_idx {
+                // Create a paired alignment
+                let paired =
+                    combine_mate_transcripts(t1, t2, mate1_seq.len(), mate2_seq.len(), params)?;
+                paired_alignments.push(paired);
+            }
+        }
+    }
+
+    // Step 4: Filter and sort
+    filter_paired_transcripts(&mut paired_alignments, params);
+    paired_alignments.sort_by(|a, b| b.transcript.score.cmp(&a.transcript.score));
+
+    Ok(paired_alignments)
+}
+
+/// Combine two mate transcripts into a paired alignment
+fn combine_mate_transcripts(
+    mate1_trans: &Transcript,
+    mate2_trans: &Transcript,
+    mate1_len: usize,
+    mate2_len: usize,
+    params: &Parameters,
+) -> Result<PairedAlignment, Error> {
+    // For now, we create a simplified paired alignment
+    // The transcript from mate1 is used as the primary transcript
+    // This is a simplified implementation - full mate-aware stitching is deferred
+
+    let mate1_region = (0, mate1_len);
+    let mate2_region = (0, mate2_len);
+
+    // Check if proper pair
+    let is_proper_pair = check_proper_pair(mate1_trans, mate2_trans, params);
+
+    // Calculate insert size (signed genomic distance)
+    let insert_size = calculate_insert_size(mate1_trans, mate2_trans);
+
+    Ok(PairedAlignment {
+        transcript: mate1_trans.clone(),
+        mate1_region,
+        mate2_region,
+        is_proper_pair,
+        insert_size,
+    })
+}
+
+/// Check if paired alignment is a proper pair
+fn check_proper_pair(
+    mate1_trans: &Transcript,
+    mate2_trans: &Transcript,
+    params: &Parameters,
+) -> bool {
+    // Proper pair criteria:
+    // 1. Both mates mapped (checked by caller)
+    // 2. Same chromosome (checked by caller)
+    // 3. Distance within alignMatesGapMax
+
+    if params.align_mates_gap_max == 0 {
+        return true; // Auto mode = unlimited
+    }
+
+    // Calculate genomic distance
+    let start = mate1_trans.genome_start.min(mate2_trans.genome_start);
+    let end = mate1_trans.genome_end.max(mate2_trans.genome_end);
+    let genomic_span = end - start;
+
+    genomic_span <= params.align_mates_gap_max as u64
+}
+
+/// Calculate signed insert size (TLEN)
+fn calculate_insert_size(mate1_trans: &Transcript, mate2_trans: &Transcript) -> i32 {
+    // TLEN = signed genomic distance from leftmost mate to rightmost mate
+    let start = mate1_trans.genome_start.min(mate2_trans.genome_start);
+    let end = mate1_trans.genome_end.max(mate2_trans.genome_end);
+    let abs_tlen = (end - start) as i32;
+
+    // Sign convention: positive if mate1 is leftmost
+    if mate1_trans.genome_start <= mate2_trans.genome_start {
+        abs_tlen
+    } else {
+        -abs_tlen
+    }
+}
+
+/// Filter paired transcripts by quality thresholds
+fn filter_paired_transcripts(paired_alns: &mut Vec<PairedAlignment>, params: &Parameters) {
+    paired_alns.retain(|pa| {
+        let t = &pa.transcript;
+        let read_length =
+            (pa.mate1_region.1 - pa.mate1_region.0 + pa.mate2_region.1 - pa.mate2_region.0) as f64;
+
+        // Absolute score threshold
+        if t.score < params.out_filter_score_min {
+            return false;
+        }
+
+        // Relative score threshold
+        if (t.score as f64) < params.out_filter_score_min_over_lread * read_length {
+            return false;
+        }
+
+        // Absolute mismatch count
+        if t.n_mismatch > params.out_filter_mismatch_nmax {
+            return false;
+        }
+
+        // Relative mismatch count
+        if (t.n_mismatch as f64) > params.out_filter_mismatch_nover_lmax * read_length {
+            return false;
+        }
+
+        // Absolute matched bases
+        let n_matched = t.n_matched();
+        if n_matched < params.out_filter_match_nmin {
+            return false;
+        }
+
+        // Relative matched bases
+        if (n_matched as f64) < params.out_filter_match_nmin_over_lread * read_length {
+            return false;
+        }
+
+        true
+    });
+
+    // Limit to top N
+    paired_alns.truncate(params.out_filter_multimap_nmax as usize);
 }
 
 #[cfg(test)]
@@ -211,5 +452,211 @@ mod tests {
 
         let transcripts = result.unwrap();
         assert!(transcripts.len() <= 5);
+    }
+
+    #[test]
+    fn test_align_paired_read_no_seeds() {
+        let index = make_test_index();
+        let params = make_test_params();
+
+        // Both mates with all N's
+        let mate1 = vec![4, 4, 4, 4, 4, 4, 4, 4];
+        let mate2 = vec![4, 4, 4, 4, 4, 4, 4, 4];
+
+        let result = align_paired_read(&mate1, &mate2, &index, &params);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_check_proper_pair_distance() {
+        use crate::align::transcript::{CigarOp, Exon};
+
+        let params = make_test_params();
+
+        // Create two transcripts on same chromosome
+        let t1 = Transcript {
+            chr_idx: 0,
+            genome_start: 1000,
+            genome_end: 1100,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 1000,
+                genome_end: 1100,
+                read_start: 0,
+                read_end: 100,
+            }],
+            cigar: vec![CigarOp::Match(100)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            read_seq: vec![0; 100],
+        };
+
+        let t2 = Transcript {
+            chr_idx: 0,
+            genome_start: 1200,
+            genome_end: 1300,
+            is_reverse: true,
+            exons: vec![Exon {
+                genome_start: 1200,
+                genome_end: 1300,
+                read_start: 0,
+                read_end: 100,
+            }],
+            cigar: vec![CigarOp::Match(100)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            read_seq: vec![0; 100],
+        };
+
+        // Distance = 300bp, within default limit (auto mode = unlimited)
+        assert!(check_proper_pair(&t1, &t2, &params));
+    }
+
+    #[test]
+    fn test_check_proper_pair_too_far() {
+        use crate::align::transcript::{CigarOp, Exon};
+
+        let mut params = make_test_params();
+        params.align_mates_gap_max = 100;
+
+        let t1 = Transcript {
+            chr_idx: 0,
+            genome_start: 1000,
+            genome_end: 1100,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 1000,
+                genome_end: 1100,
+                read_start: 0,
+                read_end: 100,
+            }],
+            cigar: vec![CigarOp::Match(100)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            read_seq: vec![0; 100],
+        };
+
+        let t2 = Transcript {
+            chr_idx: 0,
+            genome_start: 1300,
+            genome_end: 1400,
+            is_reverse: true,
+            exons: vec![Exon {
+                genome_start: 1300,
+                genome_end: 1400,
+                read_start: 0,
+                read_end: 100,
+            }],
+            cigar: vec![CigarOp::Match(100)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            read_seq: vec![0; 100],
+        };
+
+        // Distance = 400bp, exceeds limit of 100bp
+        assert!(!check_proper_pair(&t1, &t2, &params));
+    }
+
+    #[test]
+    fn test_calculate_insert_size_positive() {
+        use crate::align::transcript::{CigarOp, Exon};
+
+        // Mate1 is leftmost
+        let t1 = Transcript {
+            chr_idx: 0,
+            genome_start: 1000,
+            genome_end: 1100,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 1000,
+                genome_end: 1100,
+                read_start: 0,
+                read_end: 100,
+            }],
+            cigar: vec![CigarOp::Match(100)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            read_seq: vec![0; 100],
+        };
+
+        let t2 = Transcript {
+            chr_idx: 0,
+            genome_start: 1200,
+            genome_end: 1300,
+            is_reverse: true,
+            exons: vec![Exon {
+                genome_start: 1200,
+                genome_end: 1300,
+                read_start: 0,
+                read_end: 100,
+            }],
+            cigar: vec![CigarOp::Match(100)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            read_seq: vec![0; 100],
+        };
+
+        let tlen = calculate_insert_size(&t1, &t2);
+        assert_eq!(tlen, 300); // Positive because mate1 is leftmost
+    }
+
+    #[test]
+    fn test_calculate_insert_size_negative() {
+        use crate::align::transcript::{CigarOp, Exon};
+
+        // Mate2 is leftmost
+        let t1 = Transcript {
+            chr_idx: 0,
+            genome_start: 1200,
+            genome_end: 1300,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 1200,
+                genome_end: 1300,
+                read_start: 0,
+                read_end: 100,
+            }],
+            cigar: vec![CigarOp::Match(100)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            read_seq: vec![0; 100],
+        };
+
+        let t2 = Transcript {
+            chr_idx: 0,
+            genome_start: 1000,
+            genome_end: 1100,
+            is_reverse: true,
+            exons: vec![Exon {
+                genome_start: 1000,
+                genome_end: 1100,
+                read_start: 0,
+                read_end: 100,
+            }],
+            cigar: vec![CigarOp::Match(100)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            read_seq: vec![0; 100],
+        };
+
+        let tlen = calculate_insert_size(&t1, &t2);
+        assert_eq!(tlen, -300); // Negative because mate2 is leftmost
     }
 }

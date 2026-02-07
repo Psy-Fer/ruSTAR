@@ -16,6 +16,10 @@ pub struct Seed {
 
     /// Whether this seed is on the reverse strand of the read
     pub is_reverse: bool,
+
+    /// Mate identifier for paired-end reads
+    /// 0 = mate1, 1 = mate2, 2 = single-end (default)
+    pub mate_id: u8,
 }
 
 impl Seed {
@@ -46,6 +50,45 @@ impl Seed {
                 seeds.push(seed);
             }
         }
+
+        Ok(seeds)
+    }
+
+    /// Find all seeds for paired-end reads using unified seed pooling.
+    ///
+    /// This implements STAR's hybrid approach: seeds from both mates are found
+    /// independently, tagged with their mate origin, then pooled together for
+    /// unified clustering.
+    ///
+    /// # Arguments
+    /// * `mate1_seq` - First mate sequence (encoded)
+    /// * `mate2_seq` - Second mate sequence (encoded)
+    /// * `index` - Genome index with SA and SAindex
+    /// * `min_seed_length` - Minimum seed length to report
+    ///
+    /// # Returns
+    /// Vector of seeds from both mates, tagged with mate_id (0 or 1)
+    pub fn find_paired_seeds(
+        mate1_seq: &[u8],
+        mate2_seq: &[u8],
+        index: &GenomeIndex,
+        min_seed_length: usize,
+    ) -> Result<Vec<Seed>, Error> {
+        // Find seeds from mate1 (tag with mate_id = 0)
+        let mut seeds = Self::find_seeds(mate1_seq, index, min_seed_length)?;
+        for seed in &mut seeds {
+            seed.mate_id = 0;
+        }
+
+        // Find seeds from mate2 (tag with mate_id = 1)
+        // IMPORTANT: read_pos is relative to mate2 start (will be adjusted during stitching)
+        let mut seeds2 = Self::find_seeds(mate2_seq, index, min_seed_length)?;
+        for seed in &mut seeds2 {
+            seed.mate_id = 1;
+        }
+
+        // Pool seeds together
+        seeds.extend(seeds2);
 
         Ok(seeds)
     }
@@ -129,6 +172,7 @@ fn find_seed_at_position(
             sa_start,
             sa_end,
             is_reverse,
+            mate_id: 2, // Single-end default
         }))
     } else {
         Ok(None)
@@ -366,5 +410,62 @@ mod tests {
         for (pos, _is_reverse) in positions {
             assert!(pos < index.genome.n_genome);
         }
+    }
+
+    #[test]
+    fn test_single_end_mate_id() {
+        let index = make_test_index("ACGTACGT");
+        let read = encode_sequence("ACGT");
+
+        let seeds = Seed::find_seeds(&read, &index, 4).unwrap();
+        assert!(!seeds.is_empty());
+
+        // Single-end seeds should have mate_id = 2
+        for seed in seeds {
+            assert_eq!(seed.mate_id, 2);
+        }
+    }
+
+    #[test]
+    fn test_find_paired_seeds() {
+        let index = make_test_index("ACGTACGTTTGGCCAA");
+        let mate1 = encode_sequence("ACGT");
+        let mate2 = encode_sequence("TTGG");
+
+        let seeds = Seed::find_paired_seeds(&mate1, &mate2, &index, 4).unwrap();
+
+        // Should have seeds from both mates
+        let mate1_seeds: Vec<_> = seeds.iter().filter(|s| s.mate_id == 0).collect();
+        let mate2_seeds: Vec<_> = seeds.iter().filter(|s| s.mate_id == 1).collect();
+
+        assert!(!mate1_seeds.is_empty(), "Should have mate1 seeds");
+        assert!(!mate2_seeds.is_empty(), "Should have mate2 seeds");
+
+        // Verify mate1 seeds have correct read positions
+        for seed in mate1_seeds {
+            assert!(seed.read_pos < mate1.len());
+        }
+
+        // Verify mate2 seeds have correct read positions (relative to mate2)
+        for seed in mate2_seeds {
+            assert!(seed.read_pos < mate2.len());
+        }
+    }
+
+    #[test]
+    fn test_paired_seeds_pooling() {
+        let index = make_test_index("ACGTACGT");
+        let mate1 = encode_sequence("ACGT");
+        let mate2 = encode_sequence("ACGT");
+
+        let seeds = Seed::find_paired_seeds(&mate1, &mate2, &index, 4).unwrap();
+
+        // Should have roughly double the seeds (one set from each mate)
+        let mate1_count = seeds.iter().filter(|s| s.mate_id == 0).count();
+        let mate2_count = seeds.iter().filter(|s| s.mate_id == 1).count();
+
+        assert!(mate1_count > 0);
+        assert!(mate2_count > 0);
+        assert_eq!(seeds.len(), mate1_count + mate2_count);
     }
 }

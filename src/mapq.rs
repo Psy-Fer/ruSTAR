@@ -4,7 +4,7 @@
 /// - Unique mappers (n=1): use outSAMmapqUnique (default 255)
 /// - Multi-mappers (n>1): -10*log10(1 - 1/n), capped at 255
 /// - Unmapped (n=0): 0
-
+///
 /// Calculate MAPQ score based on number of alignments
 ///
 /// # Arguments

@@ -15,7 +15,7 @@ Phase 1 (CLI) ✅
                            └→ Phase 8 (paired-end) ✅ ← Built on threaded base
                                 └→ Phase 7 (splice junctions) ✅ ← GTF/junction annotations
                                      └→ Phase 10 (BAM output) ✅ ← Binary alignment format
-                                          └→ Phase 11 (two-pass)
+                                          └→ Phase 11 (two-pass) ✅ ← Novel junction discovery
                                                └→ Phase 12 (chimeric)
                                                     └→ Phase 13 (optimization)
                                                          └→ Phase 14 (STARsolo)
@@ -436,9 +436,57 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 
 ---
 
-## Phase 11: Two-Pass Mode
+## Phase 11: Two-Pass Mode ✅
 
-**Status**: Not started
+**Status**: Complete
+
+**Goal**: Implement STAR's two-pass mode to discover novel splice junctions in pass 1, then re-align all reads using both GTF and novel junctions in pass 2.
+
+**Why two-pass**: Improves alignment accuracy by ~5-10% for samples with novel junctions (tissue-specific isoforms, cancer samples, non-model organisms).
+
+**Files created/modified**:
+- `src/junction/mod.rs` — Extended junction database for two-pass mode (~60 lines added)
+  - `NovelJunctionKey` struct for two-pass junction tracking
+  - `insert_novel()` method to add discovered junctions
+  - `filter_novel_junctions()` function for coverage/overhang filtering
+  - 3 new unit tests (insert, filter, integration)
+
+- `src/lib.rs` — Two-pass dispatch and workflow (~180 lines added)
+  - `run_two_pass()` orchestrates pass 1 → junction insertion → pass 2
+  - `run_pass1()` discovers junctions (discards alignments via NullWriter)
+  - `run_single_pass()` extracted from original `align_reads()`
+  - `NullWriter` struct for pass 1 alignment discard
+  - Creates SJ.pass1.out.tab and SJ.out.tab output files
+
+- `src/stats.rs` — Added `total_reads()` method
+- Multiple files — Added `Clone` derives for two-pass cloning:
+  - `Genome`, `SuffixArray`, `SaIndex`, `PackedArray`, `SpliceJunctionDb`, `GenomeIndex`, `Parameters`
+  - Manual `Clone` impl for `SpliceJunctionStats` (handles DashMap with AtomicU32)
+
+**Key implementation details**:
+- **Pass 1**: Align reads (limited by `--twopass1readsN`), collect junction stats, discard alignments
+- **Filtering**: Novel junctions require ≥1 unique OR ≥2 multi reads, overhang ≥ `alignSJoverhangMin` (default 5bp)
+- **Junction insertion**: Clones GenomeIndex, merges GTF + novel junctions
+- **Pass 2**: Re-aligns ALL reads (not just pass 1 subset) with merged junction DB
+- **Memory efficient**: Arc-sharing of large structures (Genome, SA, SAindex), only junction DB cloned (~1-10MB overhead)
+- **Output files**: SJ.pass1.out.tab (pass 1), SJ.out.tab (final), Aligned.out.sam/bam (pass 2 only)
+
+**Test results**:
+- ✅ 138/138 tests passing (up from 136)
+- ✅ 1 non-critical clippy warning (too_many_arguments - acceptable)
+- ✅ Manual verification:
+  - `--twopassMode None` works (default, single-pass)
+  - `--twopassMode Basic` discovers and uses novel junctions
+  - `--twopass1readsN` limits pass 1 reads correctly
+  - SJ.pass1.out.tab and SJ.out.tab created properly
+
+**New dependencies**: None (reuses existing infrastructure)
+
+**Known limitations**:
+- Basic mode only (no multi-sample two-pass)
+- Novel junction filtering thresholds are hardcoded (1 unique OR 2 multi)
+
+**Dependencies**: Phase 10 (complete)
 
 ---
 

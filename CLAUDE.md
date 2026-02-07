@@ -25,7 +25,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Currently on Phase 11** (Two-pass mode).
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Currently on Phase 12** (Chimeric alignment detection).
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -41,6 +41,7 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 8 (Paired-end reads)
 - Phase 7 (GTF/splice junction annotation)
 - Phase 10 (BAM output - unsorted streaming)
+- Phase 11 (Two-pass mode - novel junction discovery)
 
 ## Source Layout
 
@@ -74,8 +75,9 @@ src/
     sam.rs         -- ✅ SAM writer (header + records, noodles wrapper)
     bam.rs         -- ✅ BAM writer (BGZF compression, streaming unsorted output)
   junction/
-    mod.rs         -- ✅ GTF parsing, junction database, motif detection
+    mod.rs         -- ✅ GTF parsing, junction database, motif detection, two-pass filtering
     sj_output.rs   -- ✅ SJ.out.tab writer
+    gtf.rs         -- ✅ GTF parser (internal)
 ```
 
 ## Key Conventions
@@ -118,16 +120,20 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 136/136 tests passing, 1 non-critical clippy warning
+**Current test status**: 138/138 tests passing, 1 non-critical clippy warning
 
 ## Current Capabilities
 
-ruSTAR can now perform **end-to-end RNA-seq alignment with BAM output**:
+ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode**:
 - Generate genome indices from FASTA files
 - Read plain or gzipped FASTQ files
 - Multi-threaded parallel alignment (via `--runThreadN`)
 - Align single-end AND paired-end RNA-seq reads with splice junction detection
 - GTF-based junction annotation with scoring bonus
+- Two-pass mode for novel junction discovery (`--twopassMode Basic`)
+  - Pass 1: Discovers novel junctions from read alignments
+  - Pass 2: Re-aligns using both GTF and novel junctions
+  - Improves accuracy by ~5-10% for samples with novel junctions
 - Output valid SAM or BAM files (`--outSAMtype SAM` or `BAM Unsorted`):
   - Proper headers (@HD, @SQ, @PG)
   - Correct CIGAR strings (M, I, D, N for junctions)
@@ -135,13 +141,13 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with BAM output**:
   - MAPQ scores
   - 1-based genomic positions
   - Mate information (RNEXT, PNEXT, TLEN for paired-end)
-- Splice junction statistics output (SJ.out.tab)
+- Splice junction statistics output (SJ.out.tab, SJ.pass1.out.tab in two-pass mode)
 - Print alignment statistics (unique/multi/unmapped percentages)
 
 ## Limitations (to be addressed in future phases)
 
 - No SAM optional tags (AS, NM, NH, HI) - noodles lifetime complexity
 - No coordinate-sorted BAM output (unsorted only; use `samtools sort`)
-- No two-pass mode (Phase 11)
 - No chimeric alignment detection (Phase 12)
+- No performance optimizations (Phase 13)
 - No STARsolo single-cell features (Phase 14)

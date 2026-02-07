@@ -492,7 +492,57 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 
 ## Phase 12: Chimeric Detection
 
-**Status**: Not started
+**Status**: Phase 12.1 Partial (Core infrastructure complete, output integration pending)
+
+**Goal**: Detect and report chimeric alignments (gene fusions, circular RNAs, structural variants).
+
+**Phase 12.1 Deliverables** (Completed):
+- `src/chimeric/mod.rs` — Module exports and type definitions
+- `src/chimeric/segment.rs` — `ChimericSegment` and `ChimericAlignment` data structures (110 lines)
+- `src/chimeric/score.rs` — Junction type classification, repeat length calculation (185 lines, 8 tests)
+- `src/chimeric/detect.rs` — Chimeric detection algorithms (360 lines, 8 tests):
+  - Tier 1: Soft-clip detection (detects excessive soft-clipping)
+  - Tier 2: Multi-cluster detection (inter-chromosomal, strand breaks, large distances)
+- `src/chimeric/output.rs` — `ChimericJunctionWriter` for 14-column output format (245 lines, 4 tests)
+- `src/align/read_align.rs` — Modified `align_read()` signature to return chimeric alignments
+- `src/align/transcript.rs` — Added `count_soft_clips()` method
+- `src/error.rs` — Added `Chimeric` error variant
+
+**Key features**:
+- Detection triggers:
+  - Soft-clip >20% of read AND ≥ chimSegmentMin bases (Tier 1)
+  - Seeds on different chromosomes (Tier 2)
+  - Seeds on different strands, same chromosome (Tier 2)
+  - Seeds >1Mb apart, same chr/strand (Tier 2)
+- Junction type classification: 0-6 (GT/AG, CT/AC, GC/AG, CT/GC, AT/AC, GT/AT, non-canonical)
+- Repeat length calculation at junction sites
+- 14-column Chimeric.out.junction format matching STAR
+
+**Tests**: 32 new tests added (20 unit tests + 12 in segment/output modules)
+- All 170 tests passing
+- 4 non-critical clippy warnings (acceptable)
+
+**Known limitations** (Phase 12.2 work):
+- ❌ Chimeric alignments detected but NOT written to file in end-to-end pipeline
+- ❌ Output writer exists but not integrated with parallel processing
+- ❌ Tier 3 (re-mapping soft-clipped regions) not implemented
+- ❌ Paired-end chimeric detection not implemented
+- To complete: Refactor `align_reads_single_end()` to collect and write chimeric alignments
+
+**Files modified**:
+- `src/lib.rs` — Updated `align_read()` call, added chimeric result handling (currently discarded)
+- `src/align/mod.rs` — Re-exported commonly used types
+- Total new code: ~900 lines
+- Total modified code: ~95 lines
+
+**Verified**: `cargo test` (170/170 pass), `cargo clippy` (4 non-critical warnings), `cargo fmt --check` (pass)
+
+**Next steps** (Phase 12.2):
+1. Refactor parallel processing in `align_reads_single_end()` to collect chimeric alignments
+2. Create `ChimericJunctionWriter` at start of alignment run
+3. Write chimeric alignments to file after each batch
+4. Add integration tests with synthetic fusion reads
+5. Implement Tier 3: re-mapping soft-clipped regions
 
 ---
 

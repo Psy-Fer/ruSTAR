@@ -42,6 +42,7 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 7 (GTF/splice junction annotation)
 - Phase 10 (BAM output - unsorted streaming)
 - Phase 11 (Two-pass mode - novel junction discovery)
+- Phase 12.1 (Chimeric alignment detection - Tier 1 & 2, partial)
 
 ## Source Layout
 
@@ -78,6 +79,12 @@ src/
     mod.rs         -- ✅ GTF parsing, junction database, motif detection, two-pass filtering
     sj_output.rs   -- ✅ SJ.out.tab writer
     gtf.rs         -- ✅ GTF parser (internal)
+  chimeric/
+    mod.rs         -- ✅ Module exports
+    detect.rs      -- ✅ Chimeric detection algorithms (Tier 1: soft-clip, Tier 2: multi-cluster)
+    segment.rs     -- ✅ ChimericSegment and ChimericAlignment data structures
+    score.rs       -- ✅ Junction type classification, repeat length calculation
+    output.rs      -- ✅ Chimeric.out.junction writer (14-column format)
 ```
 
 ## Key Conventions
@@ -120,7 +127,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 138/138 tests passing, 1 non-critical clippy warning
+**Current test status**: 170/170 tests passing, 4 non-critical clippy warnings (too_many_arguments × 3, manual_arithmetic_check × 1)
 
 ## Current Capabilities
 
@@ -148,6 +155,12 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode**:
 
 - No SAM optional tags (AS, NM, NH, HI) - noodles lifetime complexity
 - No coordinate-sorted BAM output (unsorted only; use `samtools sort`)
-- No chimeric alignment detection (Phase 12)
+- Chimeric alignment detection partially implemented (Phase 12.1):
+  - ✅ Core detection infrastructure (Tier 1 & 2 algorithms)
+  - ✅ Data structures (ChimericSegment, ChimericAlignment)
+  - ✅ Junction type classification and repeat length calculation
+  - ❌ NOT YET CONNECTED to output writer (chimeric alignments detected but discarded)
+  - ❌ Chimeric.out.junction file NOT created in end-to-end pipeline
+  - To complete: Refactor parallel processing to collect and write chimeric alignments
 - No performance optimizations (Phase 13)
 - No STARsolo single-cell features (Phase 14)

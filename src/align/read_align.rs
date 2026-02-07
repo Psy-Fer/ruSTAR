@@ -30,26 +30,29 @@ pub struct PairedAlignment {
 /// 3. Stitch seeds within each cluster using DP
 /// 4. Filter transcripts by quality thresholds
 /// 5. Sort by score and limit to top N
+/// 6. Detect chimeric alignments if enabled
 ///
 /// # Arguments
 /// * `read_seq` - Read sequence (encoded as 0=A, 1=C, 2=G, 3=T)
+/// * `read_name` - Read name (needed for chimeric output)
 /// * `index` - Genome index
 /// * `params` - User parameters
 ///
 /// # Returns
-/// Vector of transcripts (alignments), sorted by score (best first)
+/// Tuple of (transcripts, chimeric alignments), both sorted by score (best first)
 pub fn align_read(
     read_seq: &[u8],
+    read_name: &str,
     index: &GenomeIndex,
     params: &Parameters,
-) -> Result<Vec<Transcript>, Error> {
+) -> Result<(Vec<Transcript>, Vec<crate::chimeric::ChimericAlignment>), Error> {
     // Step 1: Find seeds
     // Use a reasonable default min seed length (typically 8-20bp)
     let min_seed_length = 8;
     let seeds = Seed::find_seeds(read_seq, index, min_seed_length)?;
 
     if seeds.is_empty() {
-        return Ok(Vec::new()); // No seeds found
+        return Ok((Vec::new(), Vec::new())); // No seeds found
     }
 
     // Step 2: Cluster seeds
@@ -58,7 +61,17 @@ pub fn align_read(
     let clusters = cluster_seeds(&seeds, index, max_cluster_dist, max_loci_for_anchor);
 
     if clusters.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    // Step 2b: Detect chimeric alignments from multi-cluster seeds (Tier 2)
+    let mut chimeric_alignments = Vec::new();
+    if params.chim_segment_min > 0 && clusters.len() > 1 {
+        use crate::chimeric::ChimericDetector;
+        let detector = ChimericDetector::new(params);
+        chimeric_alignments.extend(
+            detector.detect_from_multi_clusters(&clusters, &seeds, read_seq, read_name, index)?,
+        );
     }
 
     // Step 3: Stitch seeds within each cluster
@@ -107,11 +120,32 @@ pub fn align_read(
         true
     });
 
+    // Step 3b: Detect chimeric alignments from soft-clips (Tier 1)
+    if params.chim_segment_min > 0 {
+        use crate::chimeric::ChimericDetector;
+        let detector = ChimericDetector::new(params);
+        for transcript in &transcripts {
+            if let Some(chim) =
+                detector.detect_from_soft_clips(transcript, read_seq, read_name, index)?
+            {
+                chimeric_alignments.push(chim);
+            }
+        }
+    }
+
     // Step 5: Sort by score (descending) and limit to top N
     transcripts.sort_by(|a, b| b.score.cmp(&a.score));
     transcripts.truncate(params.out_filter_multimap_nmax as usize);
 
-    Ok(transcripts)
+    // Step 6: Filter chimeric alignments
+    if params.chim_segment_min > 0 {
+        chimeric_alignments.retain(|chim| {
+            chim.meets_min_segment_length(params.chim_segment_min)
+                && chim.meets_min_score(params.chim_score_min)
+        });
+    }
+
+    Ok((transcripts, chimeric_alignments))
 }
 
 /// Align paired-end read using STAR's unified seed clustering approach.
@@ -410,11 +444,12 @@ mod tests {
         // Read with all N's (no seeds possible)
         let read_seq = vec![4, 4, 4, 4, 4, 4, 4, 4, 4, 4];
 
-        let result = align_read(&read_seq, &index, &params);
+        let result = align_read(&read_seq, "READ_001", &index, &params);
         assert!(result.is_ok());
 
-        let transcripts = result.unwrap();
+        let (transcripts, chimeras) = result.unwrap();
         assert_eq!(transcripts.len(), 0); // No alignment
+        assert_eq!(chimeras.len(), 0); // No chimeric alignments
     }
 
     #[test]
@@ -426,7 +461,7 @@ mod tests {
         // Would need actual seeds and alignment to test this properly
         // This test just verifies the function doesn't crash
         let read_seq = vec![0, 1, 2, 3]; // ACGT
-        let result = align_read(&read_seq, &index, &params);
+        let result = align_read(&read_seq, "READ_002", &index, &params);
         assert!(result.is_ok());
     }
 
@@ -437,7 +472,7 @@ mod tests {
         params.out_filter_mismatch_nmax = 2;
 
         let read_seq = vec![0, 1, 2, 3]; // ACGT
-        let result = align_read(&read_seq, &index, &params);
+        let result = align_read(&read_seq, "READ_003", &index, &params);
         assert!(result.is_ok());
     }
 
@@ -448,10 +483,10 @@ mod tests {
         params.out_filter_multimap_nmax = 5;
 
         let read_seq = vec![0, 1, 2, 3]; // ACGT
-        let result = align_read(&read_seq, &index, &params);
+        let result = align_read(&read_seq, "READ_004", &index, &params);
         assert!(result.is_ok());
 
-        let transcripts = result.unwrap();
+        let (transcripts, _chimeras) = result.unwrap();
         assert!(transcripts.len() <= 5);
     }
 

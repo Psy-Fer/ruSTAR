@@ -161,6 +161,26 @@ impl Transcript {
             .map(|op| op.len())
             .sum()
     }
+
+    /// Count soft-clipped bases on left and right ends
+    ///
+    /// Returns (left_clip, right_clip) in bases
+    pub fn count_soft_clips(&self) -> (u32, u32) {
+        let mut left_clip = 0u32;
+        let mut right_clip = 0u32;
+
+        // Check first operation for left clip
+        if let Some(CigarOp::SoftClip(n)) = self.cigar.first() {
+            left_clip = *n;
+        }
+
+        // Check last operation for right clip
+        if let Some(CigarOp::SoftClip(n)) = self.cigar.last() {
+            right_clip = *n;
+        }
+
+        (left_clip, right_clip)
+    }
 }
 
 #[cfg(test)]
@@ -262,5 +282,72 @@ mod tests {
         assert_eq!(exon.genome_end, 1050);
         assert_eq!(exon.read_start, 0);
         assert_eq!(exon.read_end, 50);
+    }
+
+    #[test]
+    fn test_count_soft_clips_both_ends() {
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 100,
+            genome_end: 150,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![
+                CigarOp::SoftClip(10),
+                CigarOp::Match(50),
+                CigarOp::SoftClip(15),
+            ],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            read_seq: vec![],
+        };
+
+        let (left, right) = transcript.count_soft_clips();
+        assert_eq!(left, 10);
+        assert_eq!(right, 15);
+    }
+
+    #[test]
+    fn test_count_soft_clips_left_only() {
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 100,
+            genome_end: 150,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![CigarOp::SoftClip(20), CigarOp::Match(50)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            read_seq: vec![],
+        };
+
+        let (left, right) = transcript.count_soft_clips();
+        assert_eq!(left, 20);
+        assert_eq!(right, 0);
+    }
+
+    #[test]
+    fn test_count_soft_clips_none() {
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 100,
+            genome_end: 150,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![CigarOp::Match(50)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            read_seq: vec![],
+        };
+
+        let (left, right) = transcript.count_soft_clips();
+        assert_eq!(left, 0);
+        assert_eq!(right, 0);
     }
 }

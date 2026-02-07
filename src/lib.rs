@@ -4,16 +4,13 @@ pub mod error;
 pub mod params;
 
 pub mod align;
+pub mod chimeric;
 pub mod genome;
 pub mod index;
 pub mod io;
 pub mod junction;
 pub mod mapq;
 pub mod stats;
-
-// Future module stubs — uncomment as implemented:
-// pub mod threading;
-// pub mod chimeric;
 
 use log::info;
 
@@ -398,7 +395,8 @@ fn align_reads_single_end<W: AlignmentWriter>(
                 }
 
                 // Align read (CPU-intensive, pure function)
-                let transcripts = align_read(&clipped_seq, &index, params)?;
+                let (transcripts, _chimeric_alns) =
+                    align_read(&clipped_seq, &read.name, &index, params)?;
 
                 // Record stats (atomic, lock-free)
                 stats.record_alignment(transcripts.len(), max_multimaps);
@@ -408,6 +406,10 @@ fn align_reads_single_end<W: AlignmentWriter>(
                 for transcript in &transcripts {
                     record_transcript_junctions(transcript, &index, &sj_stats, is_unique);
                 }
+
+                // TODO Phase 12: Write chimeric alignments to Chimeric.out.junction
+                // (Currently discarding chimeric alignments - writing requires refactoring
+                // the parallel processing to collect chimeric results)
 
                 // Build SAM records (no I/O, just construction)
                 if transcripts.is_empty() {

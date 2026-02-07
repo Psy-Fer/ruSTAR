@@ -3,3 +3,9 @@ pub mod score;
 pub mod seed;
 pub mod stitch;
 pub mod transcript;
+
+// Re-export commonly used types
+pub use read_align::{PairedAlignment, align_paired_read, align_read};
+pub use seed::Seed;
+pub use stitch::{SeedCluster, stitch_seeds};
+pub use transcript::{CigarOp, Exon, Transcript};

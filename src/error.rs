@@ -23,6 +23,9 @@ pub enum Error {
 
     #[error("GTF parsing error: {0}")]
     Gtf(String),
+
+    #[error("chimeric detection error: {0}")]
+    Chimeric(String),
 }
 
 impl Error {

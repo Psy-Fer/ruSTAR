@@ -29,3 +29,4 @@ target
 /test/simple_star/
 /test/star_output/
 /test/data/
+/test/threading_test/

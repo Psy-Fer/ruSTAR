@@ -58,7 +58,14 @@ pub fn align_read(
     // Step 2: Cluster seeds
     let max_cluster_dist = 100000; // 100kb window (TODO: make configurable)
     let max_loci_for_anchor = 10; // Seeds mapping to <=10 loci can be anchors
-    let clusters = cluster_seeds(&seeds, index, max_cluster_dist, max_loci_for_anchor);
+    let clusters = cluster_seeds(
+        &seeds,
+        index,
+        max_cluster_dist,
+        max_loci_for_anchor,
+        params.win_anchor_multimap_nmax,
+        params.seed_none_loci_per_window,
+    );
 
     if clusters.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -78,8 +85,8 @@ pub fn align_read(
     let scorer = AlignmentScorer::from_params(params);
     let mut transcripts = Vec::new();
 
-    for cluster in clusters {
-        let cluster_transcripts = stitch_seeds(&cluster, &seeds, read_seq, index, &scorer)?;
+    for cluster in clusters.iter() {
+        let cluster_transcripts = stitch_seeds(cluster, &seeds, read_seq, index, &scorer)?;
         transcripts.extend(cluster_transcripts);
     }
 
@@ -182,7 +189,14 @@ pub fn align_paired_read(
     // Step 2: Cluster seeds (unified across both mates)
     let max_cluster_dist = 100000; // 100kb window
     let max_loci_for_anchor = 10;
-    let clusters = cluster_seeds(&pooled_seeds, index, max_cluster_dist, max_loci_for_anchor);
+    let clusters = cluster_seeds(
+        &pooled_seeds,
+        index,
+        max_cluster_dist,
+        max_loci_for_anchor,
+        params.win_anchor_multimap_nmax,
+        params.seed_none_loci_per_window,
+    );
 
     if clusters.is_empty() {
         return Ok(Vec::new());

@@ -352,6 +352,19 @@ pub struct Parameters {
     #[arg(long = "scoreStitchSJshift", default_value_t = 1)]
     pub score_stitch_sj_shift: i32,
 
+    // ── Seed and anchor parameters ──────────────────────────────────────
+    /// Max number of loci a seed can map to (seeds with more loci are discarded)
+    #[arg(long = "seedMultimapNmax", default_value_t = 10000)]
+    pub seed_multimap_nmax: usize,
+
+    /// Max number of loci anchors are allowed to map to
+    #[arg(long = "winAnchorMultimapNmax", default_value_t = 50)]
+    pub win_anchor_multimap_nmax: usize,
+
+    /// Max number of seed loci per window
+    #[arg(long = "seedNoneLociPerWindow", default_value_t = 10)]
+    pub seed_none_loci_per_window: usize,
+
     // ── Splice junction database ────────────────────────────────────────
     /// GTF file for splice junction annotations
     #[arg(long = "sjdbGTFfile")]
@@ -505,6 +518,9 @@ mod tests {
         assert_eq!(p.score_ins_open, -2);
         assert_eq!(p.score_ins_base, -2);
         assert_eq!(p.score_stitch_sj_shift, 1);
+        assert_eq!(p.seed_multimap_nmax, 10000);
+        assert_eq!(p.win_anchor_multimap_nmax, 50);
+        assert_eq!(p.seed_none_loci_per_window, 10);
         assert!(p.sjdb_gtf_file.is_none());
         assert_eq!(p.sjdb_overhang, 100);
         assert_eq!(p.sjdb_score, 2);

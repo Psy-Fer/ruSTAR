@@ -29,6 +29,8 @@ pub struct SeedCluster {
 /// * `index` - Genome index
 /// * `max_cluster_dist` - Maximum genomic distance to cluster seeds (e.g., 100kb)
 /// * `max_loci_for_anchor` - Maximum SA range for a seed to be an anchor (e.g., 10)
+/// * `win_anchor_multimap_nmax` - Max loci anchors can map to (STAR default: 50)
+/// * `seed_none_loci_per_window` - Max seed positions per window (STAR default: 10)
 ///
 /// # Returns
 /// Vector of seed clusters
@@ -37,6 +39,8 @@ pub fn cluster_seeds(
     index: &GenomeIndex,
     max_cluster_dist: u64,
     max_loci_for_anchor: usize,
+    win_anchor_multimap_nmax: usize,
+    seed_none_loci_per_window: usize,
 ) -> Vec<SeedCluster> {
     let mut clusters = Vec::new();
 
@@ -49,18 +53,35 @@ pub fn cluster_seeds(
         }
     }
 
-    // If no anchors, use all seeds as potential anchors
+    // If no anchors, use best seeds as potential anchors
+    // STAR-like behavior: sort by SA range size, use smallest (most specific)
     if anchors.is_empty() {
-        anchors = (0..seeds.len()).collect();
+        let mut sorted_seeds: Vec<usize> = (0..seeds.len()).collect();
+        sorted_seeds.sort_by_key(|&i| seeds[i].sa_end - seeds[i].sa_start);
+        // Take up to 20 best seeds as anchors (prevents explosion with 143 anchors)
+        anchors = sorted_seeds.into_iter().take(20).collect();
     }
 
     // For each anchor, create clusters
     for &anchor_idx in &anchors {
         let anchor = &seeds[anchor_idx];
+        let n_anchor_loci = anchor.sa_end - anchor.sa_start;
+
+        // Skip anchors with too many loci (STAR: winAnchorMultimapNmax)
+        if n_anchor_loci > win_anchor_multimap_nmax {
+            continue;
+        }
+
         let anchor_positions = anchor.get_genome_positions(index);
 
-        // For each genomic position of the anchor
-        for (anchor_pos, anchor_strand) in anchor_positions {
+        // Limit number of positions per anchor (STAR: seedNoneLociPerWindow)
+        let max_positions = seed_none_loci_per_window.min(anchor_positions.len());
+
+        // For each genomic position of the anchor (limited)
+        for (anchor_pos, anchor_strand) in anchor_positions.iter().take(max_positions) {
+            let anchor_pos = *anchor_pos;
+            let anchor_strand = *anchor_strand;
+
             // Find chromosome
             let chr_info = match index.genome.position_to_chr(anchor_pos) {
                 Some(info) => info,
@@ -80,7 +101,12 @@ pub fn cluster_seeds(
 
                 // Check if seed overlaps with window
                 let seed_positions = seed.get_genome_positions(index);
-                for (pos, strand) in seed_positions {
+                // Limit positions per seed (STAR: seedNoneLociPerWindow)
+                let max_seed_positions = seed_none_loci_per_window.min(seed_positions.len());
+                for (pos, strand) in seed_positions.iter().take(max_seed_positions) {
+                    let pos = *pos;
+                    let strand = *strand;
+
                     if strand != anchor_strand {
                         continue;
                     }
@@ -421,7 +447,7 @@ mod tests {
             },
         ];
 
-        let clusters = cluster_seeds(&seeds, &index, 100000, 10);
+        let clusters = cluster_seeds(&seeds, &index, 100000, 10, 50, 10);
 
         // With empty SA ranges, no clusters will be created
         assert_eq!(clusters.len(), 0);

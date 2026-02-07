@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Important: Git Workflow
+
+**DO NOT commit changes automatically.** The user will review, test, and commit changes themselves. Claude should:
+- Make code changes as requested
+- Suggest what should be committed
+- Let the user handle `git add`, `git commit`, and `git push`
+
 ## Project Overview
 
 ruSTAR is a Rust reimplementation of [STAR](https://github.com/alexdobin/STAR) (Spliced Transcripts Alignment to a Reference), an RNA-seq aligner originally written in C++ by Alexander Dobin. Licensed under MIT to match the original STAR license.
@@ -25,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Currently on Phase 12** (Chimeric alignment detection).
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Currently on Phase 13** (Performance optimization - in progress).
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -43,6 +50,13 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 10 (BAM output - unsorted streaming)
 - Phase 11 (Two-pass mode - novel junction discovery)
 - Phase 12 (Chimeric alignment detection - COMPLETE)
+- Phase 13.1 (Critical performance fix - clustering explosion bug - FIXED)
+
+**Recent Performance Fix** (2026-02-07):
+- Fixed clustering algorithm creating 11,982 clusters for pathological reads (should be ~20-200)
+- Implemented STAR parameters: `seedMultimapNmax`, `winAnchorMultimapNmax`, `seedNoneLociPerWindow`
+- **Result**: 250x+ speedup (100 reads: >60s → 0.23s)
+- See [PERFORMANCE_FIX.md](PERFORMANCE_FIX.md) for details
 
 ## Source Layout
 
@@ -127,7 +141,9 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 170/170 tests passing, 4 non-critical clippy warnings (too_many_arguments × 3, manual_arithmetic_check × 1)
+**Current test status**: 170/170 unit tests passing, 3 non-critical clippy warnings (too_many_arguments × 2, manual_arithmetic_check × 1)
+
+**Note**: Phase 9 integration tests fail due to pathologically repetitive test genomes (50 exact copies of 20bp). These tests need realistic genomes (deferred to Phase 13).
 
 ## Current Capabilities
 

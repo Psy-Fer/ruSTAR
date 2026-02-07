@@ -11,9 +11,9 @@ Phase 1 (CLI) ✅
        └→ Phase 4 (seed finding) ✅ ← can load STAR index, no need to wait for Phase 3
             └→ Phase 5 (stitching/scoring) ✅
                  └→ Phase 6 (SAM output) ✅ ← FIRST END-TO-END ALIGNMENT
-                      └→ Phase 9 (threading) ← NEXT: Parallel architecture foundation
-                           └→ Phase 8 (paired-end) ← Build paired-end on threaded base
-                                └→ Phase 7 (splice junctions) ← Additive enhancement
+                      └→ Phase 9 (threading) ✅ ← Parallel architecture foundation
+                           └→ Phase 8 (paired-end) ✅ ← Built on threaded base
+                                └→ Phase 7 (splice junctions) ← NEXT: GTF/junction annotations
                                      └→ Phase 10 (BAM output)
                                           └→ Phase 11 (two-pass)
                                                └→ Phase 12 (chimeric)
@@ -257,9 +257,9 @@ less architecturally disruptive, so done after core parallelism and paired-end a
 
 ---
 
-## Phase 9: Threading (NEXT)
+## Phase 9: Threading
 
-**Status**: Not started
+**Status**: Complete ✅
 
 **Goal**: Rayon chunk-based parallelism matching `--runThreadN`. Establish parallel architecture foundation.
 
@@ -283,9 +283,9 @@ ensure all future features are built with parallelism from the start.
 
 ---
 
-## Phase 8: Paired-End Reads
+## Phase 8: Paired-End Reads (NEXT)
 
-**Status**: Not started (blocked by Phase 9)
+**Status**: Complete ✅
 
 **Goal**: Paired FASTQ, concordant/discordant pairing, proper SAM FLAG/TLEN/mate fields.
 

@@ -56,10 +56,9 @@ pub fn cluster_seeds(
     // If no anchors, use best seeds as potential anchors
     // STAR-like behavior: sort by SA range size, use smallest (most specific)
     if anchors.is_empty() {
-        let mut sorted_seeds: Vec<usize> = (0..seeds.len()).collect();
-        sorted_seeds.sort_by_key(|&i| seeds[i].sa_end - seeds[i].sa_start);
-        // Take up to 20 best seeds as anchors (prevents explosion with 143 anchors)
-        anchors = sorted_seeds.into_iter().take(20).collect();
+        // Use ALL seeds as anchors (like original STAR behavior)
+        // The winAnchorMultimapNmax and seedNoneLociPerWindow limits will prevent explosion
+        anchors = (0..seeds.len()).collect();
     }
 
     // For each anchor, create clusters
@@ -242,11 +241,12 @@ pub fn stitch_seeds(
     let n = expanded_seeds.len();
     let mut dp: Vec<DpState> = Vec::with_capacity(n);
 
-    // Base case: first seed
+    // Base case: each seed starts with positive score for matches
+    // STAR uses +1 per matched base as the baseline score
     for exp_seed in &expanded_seeds {
         let initial_cigar = vec![CigarOp::Match(exp_seed.length as u32)];
         dp.push(DpState {
-            score: 0, // Initial seed has no gap penalty
+            score: exp_seed.length as i32, // Positive score: +1 per matched base
             prev_seed: None,
             genome_pos: exp_seed.genome_pos,
             cigar_ops: initial_cigar,
@@ -285,7 +285,9 @@ pub fn stitch_seeds(
             let (gap_score, gap_type) =
                 scorer.score_gap(genome_gap, read_gap, prev.genome_end, &index.genome);
 
-            let transition_score = dp[j].score + gap_score;
+            // Transition score = prev_score + gap_penalty + current_seed_match_score
+            // Current seed contributes +1 per matched base (STAR convention)
+            let transition_score = dp[j].score + gap_score + (curr.length as i32);
 
             if transition_score > best_score {
                 best_score = transition_score;
@@ -346,14 +348,103 @@ pub fn stitch_seeds(
     let best_state = &dp[best_final_idx];
     let final_seed = &expanded_seeds[best_final_idx];
 
+    // Calculate the read region covered by the alignment
+    let first_seed = expanded_seeds.first().unwrap();
+    let alignment_start = first_seed.read_pos;
+
+    // Calculate aligned read length from CIGAR operations
+    let mut aligned_read_len = 0usize;
+    for op in &best_state.cigar_ops {
+        match op {
+            CigarOp::Match(len) | CigarOp::Equal(len) | CigarOp::Diff(len) | CigarOp::Ins(len) => {
+                aligned_read_len += *len as usize;
+            }
+            _ => {}
+        }
+    }
+    let alignment_end = alignment_start + aligned_read_len;
+
+    let mut final_cigar = Vec::new();
+
+    // Add 5' soft clip if alignment doesn't start at read position 0
+    if alignment_start > 0 {
+        final_cigar.push(CigarOp::SoftClip(alignment_start as u32));
+    }
+
+    // Add the main alignment CIGAR
+    final_cigar.extend(best_state.cigar_ops.clone());
+
+    // Add 3' soft clip if alignment doesn't end at read end
+    if alignment_end < read_seq.len() {
+        let clip_len = read_seq.len() - alignment_end;
+        final_cigar.push(CigarOp::SoftClip(clip_len as u32));
+    }
+
+    // Build exons from CIGAR
+    use crate::align::transcript::Exon;
+    let mut exons = Vec::new();
+    let mut read_pos = 0usize; // Start from 0, will be adjusted by soft clips
+    let mut genome_pos = first_seed.genome_pos;
+
+    for op in &final_cigar {
+        match op {
+            CigarOp::Match(len) | CigarOp::Equal(len) | CigarOp::Diff(len) => {
+                // Create or extend current exon
+                let len = *len as usize;
+                exons.push(Exon {
+                    genome_start: genome_pos,
+                    genome_end: genome_pos + len as u64,
+                    read_start: read_pos,
+                    read_end: read_pos + len,
+                });
+                read_pos += len;
+                genome_pos += len as u64;
+            }
+            CigarOp::Ins(len) => {
+                // Insertion: advances read but not genome
+                read_pos += *len as usize;
+            }
+            CigarOp::Del(len) => {
+                // Deletion: advances genome but not read
+                genome_pos += *len as u64;
+            }
+            CigarOp::RefSkip(len) => {
+                // Intron: advances genome but not read (starts new exon)
+                genome_pos += *len as u64;
+            }
+            CigarOp::SoftClip(len) => {
+                // Soft clip: advances read but not genome
+                read_pos += *len as usize;
+            }
+            CigarOp::HardClip(_) => {
+                // Hard clip: doesn't advance either
+            }
+        }
+    }
+
+    // Merge consecutive exons (from consecutive Match operations)
+    let mut merged_exons: Vec<Exon> = Vec::new();
+    for exon in exons {
+        if let Some(last_exon) = merged_exons.last_mut() {
+            if last_exon.genome_end == exon.genome_start && last_exon.read_end == exon.read_start {
+                // Merge with previous exon
+                last_exon.genome_end = exon.genome_end;
+                last_exon.read_end = exon.read_end;
+                continue;
+            }
+        }
+        merged_exons.push(exon);
+    }
+
     // Build transcript
+    let final_seed = &expanded_seeds[best_final_idx];
     let transcript = Transcript {
         chr_idx: cluster.chr_idx,
-        genome_start: cluster.genome_start,
-        genome_end: final_seed.genome_end,
+        genome_start: merged_exons.first().map(|e| e.genome_start).unwrap_or(cluster.genome_start),
+        genome_end: merged_exons.last().map(|e| e.genome_end).unwrap_or(final_seed.genome_end),
         is_reverse: cluster.is_reverse,
-        exons: vec![], // TODO: build exons from CIGAR
-        cigar: best_state.cigar_ops.clone(),
+        exons: merged_exons,
+        cigar: final_cigar, // Use CIGAR with soft clips
         score: best_state.score,
         n_mismatch: best_state.n_mismatch,
         n_gap: best_state.n_gap,

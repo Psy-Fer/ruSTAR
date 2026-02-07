@@ -55,6 +55,7 @@ pub fn align_read(
         return Ok((Vec::new(), Vec::new())); // No seeds found
     }
 
+
     // Step 2: Cluster seeds
     let max_cluster_dist = 100000; // 100kb window (TODO: make configurable)
     let max_loci_for_anchor = 10; // Seeds mapping to <=10 loci can be anchors
@@ -66,6 +67,7 @@ pub fn align_read(
         params.win_anchor_multimap_nmax,
         params.seed_none_loci_per_window,
     );
+
 
     if clusters.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -92,6 +94,8 @@ pub fn align_read(
 
     // Step 4: Filter transcripts
     let read_length = read_seq.len() as f64;
+
+
     transcripts.retain(|t| {
         // Absolute score threshold
         if t.score < params.out_filter_score_min {

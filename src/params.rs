@@ -358,11 +358,11 @@ pub struct Parameters {
     pub seed_multimap_nmax: usize,
 
     /// Max number of loci anchors are allowed to map to
-    #[arg(long = "winAnchorMultimapNmax", default_value_t = 50)]
+    #[arg(long = "winAnchorMultimapNmax", default_value_t = 200)]
     pub win_anchor_multimap_nmax: usize,
 
     /// Max number of seed loci per window
-    #[arg(long = "seedNoneLociPerWindow", default_value_t = 10)]
+    #[arg(long = "seedNoneLociPerWindow", default_value_t = 50)]
     pub seed_none_loci_per_window: usize,
 
     // ── Splice junction database ────────────────────────────────────────
@@ -519,8 +519,8 @@ mod tests {
         assert_eq!(p.score_ins_base, -2);
         assert_eq!(p.score_stitch_sj_shift, 1);
         assert_eq!(p.seed_multimap_nmax, 10000);
-        assert_eq!(p.win_anchor_multimap_nmax, 50);
-        assert_eq!(p.seed_none_loci_per_window, 10);
+        assert_eq!(p.win_anchor_multimap_nmax, 200);
+        assert_eq!(p.seed_none_loci_per_window, 50);
         assert!(p.sjdb_gtf_file.is_none());
         assert_eq!(p.sjdb_overhang, 100);
         assert_eq!(p.sjdb_score, 2);

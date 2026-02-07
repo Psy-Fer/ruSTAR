@@ -390,6 +390,7 @@ mod tests {
             genome,
             suffix_array,
             sa_index,
+            junction_db: crate::junction::SpliceJunctionDb::empty(),
         }
     }
 

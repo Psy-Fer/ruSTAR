@@ -8,15 +8,17 @@ use std::path::Path;
 
 use crate::error::Error;
 use crate::genome::Genome;
+use crate::junction::SpliceJunctionDb;
 use crate::params::Parameters;
 use sa_index::SaIndex;
 use suffix_array::SuffixArray;
 
-/// Complete genome index (genome + suffix array + SA index).
+/// Complete genome index (genome + suffix array + SA index + junction database).
 pub struct GenomeIndex {
     pub genome: Genome,
     pub suffix_array: SuffixArray,
     pub sa_index: SaIndex,
+    pub junction_db: SpliceJunctionDb,
 }
 
 impl GenomeIndex {
@@ -45,10 +47,24 @@ impl GenomeIndex {
             sa_index.data.len()
         );
 
+        // Load GTF annotations if provided
+        let junction_db = if let Some(ref gtf_path) = params.sjdb_gtf_file {
+            SpliceJunctionDb::from_gtf(gtf_path, &genome)?
+        } else {
+            log::info!("No GTF file provided, all junctions will be novel");
+            SpliceJunctionDb::empty()
+        };
+
+        log::info!(
+            "Junction database initialized: {} annotated junctions",
+            junction_db.len()
+        );
+
         Ok(GenomeIndex {
             genome,
             suffix_array,
             sa_index,
+            junction_db,
         })
     }
 

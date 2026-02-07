@@ -23,6 +23,8 @@ pub struct AlignmentScorer {
     pub score_ins_base: i32,
     /// Minimum intron length (gaps >= this are treated as splice junctions)
     pub align_intron_min: u32,
+    /// Bonus for annotated splice junctions (from GTF)
+    pub sjdb_score: i32,
 }
 
 impl AlignmentScorer {
@@ -38,6 +40,23 @@ impl AlignmentScorer {
             score_ins_open: params.score_ins_open,
             score_ins_base: params.score_ins_base,
             align_intron_min: params.align_intron_min,
+            sjdb_score: params.sjdb_score,
+        }
+    }
+
+    /// Apply annotation bonus to junction score
+    ///
+    /// # Arguments
+    /// * `base_score` - Base score from motif
+    /// * `annotated` - Whether the junction is annotated in GTF
+    ///
+    /// # Returns
+    /// Adjusted score with annotation bonus applied
+    pub fn score_annotated_junction(&self, base_score: i32, annotated: bool) -> i32 {
+        if annotated {
+            base_score + self.sjdb_score
+        } else {
+            base_score
         }
     }
 
@@ -99,7 +118,12 @@ impl AlignmentScorer {
     ///
     /// # Returns
     /// The detected splice motif
-    fn detect_splice_motif(&self, donor_pos: u64, intron_len: u32, genome: &Genome) -> SpliceMotif {
+    pub fn detect_splice_motif(
+        &self,
+        donor_pos: u64,
+        intron_len: u32,
+        genome: &Genome,
+    ) -> SpliceMotif {
         // Read 2bp donor and 2bp acceptor
         // Donor: donor_pos, donor_pos+1
         // Acceptor: donor_pos+intron_len-2, donor_pos+intron_len-1
@@ -141,7 +165,7 @@ impl AlignmentScorer {
 }
 
 /// Splice junction motif types
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SpliceMotif {
     /// GT-AG (canonical)
     GtAg,
@@ -222,6 +246,7 @@ mod tests {
             score_ins_open: -2,
             score_ins_base: -2,
             align_intron_min: 21,
+            sjdb_score: 2,
         };
 
         // Intron from position 2, length 12 (spans positions 2-13 inclusive)
@@ -254,6 +279,7 @@ mod tests {
             score_ins_open: -2,
             score_ins_base: -2,
             align_intron_min: 21,
+            sjdb_score: 2,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -285,6 +311,7 @@ mod tests {
             score_ins_open: -2,
             score_ins_base: -2,
             align_intron_min: 21,
+            sjdb_score: 2,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -314,6 +341,7 @@ mod tests {
             score_ins_open: -2,
             score_ins_base: -2,
             align_intron_min: 21,
+            sjdb_score: 2,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -336,6 +364,7 @@ mod tests {
             score_ins_open: -2,
             score_ins_base: -2,
             align_intron_min: 21,
+            sjdb_score: 2,
         };
 
         let (score, gap_type) = scorer.score_gap(0, 5, 0, &genome);
@@ -356,6 +385,7 @@ mod tests {
             score_ins_open: -2,
             score_ins_base: -2,
             align_intron_min: 21,
+            sjdb_score: 2,
         };
 
         // Small gap (< align_intron_min) is deletion
@@ -384,6 +414,7 @@ mod tests {
             score_ins_open: -2,
             score_ins_base: -2,
             align_intron_min: 21,
+            sjdb_score: 2,
         };
 
         // Gap starting at position 2 (GT), length 26 (>= 21) is splice junction
@@ -396,5 +427,33 @@ mod tests {
                 motif: SpliceMotif::GtAg
             }
         ));
+    }
+
+    #[test]
+    fn test_annotated_junction_bonus() {
+        let scorer = AlignmentScorer {
+            score_gap: 0,
+            score_gap_noncan: -8,
+            score_gap_gcag: -4,
+            score_gap_atac: -8,
+            score_del_open: -2,
+            score_del_base: -2,
+            score_ins_open: -2,
+            score_ins_base: -2,
+            align_intron_min: 21,
+            sjdb_score: 2,
+        };
+
+        // Annotated junction should get bonus
+        let annotated_score = scorer.score_annotated_junction(0, true);
+        assert_eq!(annotated_score, 2);
+
+        // Novel junction should not get bonus
+        let novel_score = scorer.score_annotated_junction(0, false);
+        assert_eq!(novel_score, 0);
+
+        // Bonus applies to any base score
+        let annotated_noncanon = scorer.score_annotated_junction(-8, true);
+        assert_eq!(annotated_noncanon, -6); // -8 + 2
     }
 }

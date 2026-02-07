@@ -7,11 +7,11 @@ pub mod align;
 pub mod genome;
 pub mod index;
 pub mod io;
+pub mod junction;
 pub mod mapq;
 pub mod stats;
 
 // Future module stubs — uncomment as implemented:
-// pub mod junction;
 // pub mod threading;
 // pub mod chimeric;
 
@@ -59,6 +59,7 @@ fn genome_generate(params: &Parameters) -> anyhow::Result<()> {
 fn align_reads(params: &Parameters) -> anyhow::Result<()> {
     use crate::index::GenomeIndex;
     use crate::io::sam::SamWriter;
+    use crate::junction::SpliceJunctionStats;
     use crate::stats::AlignmentStats;
     use std::sync::Arc;
 
@@ -101,16 +102,28 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
 
     let mut writer = SamWriter::create(&output_path, &index.genome, params)?;
 
-    // 4. Route to single-end or paired-end mode
+    // 4. Initialize statistics collectors
     let stats = Arc::new(AlignmentStats::new());
+    let sj_stats = Arc::new(SpliceJunctionStats::new());
 
+    // 5. Route to single-end or paired-end mode
     match params.read_files_in.len() {
-        1 => align_reads_single_end(params, &index, &mut writer, &stats),
-        2 => align_reads_paired_end(params, &index, &mut writer, &stats),
+        1 => align_reads_single_end(params, &index, &mut writer, &stats, &sj_stats),
+        2 => align_reads_paired_end(params, &index, &mut writer, &stats, &sj_stats),
         n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
     }?;
 
-    // 5. Print summary
+    // 6. Write SJ.out.tab file
+    let sj_output_path = params.out_file_name_prefix.join("SJ.out.tab");
+    if !sj_stats.is_empty() {
+        info!(
+            "Writing splice junction statistics to {}",
+            sj_output_path.display()
+        );
+        sj_stats.write_output(&sj_output_path, &index.genome)?;
+    }
+
+    // 7. Print summary
     info!("Alignment complete!");
     stats.print_summary();
 
@@ -123,6 +136,7 @@ fn align_reads_single_end(
     index: &std::sync::Arc<crate::index::GenomeIndex>,
     writer: &mut crate::io::sam::SamWriter,
     stats: &std::sync::Arc<crate::stats::AlignmentStats>,
+    sj_stats: &std::sync::Arc<crate::junction::SpliceJunctionStats>,
 ) -> anyhow::Result<()> {
     use crate::align::read_align::align_read;
     use crate::io::fastq::{FastqReader, clip_read};
@@ -136,6 +150,7 @@ fn align_reads_single_end(
     let mut reader = FastqReader::open(read_file, params.read_files_command.as_deref())?;
 
     let stats = Arc::clone(stats);
+    let sj_stats = Arc::clone(sj_stats);
     let mut read_count = 0u64;
     let max_reads = if params.read_map_number < 0 {
         u64::MAX
@@ -174,6 +189,8 @@ fn align_reads_single_end(
                 let index = Arc::clone(&index);
                 #[allow(clippy::needless_borrow)]
                 let stats = Arc::clone(&stats);
+                #[allow(clippy::needless_borrow)]
+                let sj_stats = Arc::clone(&sj_stats);
 
                 // Apply clipping
                 let (clipped_seq, clipped_qual) =
@@ -200,6 +217,12 @@ fn align_reads_single_end(
 
                 // Record stats (atomic, lock-free)
                 stats.record_alignment(transcripts.len(), max_multimaps);
+
+                // Record junction statistics
+                let is_unique = transcripts.len() == 1;
+                for transcript in &transcripts {
+                    record_transcript_junctions(transcript, &index, &sj_stats, is_unique);
+                }
 
                 // Build SAM records (no I/O, just construction)
                 if transcripts.is_empty() {
@@ -259,6 +282,7 @@ fn align_reads_paired_end(
     index: &std::sync::Arc<crate::index::GenomeIndex>,
     writer: &mut crate::io::sam::SamWriter,
     stats: &std::sync::Arc<crate::stats::AlignmentStats>,
+    sj_stats: &std::sync::Arc<crate::junction::SpliceJunctionStats>,
 ) -> anyhow::Result<()> {
     use crate::align::read_align::align_paired_read;
     use crate::io::fastq::{PairedFastqReader, clip_read};
@@ -279,6 +303,7 @@ fn align_reads_paired_end(
     )?;
 
     let stats = Arc::clone(stats);
+    let sj_stats = Arc::clone(sj_stats);
     let mut read_count = 0u64;
     let max_reads = if params.read_map_number < 0 {
         u64::MAX
@@ -317,6 +342,8 @@ fn align_reads_paired_end(
                 let index = Arc::clone(&index);
                 #[allow(clippy::needless_borrow)]
                 let stats = Arc::clone(&stats);
+                #[allow(clippy::needless_borrow)]
+                let sj_stats = Arc::clone(&sj_stats);
 
                 // Apply clipping to both mates
                 let (m1_seq, m1_qual) = clip_read(
@@ -357,6 +384,12 @@ fn align_reads_paired_end(
 
                 // Record stats (count pairs, not individual reads)
                 stats.record_alignment(paired_alns.len(), max_multimaps);
+
+                // Record junction statistics (unified transcript covers both mates)
+                let is_unique = paired_alns.len() == 1;
+                for pair in &paired_alns {
+                    record_transcript_junctions(&pair.transcript, &index, &sj_stats, is_unique);
+                }
 
                 // Build SAM records (2 per pair)
                 if paired_alns.is_empty() {
@@ -414,4 +447,86 @@ fn align_reads_paired_end(
     }
 
     Ok(())
+}
+
+/// Record junctions from a transcript into SJ statistics
+fn record_transcript_junctions(
+    transcript: &crate::align::transcript::Transcript,
+    index: &crate::index::GenomeIndex,
+    sj_stats: &crate::junction::SpliceJunctionStats,
+    is_unique: bool,
+) {
+    use crate::align::score::AlignmentScorer;
+    use crate::align::transcript::CigarOp;
+
+    // Track genome position as we traverse CIGAR
+    let mut genome_pos = transcript.genome_start;
+    let mut _read_pos = 0usize;
+
+    for op in &transcript.cigar {
+        match op {
+            CigarOp::RefSkip(len) => {
+                // This is a splice junction
+                let intron_len = *len;
+                let intron_start = genome_pos + 1; // 1-based, first intronic base
+                let intron_end = genome_pos + intron_len as u64; // 1-based, last intronic base
+
+                // Detect splice motif
+                let scorer = AlignmentScorer {
+                    score_gap: 0,
+                    score_gap_noncan: -8,
+                    score_gap_gcag: -4,
+                    score_gap_atac: -8,
+                    score_del_open: -2,
+                    score_del_base: -2,
+                    score_ins_open: -2,
+                    score_ins_base: -2,
+                    align_intron_min: 21,
+                    sjdb_score: 2,
+                };
+                let motif = scorer.detect_splice_motif(genome_pos, intron_len, &index.genome);
+
+                // Calculate overhang (simplified: use exon lengths)
+                // TODO: More accurate overhang calculation from read/exon boundaries
+                let overhang = 5u32; // Placeholder - actual overhang needs exon boundary calculation
+
+                // Check if annotated
+                let strand = if transcript.is_reverse { 2 } else { 1 };
+                let annotated = index.junction_db.is_annotated(
+                    transcript.chr_idx,
+                    intron_start,
+                    intron_end,
+                    strand,
+                );
+
+                // Record junction
+                sj_stats.record_junction(
+                    transcript.chr_idx,
+                    intron_start,
+                    intron_end,
+                    strand,
+                    motif,
+                    is_unique,
+                    overhang,
+                    annotated,
+                );
+
+                // Advance genome position past the intron
+                genome_pos += intron_len as u64;
+            }
+            CigarOp::Match(len) | CigarOp::Equal(len) | CigarOp::Diff(len) => {
+                genome_pos += *len as u64;
+                _read_pos += *len as usize;
+            }
+            CigarOp::Ins(len) => {
+                _read_pos += *len as usize;
+            }
+            CigarOp::Del(len) => {
+                genome_pos += *len as u64;
+            }
+            CigarOp::SoftClip(len) | CigarOp::HardClip(len) => {
+                _read_pos += *len as usize;
+            }
+        }
+    }
 }

@@ -10,6 +10,7 @@ use crate::index::GenomeIndex;
 use crate::index::packed_array::PackedArray;
 use crate::index::sa_index::SaIndex;
 use crate::index::suffix_array::SuffixArray;
+use crate::junction::SpliceJunctionDb;
 use crate::params::Parameters;
 
 impl GenomeIndex {
@@ -39,10 +40,24 @@ impl GenomeIndex {
             sa_index.data.len()
         );
 
+        // Load GTF annotations if provided
+        let junction_db = if let Some(ref gtf_path) = params.sjdb_gtf_file {
+            SpliceJunctionDb::from_gtf(gtf_path, &genome)?
+        } else {
+            log::info!("No GTF file provided, all junctions will be novel");
+            SpliceJunctionDb::empty()
+        };
+
+        log::info!(
+            "Junction database loaded: {} annotated junctions",
+            junction_db.len()
+        );
+
         Ok(GenomeIndex {
             genome,
             suffix_array,
             sa_index,
+            junction_db,
         })
     }
 }

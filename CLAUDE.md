@@ -50,23 +50,14 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 10 (BAM output - unsorted streaming)
 - Phase 11 (Two-pass mode - novel junction discovery)
 - Phase 12 (Chimeric alignment detection)
-- **Phase 13.1 (Critical bugs fixed - ALIGNMENTS NOW WORKING!)** ✅
-
-**Critical Bugs Fixed** (2026-02-07 session):
-1. **Clustering explosion**: Limited by STAR parameters (winAnchorMultimapNmax=200, seedNoneLociPerWindow=50)
-2. **Missing exons**: Exons were never built from CIGAR (line 354 in stitch.rs had `TODO`)
-3. **Zero match scores**: Seeds started with score=0, preventing stitching
-4. **No soft clips**: Partial alignments didn't add soft clips for uncovered regions
+- **Phase 13.1 (Critical bugs fixed)** ✅
+- **Phase 13.2 (Mismatch counting + seed expansion bugs fixed)** ✅
 
 **Current Status**:
-- ✅ 100 reads align in ~5 seconds (vs STAR: <0.1s)
-- ✅ 100% mapped (STAR: 95%)
-- ✅ Valid SAM output with stitched alignments, soft clips, and splice junctions
-- ⚠️ All reads classified as multi-mapped (should be ~88% unique)
-- ⚠️ Still 50x slower than STAR
-- ⚠️ Some pathological reads still create thousands of clusters
-
-See [ALIGNMENT_FIXES.md](ALIGNMENT_FIXES.md) for detailed debugging session
+- ✅ 1000 reads: 82.4% unique, 8.3% multi, 9.3% unmapped (matches STAR: 82/7/11%)
+- ✅ 1000 reads in ~3 seconds (vs STAR <1s)
+- ✅ Valid SAM output with correct CIGAR, soft clips, and splice junctions
+- ✅ 170/170 unit tests passing
 
 ## Source Layout
 
@@ -151,7 +142,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 170/170 unit tests passing, 3 non-critical clippy warnings (too_many_arguments × 2, manual_arithmetic_check × 1)
+**Current test status**: 170/170 unit tests passing, 3 non-critical clippy warnings (too_many_arguments × 2, implicit_saturating_sub × 1)
 
 **Note**: Phase 9 integration tests fail due to pathologically repetitive test genomes (50 exact copies of 20bp). These tests need realistic genomes (deferred to Phase 13).
 

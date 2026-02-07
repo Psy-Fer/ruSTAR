@@ -2,6 +2,7 @@
 ///
 /// Stores integers with a specified bit width, packing them at bit-level
 /// granularity (LSB-first, little-endian bit packing).
+#[derive(Clone)]
 pub struct PackedArray {
     /// Number of bits per element
     word_length: u32,

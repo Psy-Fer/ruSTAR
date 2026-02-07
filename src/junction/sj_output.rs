@@ -21,27 +21,47 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Key for junction statistics
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
-struct SjKey {
-    chr_idx: usize,
-    intron_start: u64,
-    intron_end: u64,
-    strand: u8,
-    motif: u8, // Encoded motif value
+pub(crate) struct SjKey {
+    pub chr_idx: usize,
+    pub intron_start: u64,
+    pub intron_end: u64,
+    pub strand: u8,
+    pub motif: u8, // Encoded motif value
 }
 
 /// Counts for a single junction
 #[derive(Debug)]
-struct SjCounts {
-    unique_count: AtomicU32,
-    multi_count: AtomicU32,
-    max_overhang: AtomicU32,
-    annotated: bool,
+pub(crate) struct SjCounts {
+    pub unique_count: AtomicU32,
+    pub multi_count: AtomicU32,
+    pub max_overhang: AtomicU32,
+    pub annotated: bool,
 }
 
 /// Thread-safe junction statistics accumulator
 pub struct SpliceJunctionStats {
     /// Thread-safe map for parallel accumulation
     junctions: DashMap<SjKey, SjCounts>,
+}
+
+impl Clone for SpliceJunctionStats {
+    fn clone(&self) -> Self {
+        let new_map = DashMap::new();
+        for entry in self.junctions.iter() {
+            let key = entry.key().clone();
+            let counts = entry.value();
+            new_map.insert(
+                key,
+                SjCounts {
+                    unique_count: AtomicU32::new(counts.unique_count.load(Ordering::Relaxed)),
+                    multi_count: AtomicU32::new(counts.multi_count.load(Ordering::Relaxed)),
+                    max_overhang: AtomicU32::new(counts.max_overhang.load(Ordering::Relaxed)),
+                    annotated: counts.annotated,
+                },
+            );
+        }
+        Self { junctions: new_map }
+    }
 }
 
 impl SpliceJunctionStats {
@@ -172,6 +192,13 @@ impl SpliceJunctionStats {
     /// Check if any junctions have been recorded
     pub fn is_empty(&self) -> bool {
         self.junctions.is_empty()
+    }
+
+    /// Iterate over all junctions (for two-pass mode filtering)
+    pub(crate) fn iter(
+        &self,
+    ) -> impl Iterator<Item = dashmap::mapref::multiple::RefMulti<'_, SjKey, SjCounts>> {
+        self.junctions.iter()
     }
 }
 

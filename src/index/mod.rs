@@ -14,6 +14,7 @@ use sa_index::SaIndex;
 use suffix_array::SuffixArray;
 
 /// Complete genome index (genome + suffix array + SA index + junction database).
+#[derive(Clone)]
 pub struct GenomeIndex {
     pub genome: Genome,
     pub suffix_array: SuffixArray,

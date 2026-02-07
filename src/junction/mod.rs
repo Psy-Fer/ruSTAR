@@ -10,6 +10,8 @@ mod sj_output;
 
 pub use sj_output::SpliceJunctionStats;
 
+use crate::params::Parameters;
+
 use crate::error::Error;
 use crate::genome::Genome;
 use std::collections::HashMap;
@@ -26,12 +28,22 @@ struct JunctionKey {
 
 /// Information about a splice junction
 #[derive(Debug, Clone)]
-struct JunctionInfo {
-    annotated: bool,
+pub struct JunctionInfo {
+    pub annotated: bool,
     // Future: gene_id, transcript_ids for provenance tracking
 }
 
+/// Key for novel junction insertion (public for two-pass mode)
+#[derive(Hash, Eq, PartialEq, Clone, Debug)]
+pub struct NovelJunctionKey {
+    pub chr_idx: usize,
+    pub intron_start: u64,
+    pub intron_end: u64,
+    pub strand: u8, // 0=unknown, 1=+, 2=-
+}
+
 /// Splice junction database built from GTF annotations
+#[derive(Clone)]
 pub struct SpliceJunctionDb {
     /// Map: (chr_idx, intron_start, intron_end, strand) → annotated
     junctions: HashMap<JunctionKey, JunctionInfo>,
@@ -104,11 +116,85 @@ impl SpliceJunctionDb {
     pub fn is_empty(&self) -> bool {
         self.junctions.is_empty()
     }
+
+    /// Insert novel junctions discovered during two-pass mode
+    ///
+    /// # Arguments
+    /// * `novel_junctions` - Vector of (key, info) pairs for novel junctions
+    pub fn insert_novel(&mut self, novel_junctions: Vec<(NovelJunctionKey, JunctionInfo)>) {
+        for (key, info) in novel_junctions {
+            let junction_key = JunctionKey {
+                chr_idx: key.chr_idx,
+                intron_start: key.intron_start,
+                intron_end: key.intron_end,
+                strand: key.strand,
+            };
+            self.junctions.insert(junction_key, info);
+        }
+    }
+}
+
+/// Filter novel junctions by coverage and overhang thresholds (for two-pass mode)
+///
+/// # Arguments
+/// * `sj_stats` - Junction statistics from pass 1
+/// * `params` - Parameters (for thresholds)
+///
+/// # Returns
+/// Vector of novel junctions that meet filtering criteria
+pub fn filter_novel_junctions(
+    sj_stats: &SpliceJunctionStats,
+    params: &Parameters,
+) -> Vec<(NovelJunctionKey, JunctionInfo)> {
+    use std::sync::atomic::Ordering;
+
+    let min_overhang = params.align_sj_overhang_min;
+    let min_unique = 1; // Configurable if needed in future
+    let min_multi = 2; // Configurable if needed in future
+
+    sj_stats
+        .iter()
+        .filter_map(|entry| {
+            let key = entry.key();
+            let counts = entry.value();
+
+            // Skip if already annotated (from GTF)
+            if counts.annotated {
+                return None;
+            }
+
+            let unique = counts.unique_count.load(Ordering::Relaxed);
+            let multi = counts.multi_count.load(Ordering::Relaxed);
+            let max_overhang = counts.max_overhang.load(Ordering::Relaxed);
+
+            // Coverage threshold: at least 1 unique OR 2 multi
+            let has_coverage = unique >= min_unique || multi >= min_multi;
+
+            // Overhang threshold
+            let has_overhang = max_overhang >= min_overhang;
+
+            if has_coverage && has_overhang {
+                let novel_key = NovelJunctionKey {
+                    chr_idx: key.chr_idx,
+                    intron_start: key.intron_start,
+                    intron_end: key.intron_end,
+                    strand: key.strand,
+                };
+                let info = JunctionInfo {
+                    annotated: false, // Novel junctions are not annotated
+                };
+                Some((novel_key, info))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn test_junction_db_empty() {
@@ -197,5 +283,63 @@ mod tests {
         assert!(db.is_annotated(0, 100, 200, 1));
         assert!(db.is_annotated(0, 100, 200, 2));
         assert!(!db.is_annotated(0, 100, 200, 0)); // Unknown strand
+    }
+
+    #[test]
+    fn test_insert_novel_junctions() {
+        let mut db = SpliceJunctionDb::empty();
+
+        // Insert a novel junction
+        let key = NovelJunctionKey {
+            chr_idx: 0,
+            intron_start: 100,
+            intron_end: 200,
+            strand: 1,
+        };
+        let info = JunctionInfo { annotated: false };
+        db.insert_novel(vec![(key, info)]);
+
+        assert_eq!(db.len(), 1);
+        assert!(!db.is_annotated(0, 100, 200, 1)); // Novel, not annotated
+
+        // Insert another novel junction
+        let key2 = NovelJunctionKey {
+            chr_idx: 0,
+            intron_start: 300,
+            intron_end: 400,
+            strand: 2,
+        };
+        let info2 = JunctionInfo { annotated: false };
+        db.insert_novel(vec![(key2, info2)]);
+
+        assert_eq!(db.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_novel_junctions() {
+        use crate::align::score::SpliceMotif;
+
+        let sj_stats = SpliceJunctionStats::new();
+
+        // Add a high-quality novel junction (should pass filter)
+        sj_stats.record_junction(0, 100, 200, 1, SpliceMotif::GtAg, true, 10, false);
+        sj_stats.record_junction(0, 100, 200, 1, SpliceMotif::GtAg, true, 10, false);
+
+        // Add a low-overhang novel junction (should fail filter)
+        sj_stats.record_junction(0, 300, 400, 1, SpliceMotif::GtAg, true, 2, false);
+
+        // Add an annotated junction (should be excluded)
+        sj_stats.record_junction(0, 500, 600, 1, SpliceMotif::GtAg, true, 10, true);
+
+        // Create minimal params for testing
+        let params = Parameters::try_parse_from(vec!["ruSTAR"]).unwrap();
+
+        let novel_junctions = filter_novel_junctions(&sj_stats, &params);
+
+        // Should only get the high-quality novel junction (default align_sj_overhang_min is 5)
+        assert_eq!(novel_junctions.len(), 1);
+        assert_eq!(novel_junctions[0].0.intron_start, 100);
+        assert_eq!(novel_junctions[0].0.intron_end, 200);
+        assert!(!novel_junctions[0].1.annotated);
     }
 }

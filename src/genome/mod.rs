@@ -16,6 +16,7 @@ const GENOME_SPACING_CHAR: u8 = 5;
 /// - A=0, C=1, G=2, T=3, N=4, padding=5
 /// - Chromosomes are concatenated with padding to bin boundaries
 /// - The reverse complement occupies the second half of the `sequence` buffer
+#[derive(Clone)]
 pub struct Genome {
     /// Forward genome (0..n_genome) + reverse complement (n_genome..2*n_genome).
     /// Initialized to GENOME_SPACING_CHAR (5), then overwritten with actual bases.

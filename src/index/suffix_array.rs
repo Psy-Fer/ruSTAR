@@ -6,6 +6,7 @@ use crate::index::packed_array::PackedArray;
 ///
 /// Stores positions in the genome (forward + reverse complement) sorted
 /// by their suffixes, enabling fast exact match search.
+#[derive(Clone)]
 pub struct SuffixArray {
     /// Packed array of suffix positions (with strand bit)
     pub data: PackedArray,

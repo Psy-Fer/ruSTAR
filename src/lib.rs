@@ -58,28 +58,47 @@ fn genome_generate(params: &Parameters) -> anyhow::Result<()> {
 
 /// Trait for alignment output writers (SAM or BAM)
 trait AlignmentWriter {
-    fn write_batch(&mut self, batch: &[noodles::sam::alignment::record_buf::RecordBuf]) -> Result<(), error::Error>;
+    fn write_batch(
+        &mut self,
+        batch: &[noodles::sam::alignment::record_buf::RecordBuf],
+    ) -> Result<(), error::Error>;
+}
+
+/// Null writer that discards all output (for two-pass mode pass 1)
+struct NullWriter;
+
+impl AlignmentWriter for NullWriter {
+    fn write_batch(
+        &mut self,
+        _batch: &[noodles::sam::alignment::record_buf::RecordBuf],
+    ) -> Result<(), error::Error> {
+        Ok(()) // Discard all records
+    }
 }
 
 impl AlignmentWriter for crate::io::sam::SamWriter {
-    fn write_batch(&mut self, batch: &[noodles::sam::alignment::record_buf::RecordBuf]) -> Result<(), error::Error> {
+    fn write_batch(
+        &mut self,
+        batch: &[noodles::sam::alignment::record_buf::RecordBuf],
+    ) -> Result<(), error::Error> {
         self.write_batch(batch)
     }
 }
 
 impl AlignmentWriter for crate::io::bam::BamWriter {
-    fn write_batch(&mut self, batch: &[noodles::sam::alignment::record_buf::RecordBuf]) -> Result<(), error::Error> {
+    fn write_batch(
+        &mut self,
+        batch: &[noodles::sam::alignment::record_buf::RecordBuf],
+    ) -> Result<(), error::Error> {
         self.write_batch(batch)
     }
 }
 
 fn align_reads(params: &Parameters) -> anyhow::Result<()> {
     use crate::index::GenomeIndex;
-    use crate::io::bam::BamWriter;
-    use crate::io::sam::SamWriter;
-    use crate::junction::SpliceJunctionStats;
-    use crate::params::OutSamFormat;
-    use crate::stats::AlignmentStats;
+
+    use crate::params::TwopassMode;
+
     use std::sync::Arc;
 
     info!("Starting read alignment...");
@@ -97,6 +116,11 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
         info!("Using single-threaded mode");
     }
 
+    // Validate read files
+    if params.read_files_in.is_empty() {
+        anyhow::bail!("No read files specified (--readFilesIn)");
+    }
+
     // 1. Load genome index
     info!("Loading genome index from {}", params.genome_dir.display());
     let index = Arc::new(GenomeIndex::load(&params.genome_dir, params)?);
@@ -105,17 +129,39 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
         index.genome.n_chr_real, index.genome.n_genome
     );
 
-    // 2. Detect single-end vs paired-end mode
-    if params.read_files_in.is_empty() {
-        anyhow::bail!("No read files specified (--readFilesIn)");
+    // 2. Dispatch based on two-pass mode
+    match params.twopass_mode {
+        TwopassMode::None => {
+            info!("Running single-pass alignment");
+            run_single_pass(&index, params)?;
+        }
+        TwopassMode::Basic => {
+            info!("Running two-pass alignment mode");
+            run_two_pass(&index, params)?;
+        }
     }
 
-    // 3. Initialize statistics collectors
-    let stats = Arc::new(AlignmentStats::new());
-    let sj_stats = Arc::new(SpliceJunctionStats::new());
+    info!("Alignment complete!");
+    Ok(())
+}
+
+/// Run single-pass alignment (original logic)
+fn run_single_pass(
+    index: &std::sync::Arc<crate::index::GenomeIndex>,
+    params: &Parameters,
+) -> anyhow::Result<()> {
+    use crate::io::bam::BamWriter;
+    use crate::io::sam::SamWriter;
+    use crate::params::OutSamFormat;
+    use std::sync::Arc;
+
+    // Initialize statistics collectors
+    let stats = Arc::new(crate::stats::AlignmentStats::new());
+    let sj_stats = Arc::new(crate::junction::SpliceJunctionStats::new());
 
     // 4. Route to SAM or BAM output based on --outSAMtype
-    let out_type = params.out_sam_type()
+    let out_type = params
+        .out_sam_type()
         .map_err(|e| anyhow::anyhow!("Invalid --outSAMtype: {}", e))?;
 
     match out_type.format {
@@ -132,8 +178,8 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
 
             // Route to single-end or paired-end mode
             match params.read_files_in.len() {
-                1 => align_reads_single_end(params, &index, &mut writer, &stats, &sj_stats),
-                2 => align_reads_paired_end(params, &index, &mut writer, &stats, &sj_stats),
+                1 => align_reads_single_end(params, index, &mut writer, &stats, &sj_stats),
+                2 => align_reads_paired_end(params, index, &mut writer, &stats, &sj_stats),
                 n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
             }?;
         }
@@ -150,8 +196,8 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
 
             // Route to single-end or paired-end mode (same functions as SAM, generic!)
             match params.read_files_in.len() {
-                1 => align_reads_single_end(params, &index, &mut writer, &stats, &sj_stats),
-                2 => align_reads_paired_end(params, &index, &mut writer, &stats, &sj_stats),
+                1 => align_reads_single_end(params, index, &mut writer, &stats, &sj_stats),
+                2 => align_reads_paired_end(params, index, &mut writer, &stats, &sj_stats),
                 n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
             }?;
 
@@ -175,10 +221,98 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
     }
 
     // 6. Print summary
-    info!("Alignment complete!");
     stats.print_summary();
 
     Ok(())
+}
+
+/// Run two-pass alignment mode
+fn run_two_pass(
+    index: &std::sync::Arc<crate::index::GenomeIndex>,
+    params: &Parameters,
+) -> anyhow::Result<()> {
+    use std::sync::Arc;
+
+    // PASS 1: Junction discovery
+    info!("Two-pass mode: Pass 1 - Junction discovery");
+    let (sj_stats_pass1, novel_junctions) = run_pass1(index, params)?;
+
+    // Write SJ.pass1.out.tab
+    let pass1_path = params.out_file_name_prefix.join("SJ.pass1.out.tab");
+
+    // Create output directory if it doesn't exist
+    if let Some(parent) = pass1_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    info!("Writing pass 1 junctions to {}", pass1_path.display());
+    sj_stats_pass1.write_output(&pass1_path, &index.genome)?;
+    info!(
+        "Pass 1 discovered {} novel junctions",
+        novel_junctions.len()
+    );
+
+    // Insert novel junctions into DB
+    let mut merged_index = (**index).clone();
+    merged_index
+        .junction_db
+        .insert_novel(novel_junctions.clone());
+    info!(
+        "Merged junction DB: {} total junctions",
+        merged_index.junction_db.len()
+    );
+
+    // PASS 2: Re-alignment with merged DB
+    info!("Two-pass mode: Pass 2 - Re-alignment");
+    run_single_pass(&Arc::new(merged_index), params)?;
+
+    Ok(())
+}
+
+/// Run pass 1 of two-pass mode (junction discovery)
+fn run_pass1(
+    index: &std::sync::Arc<crate::index::GenomeIndex>,
+    params: &Parameters,
+) -> anyhow::Result<(
+    crate::junction::SpliceJunctionStats,
+    Vec<(
+        crate::junction::NovelJunctionKey,
+        crate::junction::JunctionInfo,
+    )>,
+)> {
+    use std::sync::Arc;
+
+    let stats = Arc::new(crate::stats::AlignmentStats::new());
+    let sj_stats = Arc::new(crate::junction::SpliceJunctionStats::new());
+
+    // Modify params to limit reads for pass 1
+    let mut params_pass1 = params.clone();
+    if params.twopass1_reads_n >= 0 {
+        params_pass1.read_map_number = params.twopass1_reads_n;
+        info!("Pass 1 will align {} reads", params.twopass1_reads_n);
+    } else {
+        info!("Pass 1 will align all reads");
+    }
+
+    // Create NullWriter (discard SAM/BAM output in pass 1)
+    let mut null_writer = NullWriter;
+
+    // Align reads (single-end or paired-end)
+    match params.read_files_in.len() {
+        1 => align_reads_single_end(&params_pass1, index, &mut null_writer, &stats, &sj_stats)?,
+        2 => align_reads_paired_end(&params_pass1, index, &mut null_writer, &stats, &sj_stats)?,
+        n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
+    }
+
+    info!("Pass 1 aligned {} reads", stats.total_reads());
+
+    // Filter novel junctions
+    let novel_junctions = crate::junction::filter_novel_junctions(&sj_stats, params);
+
+    // Return ownership of sj_stats
+    let sj_stats = Arc::try_unwrap(sj_stats).unwrap_or_else(|arc| (*arc).clone());
+
+    Ok((sj_stats, novel_junctions))
 }
 
 /// Align single-end reads

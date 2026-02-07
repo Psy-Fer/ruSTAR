@@ -7,6 +7,7 @@ use crate::index::suffix_array::SuffixArray;
 ///
 /// For each k-mer prefix (up to genomeSAindexNbases length), stores the
 /// SA range where suffixes starting with that prefix can be found.
+#[derive(Clone)]
 pub struct SaIndex {
     /// Length of indexed k-mers (typically 14)
     pub nbases: u32,

@@ -47,11 +47,7 @@ impl BamWriter {
     /// * `output_path` - Path to output BAM file
     /// * `genome` - Genome index with chromosome information
     /// * `params` - Parameters (for @PG header)
-    pub fn create(
-        output_path: &Path,
-        genome: &Genome,
-        params: &Parameters,
-    ) -> Result<Self, Error> {
+    pub fn create(output_path: &Path, genome: &Genome, params: &Parameters) -> Result<Self, Error> {
         let file = File::create(output_path)?;
         let buf_writer = BufWriter::new(file);
 
@@ -71,8 +67,7 @@ impl BamWriter {
     /// * `batch` - Slice of records to write
     pub fn write_batch(&mut self, batch: &[RecordBuf]) -> Result<(), Error> {
         for record in batch {
-            self.writer
-                .write_alignment_record(&self.header, record)?;
+            self.writer.write_alignment_record(&self.header, record)?;
         }
         Ok(())
     }

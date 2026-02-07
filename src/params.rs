@@ -174,7 +174,7 @@ impl std::str::FromStr for TwopassMode {
 ///
 /// Only the ~40 most important parameters are included; more will be added
 /// incrementally as later phases need them.
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 #[command(
     name = "ruSTAR",
     about = "RNA-seq aligner (Rust reimplementation of STAR)",

@@ -156,6 +156,11 @@ impl AlignmentStats {
             100.0 * self.total_mapped() as f64 / total_reads as f64
         }
     }
+
+    /// Get total number of reads processed
+    pub fn total_reads(&self) -> u64 {
+        self.total_reads.load(Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]

@@ -16,7 +16,7 @@ Phase 1 (CLI) ✅
                                 └→ Phase 7 (splice junctions) ✅ ← GTF/junction annotations
                                      └→ Phase 10 (BAM output) ✅ ← Binary alignment format
                                           └→ Phase 11 (two-pass) ✅ ← Novel junction discovery
-                                               └→ Phase 12 (chimeric)
+                                               └→ Phase 12 (chimeric) ✅ ← Gene fusion detection
                                                     └→ Phase 13 (optimization)
                                                          └→ Phase 14 (STARsolo)
 ```
@@ -490,9 +490,9 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 
 ---
 
-## Phase 12: Chimeric Detection
+## Phase 12: Chimeric Detection ✅
 
-**Status**: Phase 12.1 Partial (Core infrastructure complete, output integration pending)
+**Status**: Complete (single-end chimeric detection functional)
 
 **Goal**: Detect and report chimeric alignments (gene fusions, circular RNAs, structural variants).
 
@@ -522,27 +522,24 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 - All 170 tests passing
 - 4 non-critical clippy warnings (acceptable)
 
-**Known limitations** (Phase 12.2 work):
-- ❌ Chimeric alignments detected but NOT written to file in end-to-end pipeline
-- ❌ Output writer exists but not integrated with parallel processing
+**Phase 12.2 Deliverables** (Completed):
+- `src/lib.rs` — Integrated chimeric detection into end-to-end pipeline (~100 lines modified):
+  - Created `AlignmentBatchResults` helper struct
+  - Modified `align_reads_single_end()` to collect chimeric alignments from parallel workers
+  - Created `ChimericJunctionWriter` at alignment start if chimSegmentMin > 0
+  - Write chimeric alignments to Chimeric.out.junction after each batch
+  - Added chimeric writer infrastructure to `align_reads_paired_end()` (ready for future implementation)
+  - Flush chimeric output at end of alignment
+- Total Phase 12 code: ~1000 lines (900 new in Phase 12.1 + 100 modified in Phase 12.2)
+
+**Known limitations** (future work):
 - ❌ Tier 3 (re-mapping soft-clipped regions) not implemented
-- ❌ Paired-end chimeric detection not implemented
-- To complete: Refactor `align_reads_single_end()` to collect and write chimeric alignments
+- ❌ Paired-end chimeric detection not implemented (infrastructure ready, detection logic needed)
+- ❌ No integration tests with synthetic fusion reads yet (needs test data)
 
-**Files modified**:
-- `src/lib.rs` — Updated `align_read()` call, added chimeric result handling (currently discarded)
-- `src/align/mod.rs` — Re-exported commonly used types
-- Total new code: ~900 lines
-- Total modified code: ~95 lines
+**Verified**: `cargo test` (170/170 pass), `cargo clippy` (4 non-critical warnings), `cargo fmt --check` (pass), `cargo build --release` (success)
 
-**Verified**: `cargo test` (170/170 pass), `cargo clippy` (4 non-critical warnings), `cargo fmt --check` (pass)
-
-**Next steps** (Phase 12.2):
-1. Refactor parallel processing in `align_reads_single_end()` to collect chimeric alignments
-2. Create `ChimericJunctionWriter` at start of alignment run
-3. Write chimeric alignments to file after each batch
-4. Add integration tests with synthetic fusion reads
-5. Implement Tier 3: re-mapping soft-clipped regions
+**Usage**: Enable with `--chimSegmentMin 15` (typical value 10-20bp)
 
 ---
 

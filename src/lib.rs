@@ -312,6 +312,12 @@ fn run_pass1(
     Ok((sj_stats, novel_junctions))
 }
 
+/// Helper struct to hold alignment results from parallel processing
+struct AlignmentBatchResults {
+    sam_records: crate::io::sam::BufferedSamRecords,
+    chimeric_alns: Vec<crate::chimeric::ChimericAlignment>,
+}
+
 /// Align single-end reads
 fn align_reads_single_end<W: AlignmentWriter>(
     params: &Parameters,
@@ -330,6 +336,19 @@ fn align_reads_single_end<W: AlignmentWriter>(
     info!("Reading single-end from {}", read_file.display());
 
     let mut reader = FastqReader::open(read_file, params.read_files_command.as_deref())?;
+
+    // Create chimeric output writer if enabled
+    let mut chimeric_writer = if params.chim_segment_min > 0 {
+        use crate::chimeric::ChimericJunctionWriter;
+        let prefix = params.out_file_name_prefix.to_str().unwrap_or(".");
+        info!(
+            "Chimeric detection enabled (chimSegmentMin={})",
+            params.chim_segment_min
+        );
+        Some(ChimericJunctionWriter::new(prefix)?)
+    } else {
+        None
+    };
 
     let stats = Arc::clone(stats);
     let sj_stats = Arc::clone(sj_stats);
@@ -364,7 +383,7 @@ fn align_reads_single_end<W: AlignmentWriter>(
         let batch_to_process = &batch[..reads_to_process];
 
         // Parallel alignment processing
-        let sam_buffers: Vec<Result<BufferedSamRecords, error::Error>> = batch_to_process
+        let batch_results: Vec<Result<AlignmentBatchResults, error::Error>> = batch_to_process
             .par_iter()
             .map(|read| {
                 #[allow(clippy::needless_borrow)]
@@ -379,6 +398,7 @@ fn align_reads_single_end<W: AlignmentWriter>(
                     clip_read(&read.sequence, &read.quality, clip5p, clip3p);
 
                 let mut buffer = BufferedSamRecords::new();
+                let mut chimeric_alns = Vec::new();
 
                 // Skip if read is too short after clipping
                 if clipped_seq.is_empty() {
@@ -391,12 +411,20 @@ fn align_reads_single_end<W: AlignmentWriter>(
                         )?;
                         buffer.push(record);
                     }
-                    return Ok(buffer);
+                    return Ok(AlignmentBatchResults {
+                        sam_records: buffer,
+                        chimeric_alns,
+                    });
                 }
 
                 // Align read (CPU-intensive, pure function)
-                let (transcripts, _chimeric_alns) =
+                let (transcripts, chimeric_results) =
                     align_read(&clipped_seq, &read.name, &index, params)?;
+
+                // Collect chimeric alignments if enabled
+                if params.chim_segment_min > 0 {
+                    chimeric_alns.extend(chimeric_results);
+                }
 
                 // Record stats (atomic, lock-free)
                 stats.record_alignment(transcripts.len(), max_multimaps);
@@ -406,10 +434,6 @@ fn align_reads_single_end<W: AlignmentWriter>(
                 for transcript in &transcripts {
                     record_transcript_junctions(transcript, &index, &sj_stats, is_unique);
                 }
-
-                // TODO Phase 12: Write chimeric alignments to Chimeric.out.junction
-                // (Currently discarding chimeric alignments - writing requires refactoring
-                // the parallel processing to collect chimeric results)
 
                 // Build SAM records (no I/O, just construction)
                 if transcripts.is_empty() {
@@ -438,14 +462,30 @@ fn align_reads_single_end<W: AlignmentWriter>(
                 }
                 // else: too many loci, skip output
 
-                Ok(buffer)
+                Ok(AlignmentBatchResults {
+                    sam_records: buffer,
+                    chimeric_alns,
+                })
             })
             .collect();
 
-        // Sequential SAM writing (merge buffers in chunk order)
-        for buffer_result in sam_buffers {
-            let buffer = buffer_result?;
-            writer.write_batch(&buffer.records)?;
+        // Sequential writing (merge buffers in chunk order)
+        for result in batch_results {
+            let batch = result?;
+
+            // Write SAM/BAM records
+            writer.write_batch(&batch.sam_records.records)?;
+
+            // Write chimeric alignments
+            if let Some(ref mut chim_writer) = chimeric_writer {
+                for chim_aln in &batch.chimeric_alns {
+                    chim_writer.write_alignment(
+                        chim_aln,
+                        &index.genome.chr_name,
+                        &chim_aln.read_name,
+                    )?;
+                }
+            }
         }
 
         read_count += reads_to_process as u64;
@@ -458,6 +498,12 @@ fn align_reads_single_end<W: AlignmentWriter>(
         if read_count >= max_reads {
             break;
         }
+    }
+
+    // Flush chimeric output if enabled
+    if let Some(ref mut chim_writer) = chimeric_writer {
+        chim_writer.flush()?;
+        info!("Chimeric junction output complete");
     }
 
     Ok(())
@@ -488,6 +534,19 @@ fn align_reads_paired_end<W: AlignmentWriter>(
         &params.read_files_in[1],
         params.read_files_command.as_deref(),
     )?;
+
+    // Create chimeric output writer if enabled (paired-end chimeric detection not yet implemented)
+    let mut chimeric_writer = if params.chim_segment_min > 0 {
+        use crate::chimeric::ChimericJunctionWriter;
+        let prefix = params.out_file_name_prefix.to_str().unwrap_or(".");
+        info!(
+            "Chimeric detection enabled (chimSegmentMin={}) - paired-end chimeric detection not yet implemented",
+            params.chim_segment_min
+        );
+        Some(ChimericJunctionWriter::new(prefix)?)
+    } else {
+        None
+    };
 
     let stats = Arc::clone(stats);
     let sj_stats = Arc::clone(sj_stats);
@@ -631,6 +690,11 @@ fn align_reads_paired_end<W: AlignmentWriter>(
         if read_count >= max_reads {
             break;
         }
+    }
+
+    // Flush chimeric output if enabled (currently no chimeric alignments from paired-end)
+    if let Some(ref mut chim_writer) = chimeric_writer {
+        chim_writer.flush()?;
     }
 
     Ok(())

@@ -42,7 +42,7 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 7 (GTF/splice junction annotation)
 - Phase 10 (BAM output - unsorted streaming)
 - Phase 11 (Two-pass mode - novel junction discovery)
-- Phase 12.1 (Chimeric alignment detection - Tier 1 & 2, partial)
+- Phase 12 (Chimeric alignment detection - COMPLETE)
 
 ## Source Layout
 
@@ -131,7 +131,7 @@ predicates = "3"
 
 ## Current Capabilities
 
-ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode**:
+ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chimeric detection**:
 - Generate genome indices from FASTA files
 - Read plain or gzipped FASTQ files
 - Multi-threaded parallel alignment (via `--runThreadN`)
@@ -149,18 +149,23 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode**:
   - 1-based genomic positions
   - Mate information (RNEXT, PNEXT, TLEN for paired-end)
 - Splice junction statistics output (SJ.out.tab, SJ.pass1.out.tab in two-pass mode)
+- Chimeric alignment detection for single-end reads (`--chimSegmentMin` > 0):
+  - Detects inter-chromosomal fusions (e.g., BCR-ABL chr9→chr22)
+  - Detects intra-chromosomal strand breaks
+  - Detects large-distance breaks (>1Mb same chr/strand)
+  - Soft-clip based detection (>20% clipped reads)
+  - Outputs Chimeric.out.junction file (14-column STAR-compatible format)
+  - Junction type classification (GT/AG, CT/AC, etc.)
 - Print alignment statistics (unique/multi/unmapped percentages)
 
 ## Limitations (to be addressed in future phases)
 
 - No SAM optional tags (AS, NM, NH, HI) - noodles lifetime complexity
 - No coordinate-sorted BAM output (unsorted only; use `samtools sort`)
-- Chimeric alignment detection partially implemented (Phase 12.1):
-  - ✅ Core detection infrastructure (Tier 1 & 2 algorithms)
-  - ✅ Data structures (ChimericSegment, ChimericAlignment)
-  - ✅ Junction type classification and repeat length calculation
-  - ❌ NOT YET CONNECTED to output writer (chimeric alignments detected but discarded)
-  - ❌ Chimeric.out.junction file NOT created in end-to-end pipeline
-  - To complete: Refactor parallel processing to collect and write chimeric alignments
+- Chimeric alignment detection (Phase 12):
+  - ✅ Single-end chimeric detection (inter-chr, strand breaks, large gaps, soft-clips)
+  - ✅ Chimeric.out.junction output file
+  - ❌ Paired-end chimeric detection not yet implemented
+  - ❌ Tier 3 (re-mapping soft-clipped regions) not yet implemented
 - No performance optimizations (Phase 13)
 - No STARsolo single-cell features (Phase 14)

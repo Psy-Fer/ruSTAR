@@ -15,6 +15,26 @@ use std::io::BufWriter;
 use std::num::NonZeroUsize;
 use std::path::Path;
 
+/// Buffer for SAM records built by parallel threads
+#[derive(Default)]
+pub struct BufferedSamRecords {
+    pub records: Vec<RecordBuf>,
+}
+
+impl BufferedSamRecords {
+    /// Create new buffer with capacity
+    pub fn new() -> Self {
+        Self {
+            records: Vec::with_capacity(10000),
+        }
+    }
+
+    /// Add a record to the buffer
+    pub fn push(&mut self, record: RecordBuf) {
+        self.records.push(record);
+    }
+}
+
 /// SAM file writer
 pub struct SamWriter {
     writer: sam::io::Writer<BufWriter<File>>,
@@ -95,6 +115,33 @@ impl SamWriter {
         read_seq: &[u8],
         read_qual: &[u8],
     ) -> Result<(), Error> {
+        let record = Self::build_unmapped_record(read_name, read_seq, read_qual)?;
+        self.writer.write_alignment_record(&self.header, &record)?;
+        Ok(())
+    }
+
+    /// Write batch of buffered records (for parallel processing)
+    ///
+    /// # Arguments
+    /// * `batch` - Slice of records to write
+    pub fn write_batch(&mut self, batch: &[RecordBuf]) -> Result<(), Error> {
+        for record in batch {
+            self.writer.write_alignment_record(&self.header, record)?;
+        }
+        Ok(())
+    }
+
+    /// Build unmapped record (without writing)
+    ///
+    /// # Arguments
+    /// * `read_name` - Read identifier
+    /// * `read_seq` - Read sequence (encoded)
+    /// * `read_qual` - Quality scores
+    pub fn build_unmapped_record(
+        read_name: &str,
+        read_seq: &[u8],
+        read_qual: &[u8],
+    ) -> Result<RecordBuf, Error> {
         let mut record = RecordBuf::default();
 
         // Name
@@ -111,9 +158,49 @@ impl SamWriter {
         // Quality scores
         *record.quality_scores_mut() = QualityScores::from(read_qual.to_vec());
 
-        self.writer.write_alignment_record(&self.header, &record)?;
+        Ok(record)
+    }
 
-        Ok(())
+    /// Build alignment records (without writing) for a read
+    ///
+    /// # Arguments
+    /// * `read_name` - Read identifier
+    /// * `read_seq` - Read sequence (encoded)
+    /// * `read_qual` - Quality scores
+    /// * `transcripts` - Alignment transcripts (1 or more for multi-mappers)
+    /// * `genome` - Genome index
+    /// * `params` - Parameters
+    pub fn build_alignment_records(
+        read_name: &str,
+        read_seq: &[u8],
+        read_qual: &[u8],
+        transcripts: &[Transcript],
+        genome: &Genome,
+        params: &Parameters,
+    ) -> Result<Vec<RecordBuf>, Error> {
+        if transcripts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let n_alignments = transcripts.len();
+        let mapq = calculate_mapq(n_alignments, params.out_sam_mapq_unique);
+
+        let mut records = Vec::with_capacity(n_alignments);
+        for (hit_index, transcript) in transcripts.iter().enumerate() {
+            let record = transcript_to_record(
+                transcript,
+                read_name,
+                read_seq,
+                read_qual,
+                genome,
+                mapq,
+                n_alignments,
+                hit_index + 1, // 1-based
+            )?;
+            records.push(record);
+        }
+
+        Ok(records)
     }
 }
 

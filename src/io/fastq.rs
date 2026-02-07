@@ -103,6 +103,24 @@ impl FastqReader {
             None => Ok(None),
         }
     }
+
+    /// Read a batch of encoded reads for parallel processing
+    ///
+    /// # Arguments
+    /// * `batch_size` - Maximum number of reads to return
+    ///
+    /// # Returns
+    /// Vector of encoded reads (may be shorter than batch_size at end of file)
+    pub fn read_batch(&mut self, batch_size: usize) -> Result<Vec<EncodedRead>, Error> {
+        let mut batch = Vec::with_capacity(batch_size);
+        for _ in 0..batch_size {
+            match self.next_encoded()? {
+                Some(read) => batch.push(read),
+                None => break,
+            }
+        }
+        Ok(batch)
+    }
 }
 
 /// Convert FASTQ base character to genome encoding

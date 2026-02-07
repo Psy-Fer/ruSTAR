@@ -56,10 +56,29 @@ fn genome_generate(params: &Parameters) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Trait for alignment output writers (SAM or BAM)
+trait AlignmentWriter {
+    fn write_batch(&mut self, batch: &[noodles::sam::alignment::record_buf::RecordBuf]) -> Result<(), error::Error>;
+}
+
+impl AlignmentWriter for crate::io::sam::SamWriter {
+    fn write_batch(&mut self, batch: &[noodles::sam::alignment::record_buf::RecordBuf]) -> Result<(), error::Error> {
+        self.write_batch(batch)
+    }
+}
+
+impl AlignmentWriter for crate::io::bam::BamWriter {
+    fn write_batch(&mut self, batch: &[noodles::sam::alignment::record_buf::RecordBuf]) -> Result<(), error::Error> {
+        self.write_batch(batch)
+    }
+}
+
 fn align_reads(params: &Parameters) -> anyhow::Result<()> {
     use crate::index::GenomeIndex;
+    use crate::io::bam::BamWriter;
     use crate::io::sam::SamWriter;
     use crate::junction::SpliceJunctionStats;
+    use crate::params::OutSamFormat;
     use crate::stats::AlignmentStats;
     use std::sync::Arc;
 
@@ -91,29 +110,61 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
         anyhow::bail!("No read files specified (--readFilesIn)");
     }
 
-    // 3. Open SAM writer
-    let output_path = params.out_file_name_prefix.join("Aligned.out.sam");
-    info!("Writing to {}", output_path.display());
-
-    // Create output directory if it doesn't exist
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let mut writer = SamWriter::create(&output_path, &index.genome, params)?;
-
-    // 4. Initialize statistics collectors
+    // 3. Initialize statistics collectors
     let stats = Arc::new(AlignmentStats::new());
     let sj_stats = Arc::new(SpliceJunctionStats::new());
 
-    // 5. Route to single-end or paired-end mode
-    match params.read_files_in.len() {
-        1 => align_reads_single_end(params, &index, &mut writer, &stats, &sj_stats),
-        2 => align_reads_paired_end(params, &index, &mut writer, &stats, &sj_stats),
-        n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
-    }?;
+    // 4. Route to SAM or BAM output based on --outSAMtype
+    let out_type = params.out_sam_type()
+        .map_err(|e| anyhow::anyhow!("Invalid --outSAMtype: {}", e))?;
 
-    // 6. Write SJ.out.tab file
+    match out_type.format {
+        OutSamFormat::Sam => {
+            let output_path = params.out_file_name_prefix.join("Aligned.out.sam");
+            info!("Writing SAM to {}", output_path.display());
+
+            // Create output directory if it doesn't exist
+            if let Some(parent) = output_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            let mut writer = SamWriter::create(&output_path, &index.genome, params)?;
+
+            // Route to single-end or paired-end mode
+            match params.read_files_in.len() {
+                1 => align_reads_single_end(params, &index, &mut writer, &stats, &sj_stats),
+                2 => align_reads_paired_end(params, &index, &mut writer, &stats, &sj_stats),
+                n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
+            }?;
+        }
+        OutSamFormat::Bam => {
+            let output_path = params.out_file_name_prefix.join("Aligned.out.bam");
+            info!("Writing BAM to {}", output_path.display());
+
+            // Create output directory if it doesn't exist
+            if let Some(parent) = output_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            let mut writer = BamWriter::create(&output_path, &index.genome, params)?;
+
+            // Route to single-end or paired-end mode (same functions as SAM, generic!)
+            match params.read_files_in.len() {
+                1 => align_reads_single_end(params, &index, &mut writer, &stats, &sj_stats),
+                2 => align_reads_paired_end(params, &index, &mut writer, &stats, &sj_stats),
+                n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
+            }?;
+
+            // Finish BAM file (flush BGZF buffers)
+            writer.finish()?;
+        }
+        OutSamFormat::None => {
+            info!("Output format set to None, skipping alignment output");
+            anyhow::bail!("Output format 'None' not yet implemented");
+        }
+    }
+
+    // 5. Write SJ.out.tab file
     let sj_output_path = params.out_file_name_prefix.join("SJ.out.tab");
     if !sj_stats.is_empty() {
         info!(
@@ -123,7 +174,7 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
         sj_stats.write_output(&sj_output_path, &index.genome)?;
     }
 
-    // 7. Print summary
+    // 6. Print summary
     info!("Alignment complete!");
     stats.print_summary();
 
@@ -131,10 +182,10 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
 }
 
 /// Align single-end reads
-fn align_reads_single_end(
+fn align_reads_single_end<W: AlignmentWriter>(
     params: &Parameters,
     index: &std::sync::Arc<crate::index::GenomeIndex>,
-    writer: &mut crate::io::sam::SamWriter,
+    writer: &mut W,
     stats: &std::sync::Arc<crate::stats::AlignmentStats>,
     sj_stats: &std::sync::Arc<crate::junction::SpliceJunctionStats>,
 ) -> anyhow::Result<()> {
@@ -277,10 +328,10 @@ fn align_reads_single_end(
 }
 
 /// Align paired-end reads
-fn align_reads_paired_end(
+fn align_reads_paired_end<W: AlignmentWriter>(
     params: &Parameters,
     index: &std::sync::Arc<crate::index::GenomeIndex>,
-    writer: &mut crate::io::sam::SamWriter,
+    writer: &mut W,
     stats: &std::sync::Arc<crate::stats::AlignmentStats>,
     sj_stats: &std::sync::Arc<crate::junction::SpliceJunctionStats>,
 ) -> anyhow::Result<()> {

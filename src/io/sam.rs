@@ -320,7 +320,7 @@ impl SamWriter {
 }
 
 /// Build paired SAM header from genome
-fn build_sam_header(genome: &Genome, _params: &Parameters) -> Result<sam::Header, Error> {
+pub fn build_sam_header(genome: &Genome, _params: &Parameters) -> Result<sam::Header, Error> {
     let mut builder = sam::Header::builder();
 
     // @HD line (default version and unsorted)

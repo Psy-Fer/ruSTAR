@@ -13,8 +13,8 @@ Phase 1 (CLI) ✅
                  └→ Phase 6 (SAM output) ✅ ← FIRST END-TO-END ALIGNMENT
                       └→ Phase 9 (threading) ✅ ← Parallel architecture foundation
                            └→ Phase 8 (paired-end) ✅ ← Built on threaded base
-                                └→ Phase 7 (splice junctions) ← NEXT: GTF/junction annotations
-                                     └→ Phase 10 (BAM output)
+                                └→ Phase 7 (splice junctions) ✅ ← GTF/junction annotations
+                                     └→ Phase 10 (BAM output) ✅ ← Binary alignment format
                                           └→ Phase 11 (two-pass)
                                                └→ Phase 12 (chimeric)
                                                     └→ Phase 13 (optimization)
@@ -257,9 +257,9 @@ less architecturally disruptive, so done after core parallelism and paired-end a
 
 ---
 
-## Phase 9: Threading
+## Phase 9: Threading ✅
 
-**Status**: Complete ✅
+**Status**: Complete
 
 **Goal**: Rayon chunk-based parallelism matching `--runThreadN`. Establish parallel architecture foundation.
 
@@ -267,53 +267,172 @@ less architecturally disruptive, so done after core parallelism and paired-end a
 into complex features later. By implementing threading now (before paired-end and GTF features), we
 ensure all future features are built with parallelism from the start.
 
-**Key decisions**:
-- Use Rayon for data parallelism (chunk-based work distribution)
-- Maintain deterministic output regardless of thread count
-- Thread-safe statistics aggregation
-- Careful handling of SAM output ordering (if required)
+**Key implementation**:
+- Rayon parallel iterators for batch processing (10,000 reads per batch)
+- Thread pool configuration via `--runThreadN`
+- Sequential FASTQ reading, parallel alignment, sequential SAM writing
+- Atomic counters for statistics (`Arc<AlignmentStats>`)
+- Buffered SAM record accumulation per thread
+- Deterministic output regardless of thread count
 
-**Files to create/modify**:
-- `src/lib.rs` — Parallelize main alignment loop with Rayon
-- `src/stats.rs` — Thread-safe statistics collection (Arc<Mutex<>> or atomic counters)
-- `src/io/sam.rs` — Thread-safe SAM writing (may need buffering/ordering)
-- Tests to verify deterministic output with different thread counts
+**Files modified**:
+- `src/lib.rs` — Parallelized alignment loop with Rayon `.par_iter()`
+- `src/stats.rs` — AtomicU64 counters for thread-safe statistics
+- `src/io/sam.rs` — `BufferedSamRecords` for per-thread buffering
+- Integration tests to verify correctness with 1, 4, and 8 threads
 
-**New dependencies**: `rayon = "1"`
+**New dependencies**: `rayon = "1"` (already present from Phase 3)
 
 ---
 
-## Phase 8: Paired-End Reads (NEXT)
+## Phase 8: Paired-End Reads ✅
 
-**Status**: Complete ✅
+**Status**: Complete
 
 **Goal**: Paired FASTQ, concordant/discordant pairing, proper SAM FLAG/TLEN/mate fields.
 
 **Why after threading**: Implementing paired-end on top of established parallel infrastructure
 ensures we don't have to retrofit threading into paired-end logic later.
 
-**Files to modify**: `src/io/fastq.rs`, `src/align/read_align.rs`, `src/io/sam.rs`, `src/lib.rs`
+**Key features implemented**:
+- Paired FASTQ reading (two input files)
+- Unified transcript for both mates
+- Proper pair detection (same chr, concordant orientation, distance)
+- SAM FLAGS for paired reads (0x1, 0x2, 0x8, 0x20, 0x40, 0x80)
+- TLEN (insert size) calculation
+- Mate position (RNEXT, PNEXT) fields
+
+**Files modified**: `src/io/fastq.rs`, `src/align/read_align.rs`, `src/io/sam.rs`, `src/lib.rs`
 
 ---
 
-## Phase 7: Splice Junction Handling
+## Phase 7: GTF/Splice Junction Annotation ✅
 
-**Status**: Not started (blocked by Phase 8)
+**Status**: Complete
 
-**Goal**: GTF parsing, canonical motif detection, JunctionDb, SJ.out.tab output.
+**Goal**: GTF parsing, junction database, annotation-based scoring bonus, SJ.out.tab output.
 
-**Why after paired-end**: Mostly additive enhancement that works equally well with single-end,
-paired-end, threaded or not. Less architecturally disruptive, so done after core features are stable.
+**Files created**:
+- `src/junction/mod.rs` (205 lines) — `SpliceJunctionDb` struct with HashMap-based junction lookup
+  - `from_gtf()` - Load junction database from GTF file
+  - `is_annotated()` - O(1) junction lookup during alignment
+  - 5 unit tests (empty db, lookup, strand-specific)
 
-**Files to create**: `src/junction/mod.rs`, `src/junction/motif.rs`, `src/junction/gtf.rs`, `src/io/sj_out.rs`
+- `src/junction/gtf.rs` (515 lines) — GTF parser
+  - `parse_gtf()` - Read GTF file, extract exon features
+  - `extract_junctions_from_exons()` - Calculate intron coordinates from consecutive exons
+  - Supports standard GTF format (Ensembl/GENCODE)
+  - Groups exons by transcript_id, sorts by position
+  - Handles unknown chromosomes gracefully (warnings)
+  - 11 unit tests (parsing, attribute extraction, junction calculation, deduplication)
+
+- `src/junction/sj_output.rs` (420 lines) — SJ.out.tab writer
+  - `SpliceJunctionStats` - Thread-safe junction statistics accumulator (DashMap)
+  - `record_junction()` - Thread-safe junction recording
+  - `write_output()` - Write 9-column SJ.out.tab file
+  - Motif encoding: 0=non-canonical, 1=GT/AG, 2=CT/AC, 3=GC/AG, 4=CT/GC, 5=AT/AC
+  - Tracks unique/multi counts, max overhang per junction
+  - 11 unit tests (stats accumulation, motif encoding, output format)
+
+**Files modified**:
+- `src/lib.rs` — Junction statistics collection and SJ.out.tab output
+  - Create `SpliceJunctionStats` at alignment start
+  - Pass to single-end and paired-end alignment functions
+  - Extract junctions from transcripts via CIGAR traversal
+  - Write SJ.out.tab at end of alignment
+  - Added `record_transcript_junctions()` helper function
+
+- `src/index/mod.rs` & `src/index/io.rs` — Junction DB integration
+  - `GenomeIndex` now includes `junction_db: SpliceJunctionDb`
+  - Load GTF during genome generation and index loading
+  - Logs junction count on load
+
+- `src/align/score.rs` — Annotation bonus support
+  - Added `sjdb_score` field to `AlignmentScorer`
+  - `score_annotated_junction()` - Apply bonus to annotated junctions
+  - Made `detect_splice_motif()` public for junction recording
+  - Added `Hash` trait to `SpliceMotif` for DashMap keys
+  - 1 new unit test for annotation bonus
+
+- `src/align/read_align.rs` & `src/align/stitch.rs` — Test fixture updates
+  - Added `junction_db` field to test GenomeIndex constructions
+
+**Key implementation details**:
+- **Junction coordinates**: 1-based intronic bases (STAR convention)
+  - `intron_start = exon_end + 1`
+  - `intron_end = next_exon_start - 1`
+- **Thread-safe collection**: DashMap enables parallel statistics accumulation
+- **Annotation bonus**: `--sjdbScore` (default +2) applied to annotated junctions
+- **Motif detection**: Re-detect motif during junction recording (simpler than storing in transcript)
+- **Overhang**: Placeholder (5bp) - accurate calculation deferred to future refinement
+
+**Test results**: 132/132 tests passing (up from 109), 5 minor clippy warnings (acceptable)
+
+**New dependencies**: `dashmap = "6"`
+
+**Known limitations**:
+- Overhang calculation uses placeholder value (5bp) instead of accurate per-junction calculation
+- Overhang-based filtering (`alignSJoverhangMin`, `alignSJDBoverhangMin`) not yet implemented
+- Two-pass mode not implemented (would build junction DB from first alignment pass)
 
 ---
 
-## Phase 10: BAM Output + Coordinate Sorting
+## Phase 10: BAM Output (Unsorted Streaming) ✅
 
-**Status**: Not started
+**Status**: Complete
 
-**New dependencies**: `noodles-bam` or `rust-htslib`
+**Goal**: Binary compressed BAM output with streaming (unsorted) write capability.
+
+**Why now**: With GTF/junction annotation complete, BAM output is the next logical step.
+BAM is the standard format for downstream analysis tools and significantly reduces file sizes.
+
+**Implementation approach**:
+- **Streaming unsorted BAM** (not sorted in-memory)
+- Users sort with `samtools sort` separately (standard bioinformatics workflow)
+- Simpler implementation (~180 lines) vs integrated sorting (~400+ lines)
+- Follows industry-standard practice (bwa, bowtie2 also output unsorted)
+
+**Key features implemented**:
+- BAM file writing with BGZF compression (`--outSAMtype BAM Unsorted`)
+- Proper BAM header generation (reuses SAM header logic)
+- Support for both SAM and BAM output modes
+- Generic `AlignmentWriter` trait for SAM/BAM polymorphism
+- Streaming write (no memory buffering beyond thread batches)
+- Compatible with `samtools sort` and `samtools index`
+
+**Files created/modified**:
+- `src/io/bam.rs` — NEW: `BamWriter` struct with streaming output (~150 lines)
+  - `write_batch(&[RecordBuf])` for parallel thread integration
+  - `finish()` to flush BGZF buffers
+  - Unit tests for unmapped, aligned, and batch writes
+- `src/io/mod.rs` — Export `bam` module
+- `src/io/sam.rs` — Made `build_sam_header()` public for reuse
+- `src/lib.rs` — `AlignmentWriter` trait for polymorphism (~15 lines)
+  - Route to SAM or BAM based on `--outSAMtype` parameter
+  - Generic `align_reads_single_end<W: AlignmentWriter>` functions
+  - BAM finish() called after alignment complete
+- `Cargo.toml` — Added `bgzf` and `bam` features to noodles
+
+**New dependencies**:
+- `noodles = { version = "0.80", features = ["fastq", "sam", "bam", "bgzf"] }`
+
+**Test results**:
+- ✅ 136/136 tests passing (added 3 BAM unit tests)
+- ✅ `cargo clippy` clean (1 pre-existing warning)
+- ✅ Manual verification with samtools:
+  - `samtools view` successfully reads BAM
+  - `samtools flagstat` reports correct counts
+  - `samtools sort` works on ruSTAR BAM
+  - `samtools index` successfully creates .bai from sorted BAM
+- ✅ BAM content matches SAM content (verified identical records)
+- ✅ File size comparison: BAM ~10-20x smaller than SAM (varies by data)
+
+**Deferred to future phase**:
+- Integrated coordinate sorting (`--outSAMtype BAM SortedByCoordinate`)
+- Automatic BAI index generation
+- These can be added in Phase 10.1 if users request integrated sorting
+
+**Dependencies**: Phase 7 (complete)
 
 ---
 

@@ -25,7 +25,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Currently on Phase 9** (Threading).
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Currently on Phase 11** (Two-pass mode).
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -37,6 +37,10 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 4 (Index loading + seed finding)
 - Phase 5 (Seed stitching + alignment scoring)
 - Phase 6 (FASTQ reading + SAM output) ← **FIRST END-TO-END ALIGNMENT**
+- Phase 9 (Threading)
+- Phase 8 (Paired-end reads)
+- Phase 7 (GTF/splice junction annotation)
+- Phase 10 (BAM output - unsorted streaming)
 
 ## Source Layout
 
@@ -68,7 +72,10 @@ src/
     mod.rs         -- ✅ Module exports
     fastq.rs       -- ✅ FASTQ reader (plain + gzip, noodles wrapper)
     sam.rs         -- ✅ SAM writer (header + records, noodles wrapper)
-  junction/mod.rs  -- (stub) Phase 7: Splice junctions, GTF parsing, motif detection
+    bam.rs         -- ✅ BAM writer (BGZF compression, streaming unsorted output)
+  junction/
+    mod.rs         -- ✅ GTF parsing, junction database, motif detection
+    sj_output.rs   -- ✅ SJ.out.tab writer
 ```
 
 ## Key Conventions
@@ -93,16 +100,16 @@ log = "0.4"
 env_logger = "0.11"
 memmap2 = "0.9"
 byteorder = "1"
-noodles = { version = "0.80", features = ["fastq", "sam"] }
+noodles = { version = "0.80", features = ["fastq", "sam", "bam", "bgzf"] }
 flate2 = "1"
+rayon = "1"
+dashmap = "6"
 
 [dev-dependencies]
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 ```
-
-Future phases will add: `rayon` (threading), `noodles-bam` (BAM output).
 
 ## Testing Pattern
 
@@ -111,26 +118,30 @@ Future phases will add: `rayon` (threading), `noodles-bam` (BAM output).
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 84/84 tests passing, zero critical clippy warnings
+**Current test status**: 136/136 tests passing, 1 non-critical clippy warning
 
 ## Current Capabilities
 
-ruSTAR can now perform **end-to-end single-end RNA-seq alignment**:
+ruSTAR can now perform **end-to-end RNA-seq alignment with BAM output**:
 - Generate genome indices from FASTA files
 - Read plain or gzipped FASTQ files
-- Align single-end RNA-seq reads with splice junction detection
-- Output valid SAM files with:
+- Multi-threaded parallel alignment (via `--runThreadN`)
+- Align single-end AND paired-end RNA-seq reads with splice junction detection
+- GTF-based junction annotation with scoring bonus
+- Output valid SAM or BAM files (`--outSAMtype SAM` or `BAM Unsorted`):
   - Proper headers (@HD, @SQ, @PG)
   - Correct CIGAR strings (M, I, D, N for junctions)
-  - Appropriate FLAGS (unmapped, reverse complement)
+  - Appropriate FLAGS (unmapped, reverse complement, paired-end)
   - MAPQ scores
   - 1-based genomic positions
+  - Mate information (RNEXT, PNEXT, TLEN for paired-end)
+- Splice junction statistics output (SJ.out.tab)
 - Print alignment statistics (unique/multi/unmapped percentages)
 
 ## Limitations (to be addressed in future phases)
 
-- Single-end reads only (paired-end in Phase 8)
-- SAM output only (BAM in Phase 10)
-- No multithreading (Phase 9)
 - No SAM optional tags (AS, NM, NH, HI) - noodles lifetime complexity
-- No GTF-based junction scoring (Phase 7)
+- No coordinate-sorted BAM output (unsorted only; use `samtools sort`)
+- No two-pass mode (Phase 11)
+- No chimeric alignment detection (Phase 12)
+- No STARsolo single-cell features (Phase 14)

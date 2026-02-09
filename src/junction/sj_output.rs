@@ -157,12 +157,17 @@ impl SpliceJunctionStats {
                 .get(chr_idx)
                 .ok_or_else(|| Error::Index("Invalid chromosome index in junction".to_string()))?;
 
+            // Convert from global genome coordinates to per-chromosome coordinates
+            let chr_start = genome.chr_start[chr_idx];
+            let chr_pos_start = start - chr_start;
+            let chr_pos_end = end - chr_start;
+
             writeln!(
                 writer,
                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 chr_name,
-                start,
-                end,
+                chr_pos_start,
+                chr_pos_end,
                 strand,
                 motif,
                 if annotated { 1 } else { 0 },

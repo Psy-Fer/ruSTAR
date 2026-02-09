@@ -380,8 +380,10 @@ fn transcript_to_record(
     }
     *record.reference_sequence_id_mut() = Some(transcript.chr_idx);
 
-    // POS (1-based)
-    let pos = (transcript.genome_start + 1) as usize;
+    // POS (1-based, per-chromosome coordinate)
+    // transcript.genome_start is a global genome coordinate, need to convert to per-chr
+    let chr_start = genome.chr_start[transcript.chr_idx];
+    let pos = (transcript.genome_start - chr_start + 1) as usize;
     *record.alignment_start_mut() = Some(
         pos.try_into()
             .map_err(|e| Error::Alignment(format!("invalid alignment position {}: {}", pos, e)))?,
@@ -486,8 +488,10 @@ fn build_paired_mate_record(
     }
     *record.reference_sequence_id_mut() = Some(transcript.chr_idx);
 
-    // POS (1-based)
-    let pos = (transcript.genome_start + 1) as usize;
+    // POS (1-based, per-chromosome coordinate)
+    // transcript.genome_start is a global genome coordinate, need to convert to per-chr
+    let chr_start = genome.chr_start[transcript.chr_idx];
+    let pos = (transcript.genome_start - chr_start + 1) as usize;
     *record.alignment_start_mut() = Some(
         pos.try_into()
             .map_err(|e| Error::Alignment(format!("invalid alignment position {}: {}", pos, e)))?,

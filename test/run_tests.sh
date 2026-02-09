@@ -17,7 +17,8 @@ STAR_BIN="${STAR_BIN:-$(which STAR || echo "")}"
 # Test data paths
 DATA_DIR="$SCRIPT_DIR/data/small/yeast"
 READS_DIR="$DATA_DIR/reads"
-GENOME_DIR="$DATA_DIR/indices"
+STAR_GENOME_DIR="$DATA_DIR/indices"
+RUSTAR_GENOME_DIR="$DATA_DIR/indices_rustar"
 GTF_FILE="$DATA_DIR/reference/Saccharomyces_cerevisiae.R64-1-1.110.gtf"
 
 # Output paths
@@ -121,9 +122,8 @@ check_prerequisites() {
 
 run_star() {
     local output_dir="$1"
-    local genome_dir="$2"
-    local reads="$3"
-    local extra_args="$4"
+    local reads="$2"
+    local extra_args="$3"
 
     mkdir -p "$output_dir"
 
@@ -144,7 +144,7 @@ run_star() {
     local cmd=(
         "$STAR_BIN"
         --runMode alignReads
-        --genomeDir "$genome_dir"
+        --genomeDir "$STAR_GENOME_DIR"
         --readFilesIn ${reads//,/ }
         --readFilesCommand zcat
         --outFileNamePrefix "$output_dir/"
@@ -170,9 +170,8 @@ run_star() {
 
 run_rustar() {
     local output_dir="$1"
-    local genome_dir="$2"
-    local reads="$3"
-    local extra_args="$4"
+    local reads="$2"
+    local extra_args="$3"
 
     mkdir -p "$output_dir"
 
@@ -182,7 +181,7 @@ run_rustar() {
     local cmd=(
         "$RUSTAR_BIN"
         --runMode alignReads
-        --genomeDir "$genome_dir"
+        --genomeDir "$RUSTAR_GENOME_DIR"
         --readFilesIn ${reads//,/ }
         --readFilesCommand zcat
         --outFileNamePrefix "$output_dir/"
@@ -335,14 +334,14 @@ run_test_case() {
     done
 
     # Run STAR
-    if ! run_star "$star_dir" "$GENOME_DIR" "$read_paths" "$extra_args"; then
+    if ! run_star "$star_dir" "$read_paths" "$extra_args"; then
         error "STAR execution failed for $name"
         echo "FAILED" > "$test_dir/FAILED"
         return 1
     fi
 
     # Run ruSTAR
-    if ! run_rustar "$rustar_dir" "$GENOME_DIR" "$read_paths" "$extra_args"; then
+    if ! run_rustar "$rustar_dir" "$read_paths" "$extra_args"; then
         error "ruSTAR execution failed for $name"
         echo "FAILED" > "$test_dir/FAILED"
         return 1

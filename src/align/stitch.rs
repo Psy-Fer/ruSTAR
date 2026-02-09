@@ -420,13 +420,24 @@ pub fn stitch_seeds(
             let mut cigar = dp[j].cigar_ops.clone();
 
             // Emit CIGAR operations for the gap between seeds
-            let rg = best_read_gap as u32;
-            let gg = best_genome_gap as u32;
+            // Handle negative gaps explicitly to avoid integer overflow
             let has_gap;
 
-            if rg == 0 && gg == 0 {
+            if best_read_gap == 0 && best_genome_gap == 0 {
+                // No gap - seeds are adjacent
                 has_gap = false;
-            } else if rg == 0 && gg > 0 {
+            } else if best_read_gap < 0 || best_genome_gap < 0 {
+                // Negative gap indicates overlapping seeds or error
+                // score_gap() already penalized this, but we skip the connection
+                log::warn!(
+                    "Skipping connection with negative gap: read_gap={}, genome_gap={}",
+                    best_read_gap,
+                    best_genome_gap
+                );
+                continue;
+            } else if best_read_gap == 0 && best_genome_gap > 0 {
+                // Pure deletion or splice junction (read doesn't advance, genome does)
+                let gg = best_genome_gap as u32; // Safe: checked > 0
                 match best_gap_type {
                     GapType::SpliceJunction { intron_len, .. } => {
                         cigar.push(CigarOp::RefSkip(intron_len));
@@ -436,16 +447,27 @@ pub fn stitch_seeds(
                     }
                 }
                 has_gap = true;
-            } else if rg > 0 && gg == 0 {
+            } else if best_read_gap > 0 && best_genome_gap == 0 {
+                // Pure insertion (read advances, genome doesn't)
+                let rg = best_read_gap as u32; // Safe: checked > 0
                 cigar.push(CigarOp::Ins(rg));
                 has_gap = true;
             } else {
+                // Both gaps positive: combined gap region
+                let rg = best_read_gap as u32; // Safe: checked > 0 above
+                let gg = best_genome_gap as u32; // Safe: checked > 0 above
+
                 let shared = rg.min(gg);
                 let excess_genome = gg.saturating_sub(rg);
                 let excess_read = rg.saturating_sub(gg);
 
                 if shared > 0 {
-                    cigar.push(CigarOp::Match(shared));
+                    // Try to merge with previous Match operation
+                    if let Some(CigarOp::Match(prev_len)) = cigar.last_mut() {
+                        *prev_len += shared;
+                    } else {
+                        cigar.push(CigarOp::Match(shared));
+                    }
                 }
                 if excess_genome > 0 {
                     match best_gap_type {
@@ -463,14 +485,12 @@ pub fn stitch_seeds(
                 has_gap = true;
             }
 
-            // Add current seed match (or merge if no gap)
-            if !has_gap && !cigar.is_empty() {
-                if let Some(CigarOp::Match(prev_len)) = cigar.last_mut() {
-                    *prev_len += curr.length as u32;
-                } else {
-                    cigar.push(CigarOp::Match(curr.length as u32));
-                }
+            // Add current seed match (always try to merge with previous Match op)
+            if let Some(CigarOp::Match(prev_len)) = cigar.last_mut() {
+                // Merge with previous Match operation
+                *prev_len += curr.length as u32;
             } else {
+                // No previous Match, or previous op was not Match
                 cigar.push(CigarOp::Match(curr.length as u32));
             }
 

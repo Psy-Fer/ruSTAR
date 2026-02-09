@@ -346,7 +346,7 @@ mod tests {
 
         // Reverse complement should be at positions [2n-1, 2n-2, 2n-3, 2n-4, 2n-5]
         // which maps to the reverse of [0,1,2,3,4]
-        assert_eq!(genome.sequence[(2 * n - 1)], 3); // T (complement of A at pos 0)
+        assert_eq!(genome.sequence[2 * n - 1], 3); // T (complement of A at pos 0)
         assert_eq!(genome.sequence[2 * n - 1 - 1], 2); // G (complement of C at pos 1)
         assert_eq!(genome.sequence[2 * n - 1 - 2], 1); // C (complement of G at pos 2)
         assert_eq!(genome.sequence[2 * n - 1 - 3], 0); // A (complement of T at pos 3)

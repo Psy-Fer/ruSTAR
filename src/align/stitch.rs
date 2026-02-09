@@ -134,6 +134,146 @@ fn count_mismatches(
     n_mismatch
 }
 
+/// Result of extending an alignment into flanking regions
+#[derive(Debug, Clone)]
+struct ExtendResult {
+    /// How far the extension reached (bases)
+    extend_len: usize,
+    /// Maximum score achieved during extension
+    max_score: i32,
+    /// Number of mismatches in the extended region
+    n_mismatch: u32,
+}
+
+/// Extend alignment from a boundary into flanking sequence, mirroring STAR's extendAlign().
+///
+/// Walks base-by-base from the alignment boundary, scoring +1 match / -1 mismatch,
+/// tracking the maximum-score extension point. Stops when total mismatches exceed
+/// `min(p_mm_max * total_length, n_mm_max)`.
+///
+/// # Arguments
+/// * `read_seq` - Full read sequence (encoded)
+/// * `read_start` - Boundary position in read (where extension begins)
+/// * `genome_start` - Corresponding genome position (WITHOUT n_genome offset)
+/// * `direction` - +1 for rightward extension, -1 for leftward
+/// * `max_extend` - Maximum distance to extend (to read boundary)
+/// * `n_mm_prev` - Mismatches already in the aligned portion
+/// * `len_prev` - Length of the already-aligned portion
+/// * `n_mm_max` - outFilterMismatchNmax (absolute max mismatches)
+/// * `p_mm_max` - outFilterMismatchNoverLmax (max mismatch ratio)
+/// * `index` - Genome index
+/// * `is_reverse` - Whether this is a reverse-strand alignment
+fn extend_alignment(
+    read_seq: &[u8],
+    read_start: usize,
+    genome_start: u64,
+    direction: i32,
+    max_extend: usize,
+    n_mm_prev: u32,
+    len_prev: usize,
+    n_mm_max: u32,
+    p_mm_max: f64,
+    index: &GenomeIndex,
+    is_reverse: bool,
+) -> ExtendResult {
+    if max_extend == 0 {
+        return ExtendResult {
+            extend_len: 0,
+            max_score: 0,
+            n_mismatch: 0,
+        };
+    }
+
+    let genome_offset = if is_reverse { index.genome.n_genome } else { 0 };
+
+    let mut score: i32 = 0;
+    let mut max_score: i32 = 0;
+    let mut best_len: usize = 0;
+    let mut best_mm: u32 = 0;
+    let mut n_mm = 0u32;
+
+    for i in 0..max_extend {
+        // Calculate read and genome positions based on direction
+        let read_pos = if direction > 0 {
+            read_start + i
+        } else {
+            // Leftward: read_start is exclusive boundary, go backwards
+            if read_start < 1 + i {
+                break;
+            }
+            read_start - 1 - i
+        };
+
+        if read_pos >= read_seq.len() {
+            break;
+        }
+
+        let genome_pos = if direction > 0 {
+            genome_start + i as u64
+        } else {
+            if genome_start < 1 + i as u64 {
+                break;
+            }
+            genome_start - 1 - i as u64
+        };
+
+        // Get genome base (with strand offset)
+        let genome_base = match index.genome.get_base(genome_pos + genome_offset) {
+            Some(b) => b,
+            None => break,
+        };
+
+        // Stop at chromosome boundary (padding = 5)
+        if genome_base == 5 {
+            break;
+        }
+
+        let read_base = read_seq[read_pos];
+
+        // Skip N bases (no score impact, matches STAR behavior)
+        if read_base == 4 || genome_base == 4 {
+            continue;
+        }
+
+        if read_base == genome_base {
+            score += 1;
+        } else {
+            score -= 1;
+            n_mm += 1;
+        }
+
+        // Check mismatch limits considering the full alignment
+        let total_mm = n_mm_prev + n_mm;
+        let total_len = len_prev + i + 1;
+        let mm_limit = ((p_mm_max * total_len as f64) as u32).min(n_mm_max);
+        if total_mm > mm_limit {
+            break;
+        }
+
+        // Record best extension point (highest score)
+        if score > max_score {
+            max_score = score;
+            best_len = i + 1;
+            best_mm = n_mm;
+        }
+    }
+
+    // Only accept extension if it has positive score
+    if max_score > 0 {
+        ExtendResult {
+            extend_len: best_len,
+            max_score,
+            n_mismatch: best_mm,
+        }
+    } else {
+        ExtendResult {
+            extend_len: 0,
+            max_score: 0,
+            n_mismatch: 0,
+        }
+    }
+}
+
 /// A cluster of seeds mapping to the same genomic region
 #[derive(Debug, Clone)]
 pub struct SeedCluster {
@@ -629,27 +769,116 @@ pub fn stitch_seeds(
     }
     let alignment_end = alignment_start + aligned_read_len;
 
+    // Compute right-side genome position by walking the DP CIGAR
+    let mut right_genome_pos = chain_start_seed.genome_pos;
+    for op in &best_state.cigar_ops {
+        match op {
+            CigarOp::Match(len) | CigarOp::Equal(len) | CigarOp::Diff(len) => {
+                right_genome_pos += *len as u64;
+            }
+            CigarOp::Del(len) | CigarOp::RefSkip(len) => {
+                right_genome_pos += *len as u64;
+            }
+            _ => {}
+        }
+    }
+
+    // Extend alignment into flanking regions (STAR-style extendAlign)
+    let left_extend = if alignment_start > 0 {
+        extend_alignment(
+            read_seq,
+            alignment_start,             // read boundary (exclusive, leftward)
+            chain_start_seed.genome_pos, // genome boundary (exclusive, leftward)
+            -1,                          // leftward
+            alignment_start,             // max distance to read start
+            best_state.n_mismatch,       // mismatches in aligned portion
+            aligned_read_len,            // length of aligned portion
+            scorer.n_mm_max,
+            scorer.p_mm_max,
+            index,
+            cluster.is_reverse,
+        )
+    } else {
+        ExtendResult {
+            extend_len: 0,
+            max_score: 0,
+            n_mismatch: 0,
+        }
+    };
+
+    let right_extend = if alignment_end < read_seq.len() {
+        extend_alignment(
+            read_seq,
+            alignment_end,                  // read boundary (inclusive, rightward)
+            right_genome_pos,               // genome boundary (inclusive, rightward)
+            1,                              // rightward
+            read_seq.len() - alignment_end, // max distance to read end
+            best_state.n_mismatch + left_extend.n_mismatch, // cumulative mismatches
+            aligned_read_len + left_extend.extend_len, // cumulative length
+            scorer.n_mm_max,
+            scorer.p_mm_max,
+            index,
+            cluster.is_reverse,
+        )
+    } else {
+        ExtendResult {
+            extend_len: 0,
+            max_score: 0,
+            n_mismatch: 0,
+        }
+    };
+
+    // Build final CIGAR with extensions
     let mut final_cigar = Vec::new();
 
-    // Add 5' soft clip if alignment doesn't start at read position 0
-    if alignment_start > 0 {
-        final_cigar.push(CigarOp::SoftClip(alignment_start as u32));
+    // Remaining 5' soft clip after left extension
+    let remaining_left_clip = alignment_start - left_extend.extend_len;
+    if remaining_left_clip > 0 {
+        final_cigar.push(CigarOp::SoftClip(remaining_left_clip as u32));
     }
 
-    // Add the main alignment CIGAR
-    final_cigar.extend(best_state.cigar_ops.clone());
-
-    // Add 3' soft clip if alignment doesn't end at read end
-    if alignment_end < read_seq.len() {
-        let clip_len = read_seq.len() - alignment_end;
-        final_cigar.push(CigarOp::SoftClip(clip_len as u32));
+    // Left extension Match (merge with first main CIGAR Match if possible)
+    if left_extend.extend_len > 0 {
+        final_cigar.push(CigarOp::Match(left_extend.extend_len as u32));
     }
+
+    // Main alignment CIGAR (merge first op with left extension Match if both are Match)
+    for op in &best_state.cigar_ops {
+        if let CigarOp::Match(len) = op {
+            if let Some(CigarOp::Match(prev_len)) = final_cigar.last_mut() {
+                *prev_len += len;
+                continue;
+            }
+        }
+        final_cigar.push(*op);
+    }
+
+    // Right extension Match (merge with last main CIGAR Match if possible)
+    if right_extend.extend_len > 0 {
+        if let Some(CigarOp::Match(prev_len)) = final_cigar.last_mut() {
+            *prev_len += right_extend.extend_len as u32;
+        } else {
+            final_cigar.push(CigarOp::Match(right_extend.extend_len as u32));
+        }
+    }
+
+    // Remaining 3' soft clip after right extension
+    let remaining_right_clip = (read_seq.len() - alignment_end) - right_extend.extend_len;
+    if remaining_right_clip > 0 {
+        final_cigar.push(CigarOp::SoftClip(remaining_right_clip as u32));
+    }
+
+    // Adjust genome start position for left extension
+    let adjusted_genome_start = chain_start_seed.genome_pos - left_extend.extend_len as u64;
+
+    // Adjust score for extensions
+    let adjusted_score = best_state.score + left_extend.max_score + right_extend.max_score;
 
     // Build exons from CIGAR
     use crate::align::transcript::Exon;
     let mut exons = Vec::new();
     let mut read_pos = 0usize; // Start from 0, will be adjusted by soft clips
-    let mut genome_pos = chain_start_seed.genome_pos;
+    let mut genome_pos = adjusted_genome_start;
 
     for op in &final_cigar {
         match op {
@@ -705,7 +934,7 @@ pub fn stitch_seeds(
     let actual_genome_start = merged_exons
         .first()
         .map(|e| e.genome_start)
-        .unwrap_or(chain_start_seed.genome_pos);
+        .unwrap_or(adjusted_genome_start);
 
     // Count mismatches in the final alignment
     let n_mismatch = count_mismatches(
@@ -731,8 +960,8 @@ pub fn stitch_seeds(
             .unwrap_or(final_seed.genome_end),
         is_reverse: cluster.is_reverse,
         exons: merged_exons,
-        cigar: final_cigar, // Use CIGAR with soft clips
-        score: best_state.score,
+        cigar: final_cigar, // Use CIGAR with extensions + soft clips
+        score: adjusted_score,
         n_mismatch,
         n_gap: best_state.n_gap,
         n_junction: best_state.n_junction,
@@ -855,5 +1084,211 @@ mod tests {
 
         assert_eq!(expanded[0].read_pos, 5);
         assert_eq!(expanded[1].read_pos, 10);
+    }
+
+    /// Helper to build a GenomeIndex with a specific forward sequence
+    fn make_index_with_seq(seq: &[u8]) -> GenomeIndex {
+        let n_genome = ((seq.len() as u64 + 1) / 64 + 1) * 64;
+        let mut sequence = vec![5u8; (n_genome * 2) as usize];
+        sequence[0..seq.len()].copy_from_slice(seq);
+
+        // Build reverse complement
+        for i in 0..n_genome as usize {
+            let base = sequence[i];
+            let complement = if base < 4 { 3 - base } else { base };
+            sequence[2 * n_genome as usize - 1 - i] = complement;
+        }
+
+        let genome = Genome {
+            sequence,
+            n_genome,
+            n_chr_real: 1,
+            chr_name: vec!["chr1".to_string()],
+            chr_length: vec![seq.len() as u64],
+            chr_start: vec![0, n_genome],
+        };
+
+        let gstrand_bit = 33;
+        let suffix_array = SuffixArray {
+            data: PackedArray::new(gstrand_bit, 0),
+            gstrand_bit,
+            gstrand_mask: (1u64 << gstrand_bit) - 1,
+        };
+        let word_length = gstrand_bit + 3;
+        let sa_index = SaIndex {
+            data: PackedArray::new(word_length, 0),
+            nbases: 14,
+            genome_sa_index_start: vec![0],
+            word_length,
+            gstrand_bit,
+        };
+
+        GenomeIndex {
+            genome,
+            suffix_array,
+            sa_index,
+            junction_db: crate::junction::SpliceJunctionDb::empty(),
+        }
+    }
+
+    #[test]
+    fn test_extend_perfect_match_rightward() {
+        // Genome: ACGTACGTAC (10 bases, A=0, C=1, G=2, T=3)
+        let seq = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+        let index = make_index_with_seq(&seq);
+        // Read matches genome perfectly from position 5 onward
+        let read_seq = vec![1, 2, 3, 0, 1]; // matches genome[5..10]
+
+        let result = extend_alignment(
+            &read_seq, 0,   // read_start (boundary)
+            5,   // genome_start
+            1,   // rightward
+            5,   // max_extend
+            0,   // no previous mismatches
+            0,   // no previous length
+            10,  // n_mm_max
+            0.3, // p_mm_max
+            &index, false, // forward strand
+        );
+
+        assert_eq!(result.extend_len, 5);
+        assert_eq!(result.max_score, 5);
+        assert_eq!(result.n_mismatch, 0);
+    }
+
+    #[test]
+    fn test_extend_perfect_match_leftward() {
+        // Genome: ACGTACGTAC
+        let seq = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+        let index = make_index_with_seq(&seq);
+        // Read matches genome[0..5] = ACGTA
+        let read_seq = vec![0, 1, 2, 3, 0];
+
+        let result = extend_alignment(
+            &read_seq, 5,   // read_start (exclusive boundary for leftward)
+            5,   // genome_start (exclusive boundary for leftward)
+            -1,  // leftward
+            5,   // max_extend
+            0,   // no previous mismatches
+            0,   // no previous length
+            10,  // n_mm_max
+            0.3, // p_mm_max
+            &index, false,
+        );
+
+        assert_eq!(result.extend_len, 5);
+        assert_eq!(result.max_score, 5);
+        assert_eq!(result.n_mismatch, 0);
+    }
+
+    #[test]
+    fn test_extend_stops_at_optimal_point_with_mismatches() {
+        // Genome: A C G T A C G T (positions 0-7)
+        let genome_seq = vec![0, 1, 2, 3, 0, 1, 2, 3];
+        let index = make_index_with_seq(&genome_seq);
+        // Read: A C G T T T T T (matches first 4, then all mismatches)
+        let read_seq: Vec<u8> = vec![0, 1, 2, 3, 3, 3, 3, 3];
+
+        let result = extend_alignment(
+            &read_seq, 0,   // read_start
+            0,   // genome_start
+            1,   // rightward
+            8,   // max_extend
+            0,   // no previous mismatches
+            0,   // no previous length
+            10,  // n_mm_max
+            0.3, // p_mm_max
+            &index, false,
+        );
+
+        // Should extend 4 bases (perfect match), then mismatches drag score down
+        assert_eq!(result.extend_len, 4);
+        assert_eq!(result.max_score, 4);
+        assert_eq!(result.n_mismatch, 0);
+    }
+
+    #[test]
+    fn test_extend_chromosome_boundary() {
+        // Genome: A C G (3 bases, then padding=5)
+        let genome_seq = vec![0, 1, 2];
+        let index = make_index_with_seq(&genome_seq);
+        // Read is 5 bases, but genome only has 3
+        let read_seq: Vec<u8> = vec![0, 1, 2, 3, 0];
+
+        let result = extend_alignment(
+            &read_seq, 0, // read_start
+            0, // genome_start
+            1, // rightward
+            5, // max_extend
+            0, 0, 10, 0.3, &index, false,
+        );
+
+        // Should stop at 3 bases (genome boundary)
+        assert_eq!(result.extend_len, 3);
+        assert_eq!(result.max_score, 3);
+    }
+
+    #[test]
+    fn test_extend_n_bases_skipped() {
+        // Genome: A N C G (N=4 at position 1)
+        let genome_seq = vec![0, 4, 1, 2];
+        let index = make_index_with_seq(&genome_seq);
+        // Read: A A C G (matches at 0, N skip at 1, matches at 2-3)
+        let read_seq: Vec<u8> = vec![0, 0, 1, 2];
+
+        let result = extend_alignment(&read_seq, 0, 0, 1, 4, 0, 0, 10, 0.3, &index, false);
+
+        // Should extend all 4 bases: match + N(skip) + match + match = score 3
+        assert_eq!(result.extend_len, 4);
+        assert_eq!(result.max_score, 3);
+        assert_eq!(result.n_mismatch, 0);
+    }
+
+    #[test]
+    fn test_extend_all_mismatch_returns_zero() {
+        // Genome: A A A A (all 0)
+        let genome_seq = vec![0, 0, 0, 0];
+        let index = make_index_with_seq(&genome_seq);
+        // Read: T T T T (all 3, complete mismatch)
+        let read_seq: Vec<u8> = vec![3, 3, 3, 3];
+
+        let result = extend_alignment(&read_seq, 0, 0, 1, 4, 0, 0, 10, 0.3, &index, false);
+
+        // Score never goes positive, so extend_len should be 0
+        assert_eq!(result.extend_len, 0);
+        assert_eq!(result.max_score, 0);
+    }
+
+    #[test]
+    fn test_extend_recovery_through_mismatch() {
+        // Genome: A C G T A C G T A C G T A C (14 bases)
+        let genome_seq = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+        let index = make_index_with_seq(&genome_seq);
+        // Read: A C G X A C G T A C G T A C (1 mismatch at pos 3, then 10 matches)
+        //       M M M X M M M M M M M M M M
+        let read_seq: Vec<u8> = vec![0, 1, 2, 0, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1];
+
+        let result = extend_alignment(&read_seq, 0, 0, 1, 14, 0, 0, 10, 0.3, &index, false);
+
+        // Should extend past the mismatch: 3M + 1X + 10M
+        // Score: +3 -1 +10 = 12, best at position 14
+        assert_eq!(result.extend_len, 14);
+        assert_eq!(result.max_score, 12);
+        assert_eq!(result.n_mismatch, 1);
+    }
+
+    #[test]
+    fn test_extend_zero_max_extend() {
+        let genome_seq = vec![0, 1, 2, 3];
+        let index = make_index_with_seq(&genome_seq);
+        let read_seq: Vec<u8> = vec![0, 1, 2, 3];
+
+        let result = extend_alignment(
+            &read_seq, 0, 0, 1, 0, // max_extend = 0
+            0, 0, 10, 0.3, &index, false,
+        );
+
+        assert_eq!(result.extend_len, 0);
+        assert_eq!(result.max_score, 0);
     }
 }

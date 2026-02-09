@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13 complete. Next: Phase 14** (STARsolo).
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13 complete. Next: accuracy refinement then Phase 14** (STARsolo).
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -50,13 +50,14 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 10 (BAM output - unsorted streaming)
 - Phase 11 (Two-pass mode - novel junction discovery)
 - Phase 12 (Chimeric alignment detection)
-- Phase 13 (Performance optimization) ← **3.9x speedup, matches STAR speed**
+- Phase 13 (Performance + accuracy optimization) ← **alignment extension, soft clips match STAR**
 
-**Current Status**:
-- ✅ 1000 reads: 82.2% unique, 8.4% multi, 9.4% unmapped (matches STAR: 82/7/11%)
-- ✅ 1000 reads in ~0.77s (was ~3s, STAR <1s)
-- ✅ Valid SAM output with correct CIGAR, soft clips, and splice junctions
-- ✅ 170/170 unit tests passing
+**Current Status** (10k yeast reads, single-end):
+- ✅ 79% unique mapped (STAR: 82%), 26.6% soft clips (STAR: 25.8%)
+- ✅ 51% position agreement with STAR (94.2% CIGAR agreement among those)
+- ✅ 178/178 unit tests passing
+- ⚠️ 495 ruSTAR-only junctions (375 non-canonical — reverse-strand motif bug)
+- ⚠️ 2x splice rate vs STAR (5.0% vs 2.5%)
 
 ## Source Layout
 
@@ -80,7 +81,7 @@ src/
   align/
     mod.rs         -- ✅ Module definition
     seed.rs        -- ✅ Seed finding via MMP search + binary search on SA
-    stitch.rs      -- ✅ Seed clustering + DP stitching
+    stitch.rs      -- ✅ Seed clustering + DP stitching + alignment extension (extendAlign)
     score.rs       -- ✅ Scoring functions (gaps, mismatches, splice junctions)
     transcript.rs  -- ✅ Transcript struct (exon coords, CIGAR, scores)
     read_align.rs  -- ✅ Per-read alignment driver
@@ -141,7 +142,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 170/170 unit tests passing, 3 non-critical clippy warnings (too_many_arguments × 2, implicit_saturating_sub × 1)
+**Current test status**: 178/178 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, implicit_saturating_sub × 1, manual_contains × 2)
 
 **Note**: Phase 9 integration tests fail due to pathologically repetitive test genomes (50 exact copies of 20bp). These tests need realistic genomes (deferred to Phase 13).
 
@@ -173,6 +174,13 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
   - Outputs Chimeric.out.junction file (14-column STAR-compatible format)
   - Junction type classification (GT/AG, CT/AC, etc.)
 - Print alignment statistics (unique/multi/unmapped percentages)
+
+## Known Issues / Accuracy Gaps
+
+- **Reverse-strand splice motif bug**: `detect_splice_motif()` doesn't add n_genome offset for reverse-strand reads → 375 spurious non-canonical junctions (known fix, not yet applied)
+- **2x splice rate vs STAR** (5.0% vs 2.5%): ruSTAR creates spliced alignments where STAR prefers unspliced
+- **Position agreement 51%**: Remaining disagreements are mostly multi-mapping reads mapping to different chromosomes with both MAPQ=255 (equivalent loci, different tie-breaking)
+- **629 reads STAR maps but ruSTAR doesn't**: Seed finding or scoring coverage differences
 
 ## Limitations (to be addressed in future phases)
 

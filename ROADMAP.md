@@ -17,8 +17,9 @@ Phase 1 (CLI) ✅
                                      └→ Phase 10 (BAM output) ✅ ← Binary alignment format
                                           └→ Phase 11 (two-pass) ✅ ← Novel junction discovery
                                                └→ Phase 12 (chimeric) ✅ ← Gene fusion detection
-                                                    └→ Phase 13 (optimization) ✅
-                                                         └→ Phase 14 (STARsolo)
+                                                    └→ Phase 13.1-13.6 (perf+accuracy) ✅
+                                                         └→ Phase 13.7-13.9 (accuracy refinement)
+                                                              └→ Phase 14 (STARsolo)
 ```
 
 **Phase ordering rationale**: Threading (Phase 9) done first to establish parallel architecture foundation.
@@ -543,11 +544,11 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 
 ---
 
-## Phase 13: Performance Optimization ✅
+## Phase 13: Performance + Accuracy Optimization ✅ (Phases 13.1-13.6)
 
-**Status**: Complete (bugs fixed + 3.9x performance improvement)
+**Status**: Complete through Phase 13.6 (performance + alignment extension). Phases 13.7-13.9 planned for accuracy refinement.
 
-**Goal**: Optimize alignment performance to approach STAR speeds and fix classification issues.
+**Goal**: Optimize alignment performance to approach STAR speeds, fix classification issues, and reduce accuracy gaps.
 
 ### Phase 13.1: Critical Bug Fixes ✅ COMPLETE (2026-02-07)
 
@@ -730,6 +731,118 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 - ✅ Negative gap warnings logged (expected for overlapping seeds)
 
 **Known Issue**: Tests fail due to many spurious non-canonical junctions (separate alignment quality issue, not overflow-related). This is a separate problem from the integer overflow bug and will be addressed in future optimization work.
+
+---
+
+### Phase 13.5: Scoring Fix ✅ COMPLETE (2026-02-09)
+
+**Problem**: Previous attempt broke mapping (83% → 8%) due to wrong defaults and unnecessary restrictions.
+
+**Root Causes & Fixes**:
+1. **`outFilterIntronMotifs`** defaulted to `RemoveNoncanonical` — changed to `None` (STAR default)
+2. **`seedMultimapNmax`** changed to 100 — restored to 10000 (STAR default)
+3. **Multi-chr anchor check** removed — STAR processes each anchor position independently
+4. **Seed overlap trimming** — STAR-style: advance seed B's start by overlap amount (was: skip entirely)
+5. **Gap mismatch scoring** — Added `shared_score = shared_bases - 2*mismatches` to DP transitions
+6. **`alignSJstitchMismatchNmax` filter** — Reject junction stitches with too many mismatches per motif
+7. **Noisy logging** — Changed `log::warn` → `log::trace` for negative gap warnings
+
+**Files Modified**:
+- `src/params.rs` — Default corrections
+- `src/align/stitch.rs` — Overlap trimming, gap mismatch scoring, logging (~40 lines changed)
+
+**Test Results**:
+- ✅ 170/170 unit tests passing
+- Stats (100 reads): 78% unique, 9% multi, 13% unmapped
+- Stats (1k reads): 71.3% unique, 10.1% multi, 18.6% unmapped
+- Performance: ~1.7s for 1000 reads
+
+---
+
+### Phase 13.6: Alignment Extension (extendAlign) ✅ COMPLETE (2026-02-09)
+
+**Problem**: ruSTAR produced 65% reads with soft clips vs STAR's 26%, and only 42% position agreement with STAR. After DP seed stitching, if the seed chain doesn't reach read position 0 or the read end, ruSTAR unconditionally adds soft clips. STAR instead calls `extendAlign()` to extend the alignment into flanking regions, tolerating mismatches up to a limit.
+
+**Implementation**:
+
+1. **`ExtendResult` struct + `extend_alignment()` function** (`src/align/stitch.rs`, ~100 lines)
+   - Mirrors STAR's `extendAlign.cpp` algorithm
+   - Walks base-by-base from alignment boundary, scoring +1 match / -1 mismatch
+   - Records maximum-score extension point
+   - Stops when total mismatches exceed `min(p_mm_max * total_len, n_mm_max)`
+   - Handles N bases (skipped, no score impact), chromosome boundary (padding=5), reverse strand
+
+2. **`AlignmentScorer` extended** (`src/align/score.rs`, 4 lines)
+   - Added `n_mm_max: u32` (from `outFilterMismatchNmax`, default 10)
+   - Added `p_mm_max: f64` (from `outFilterMismatchNoverLmax`, default 0.3)
+   - Updated `from_params()` and all 8 test constructors + 1 in `src/lib.rs`
+
+3. **`stitch_seeds()` soft-clip replacement** (`src/align/stitch.rs`, ~80 lines)
+   - Compute right-side genome position by walking DP CIGAR
+   - Left extension: `extend_alignment(..., direction=-1, max_extend=alignment_start)`
+   - Right extension: `extend_alignment(..., direction=+1)` with cumulative mismatch count
+   - Build final CIGAR: remaining soft-clip + left Match + main CIGAR + right Match + remaining soft-clip
+   - CIGAR merging: extension Match merged with adjacent seed Match ops
+   - Adjust genome start position by left extension length
+   - Adjust transcript score by extension scores
+
+**Files Modified**:
+- `src/align/score.rs` — Added `n_mm_max`, `p_mm_max` fields; updated `from_params()`; updated 8 test constructors
+- `src/align/stitch.rs` — Added `ExtendResult` + `extend_alignment()`; modified `stitch_seeds()` soft-clip section; added 8 unit tests
+- `src/lib.rs` — Updated 1 manual AlignmentScorer constructor
+
+**Test Results** (8 new unit tests):
+- Perfect match extension (full extend, 0 mismatches)
+- Stops at optimal point with mismatches
+- Chromosome boundary (genome base 5)
+- N bases skipped
+- Leftward direction
+- All-mismatch returns extend_len=0
+- Recovery through mismatch (3M 1X 10M → extends past mismatch)
+- Zero max_extend returns immediately
+
+**10k-read STAR Comparison**:
+
+| Metric | Before | After | STAR |
+|--------|--------|-------|------|
+| Soft clip rate | 65% | **26.6%** | 25.8% |
+| Unique mapped | 74.2% | **79.0%** | 82.6% |
+| Position agreement | 42% | **51.0%** | — |
+| CIGAR agree (of pos-agrees) | — | 94.2% | — |
+| Shared junctions | — | 29/80 | 80 total |
+| ruSTAR-only junctions | — | 495 | — |
+| Spliced rate | — | 5.0% | 2.5% |
+
+**Remaining Issues Diagnosed**:
+1. **Reverse-strand splice motif** — 375 non-canonical junctions from wrong motif detection
+2. **2x splice rate** — ruSTAR creates spliced alignments where STAR chooses unspliced
+3. **Position disagreements** — Multi-mapping tie-breaking differences (different chr, both MAPQ=255)
+4. **629 STAR-only mapped reads** — Seed finding or scoring coverage gaps
+
+**Verified**: 178/178 tests, `cargo clippy` clean (pre-existing only), `cargo fmt --check` pass
+
+---
+
+## Phase 13.7-13.9: Accuracy Refinement (Planned)
+
+**Status**: Not started
+
+**Goal**: Close the remaining accuracy gaps with STAR.
+
+### Phase 13.7: Reverse-Strand Splice Motif Fix
+- Fix `detect_splice_motif()` in `score.rs` to add `n_genome` offset for reverse-strand
+- Expected impact: eliminate ~375 spurious non-canonical junctions
+- Should also fix the 3 motif disagreements on shared junctions
+
+### Phase 13.8: False Splice Reduction
+- Investigate why ruSTAR has 2x STAR's splice rate (5.0% vs 2.5%)
+- Likely: STAR prefers unspliced alignment when score is similar to spliced
+- May need to implement STAR's "penalty for non-canonical introns" or scoring comparison between spliced vs unspliced paths
+
+### Phase 13.9: Multi-Mapping Tie-Breaking
+- Investigate STAR's strategy for choosing among equally-scoring loci
+- Most position disagreements are different-chromosome with MAPQ=255
+- May involve deterministic ordering (by genomic position?) or scoring tiebreakers
 
 ---
 

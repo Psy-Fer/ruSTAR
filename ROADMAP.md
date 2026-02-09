@@ -823,23 +823,47 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 
 ---
 
-## Phase 13.7-13.9: Accuracy Refinement (Planned)
+## Phase 13.7: Reverse-Strand Splice Motif Fix ✅
+
+**Status**: Complete
+
+**Goal**: Fix reverse-strand splice motif detection to eliminate spurious non-canonical junctions.
+
+**Changes**:
+- Added `CtAc`, `CtGc`, `GtAt` variants to `SpliceMotif` enum (reverse-complement motifs)
+- Modified `detect_splice_motif()` to always read forward genome and check all 6 motif patterns
+- Updated `score_splice_junction()` and `stitch_mismatch_allowed()` to handle new variants
+- 100% motif agreement on 31/31 shared junctions (was 89.7% on 26/29)
+- 343 non-canonical ruSTAR-only junctions (was 375)
+- 179/179 tests passing
+
+**Files Modified**: `src/align/score.rs`
+
+---
+
+## Phase 13.8: Splice Junction Overhang Minimum ✅
+
+**Status**: Complete
+
+**Goal**: Enforce `alignSJoverhangMin` (default 5) during DP seed stitching to reduce false spliced alignments.
+
+**Problem**: ruSTAR produced 5.6% spliced reads vs STAR's 2.5%. The `alignSJoverhangMin` and `alignSJDBoverhangMin` parameters were defined in `params.rs` but never enforced during DP stitching — only used in two-pass junction filtering. This allowed junctions flanked by tiny exons (e.g., 3bp) that STAR would reject.
+
+**Changes**:
+- Added `align_sj_overhang_min` and `align_sjdb_overhang_min` fields to `AlignmentScorer`
+- Wired from `from_params()` and updated all test constructors (~10 across score.rs, stitch.rs, lib.rs)
+- Added overhang check in DP stitching loop: for splice junctions, reject if left overhang (prev seed length) or right overhang (current seed effective length) is below `align_sj_overhang_min`
+- Added 2 unit tests for overhang acceptance/rejection
+
+**Files Modified**: `src/align/score.rs`, `src/align/stitch.rs`, `src/lib.rs`
+
+---
+
+## Phase 13.9: Multi-Mapping Tie-Breaking (Planned)
 
 **Status**: Not started
 
-**Goal**: Close the remaining accuracy gaps with STAR.
-
-### Phase 13.7: Reverse-Strand Splice Motif Fix
-- Fix `detect_splice_motif()` in `score.rs` to add `n_genome` offset for reverse-strand
-- Expected impact: eliminate ~375 spurious non-canonical junctions
-- Should also fix the 3 motif disagreements on shared junctions
-
-### Phase 13.8: False Splice Reduction
-- Investigate why ruSTAR has 2x STAR's splice rate (5.0% vs 2.5%)
-- Likely: STAR prefers unspliced alignment when score is similar to spliced
-- May need to implement STAR's "penalty for non-canonical introns" or scoring comparison between spliced vs unspliced paths
-
-### Phase 13.9: Multi-Mapping Tie-Breaking
+**Goal**: Align multi-mapping tie-breaking strategy with STAR.
 - Investigate STAR's strategy for choosing among equally-scoring loci
 - Most position disagreements are different-chromosome with MAPQ=255
 - May involve deterministic ordering (by genomic position?) or scoring tiebreakers

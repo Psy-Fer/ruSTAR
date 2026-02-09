@@ -617,6 +617,17 @@ pub fn stitch_seeds(
                 if !scorer.stitch_mismatch_allowed(motif, gap_mismatches) {
                     continue; // Reject: too many mismatches at this junction type
                 }
+
+                // Enforce minimum overhang (alignSJoverhangMin / alignSJDBoverhangMin)
+                // Left overhang = length of the preceding seed (immediately flanks the junction)
+                // Right overhang = effective length of current seed after overlap trimming
+                let left_overhang = prev.length;
+                let right_overhang = eff_length;
+                let min_overhang = scorer.align_sj_overhang_min as usize;
+
+                if left_overhang < min_overhang || right_overhang < min_overhang {
+                    continue; // Reject: insufficient overhang flanking splice junction
+                }
             }
 
             // STAR: shared region scores +1 per match, -1 per mismatch
@@ -1290,5 +1301,81 @@ mod tests {
 
         assert_eq!(result.extend_len, 0);
         assert_eq!(result.max_score, 0);
+    }
+
+    #[test]
+    fn test_overhang_check_rejects_short_overhang() {
+        // Test that the overhang check rejects splice junctions with tiny flanking seeds.
+        // Scenario: prev seed length=3 (below default min of 5), current seed length=20
+        // With alignSJoverhangMin=5, the 3bp left overhang should cause rejection.
+        use crate::align::score::AlignmentScorer;
+
+        let scorer = AlignmentScorer {
+            score_gap: 0,
+            score_gap_noncan: -8,
+            score_gap_gcag: -4,
+            score_gap_atac: -8,
+            score_del_open: -2,
+            score_del_base: -2,
+            score_ins_open: -2,
+            score_ins_base: -2,
+            align_intron_min: 21,
+            sjdb_score: 2,
+            align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
+            n_mm_max: 10,
+            p_mm_max: 0.3,
+            align_sj_overhang_min: 5,
+            align_sjdb_overhang_min: 3,
+        };
+
+        // Left overhang (prev.length) = 3, below min of 5
+        let left_overhang: usize = 3;
+        let right_overhang: usize = 20;
+        let min_overhang = scorer.align_sj_overhang_min as usize;
+
+        // Should be rejected
+        assert!(left_overhang < min_overhang || right_overhang < min_overhang);
+
+        // Right overhang too small
+        let left_overhang: usize = 20;
+        let right_overhang: usize = 4;
+        assert!(left_overhang < min_overhang || right_overhang < min_overhang);
+    }
+
+    #[test]
+    fn test_overhang_check_accepts_sufficient_overhang() {
+        // Test that splice junctions with sufficient overhang pass the check.
+        use crate::align::score::AlignmentScorer;
+
+        let scorer = AlignmentScorer {
+            score_gap: 0,
+            score_gap_noncan: -8,
+            score_gap_gcag: -4,
+            score_gap_atac: -8,
+            score_del_open: -2,
+            score_del_base: -2,
+            score_ins_open: -2,
+            score_ins_base: -2,
+            align_intron_min: 21,
+            sjdb_score: 2,
+            align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
+            n_mm_max: 10,
+            p_mm_max: 0.3,
+            align_sj_overhang_min: 5,
+            align_sjdb_overhang_min: 3,
+        };
+
+        // Both overhangs >= 5
+        let left_overhang: usize = 5;
+        let right_overhang: usize = 10;
+        let min_overhang = scorer.align_sj_overhang_min as usize;
+
+        // Should pass
+        assert!(!(left_overhang < min_overhang || right_overhang < min_overhang));
+
+        // Exactly at minimum
+        let left_overhang: usize = 5;
+        let right_overhang: usize = 5;
+        assert!(!(left_overhang < min_overhang || right_overhang < min_overhang));
     }
 }

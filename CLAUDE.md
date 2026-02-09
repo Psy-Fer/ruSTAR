@@ -53,11 +53,11 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 13 (Performance + accuracy optimization) ← **alignment extension, soft clips match STAR**
 
 **Current Status** (10k yeast reads, single-end):
-- ✅ 79% unique mapped (STAR: 82%), 26.6% soft clips (STAR: 25.8%)
-- ✅ 51% position agreement with STAR (94.2% CIGAR agreement among those)
-- ✅ 178/178 unit tests passing
-- ⚠️ 495 ruSTAR-only junctions (375 non-canonical — reverse-strand motif bug)
-- ⚠️ 2x splice rate vs STAR (5.0% vs 2.5%)
+- ✅ 79% unique mapped (STAR: 82%), 26.5% soft clips (STAR: 25.8%)
+- ✅ 51% position agreement with STAR (93.6% CIGAR agreement among those)
+- ✅ 100% motif agreement on shared junctions (31/31)
+- ✅ 181 unit tests passing
+- ✅ Splice junction overhang minimum enforced (alignSJoverhangMin=5)
 
 ## Source Layout
 
@@ -142,7 +142,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 178/178 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, implicit_saturating_sub × 1, manual_contains × 2)
+**Current test status**: 181/181 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, implicit_saturating_sub × 1, manual_contains × 2)
 
 **Note**: Phase 9 integration tests fail due to pathologically repetitive test genomes (50 exact copies of 20bp). These tests need realistic genomes (deferred to Phase 13).
 
@@ -177,8 +177,6 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 
 ## Known Issues / Accuracy Gaps
 
-- **Reverse-strand splice motif bug**: `detect_splice_motif()` doesn't add n_genome offset for reverse-strand reads → 375 spurious non-canonical junctions (known fix, not yet applied)
-- **2x splice rate vs STAR** (5.0% vs 2.5%): ruSTAR creates spliced alignments where STAR prefers unspliced
 - **Position agreement 51%**: Remaining disagreements are mostly multi-mapping reads mapping to different chromosomes with both MAPQ=255 (equivalent loci, different tie-breaking)
 - **629 reads STAR maps but ruSTAR doesn't**: Seed finding or scoring coverage differences
 

@@ -32,6 +32,10 @@ pub struct AlignmentScorer {
     pub n_mm_max: u32,
     /// Max ratio of mismatches to total alignment length (outFilterMismatchNoverLmax)
     pub p_mm_max: f64,
+    /// Minimum overhang for splice junctions (alignSJoverhangMin, default 5)
+    pub align_sj_overhang_min: u32,
+    /// Minimum overhang for annotated splice junctions (alignSJDBoverhangMin, default 3)
+    pub align_sjdb_overhang_min: u32,
 }
 
 impl AlignmentScorer {
@@ -56,6 +60,8 @@ impl AlignmentScorer {
             ],
             n_mm_max: params.out_filter_mismatch_nmax,
             p_mm_max: params.out_filter_mismatch_nover_lmax,
+            align_sj_overhang_min: params.align_sj_overhang_min,
+            align_sjdb_overhang_min: params.align_sjdb_overhang_min,
         }
     }
 
@@ -329,6 +335,8 @@ mod tests {
             align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
             n_mm_max: 10,
             p_mm_max: 0.3,
+            align_sj_overhang_min: 5,
+            align_sjdb_overhang_min: 3,
         };
 
         // Intron from position 2, length 12 (spans positions 2-13 inclusive)
@@ -365,6 +373,8 @@ mod tests {
             align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
             n_mm_max: 10,
             p_mm_max: 0.3,
+            align_sj_overhang_min: 5,
+            align_sjdb_overhang_min: 3,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -400,6 +410,8 @@ mod tests {
             align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
             n_mm_max: 10,
             p_mm_max: 0.3,
+            align_sj_overhang_min: 5,
+            align_sjdb_overhang_min: 3,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -433,6 +445,8 @@ mod tests {
             align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
             n_mm_max: 10,
             p_mm_max: 0.3,
+            align_sj_overhang_min: 5,
+            align_sjdb_overhang_min: 3,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -459,6 +473,8 @@ mod tests {
             align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
             n_mm_max: 10,
             p_mm_max: 0.3,
+            align_sj_overhang_min: 5,
+            align_sjdb_overhang_min: 3,
         };
 
         let (score, gap_type) = scorer.score_gap(0, 5, 0, &genome);
@@ -483,6 +499,8 @@ mod tests {
             align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
             n_mm_max: 10,
             p_mm_max: 0.3,
+            align_sj_overhang_min: 5,
+            align_sjdb_overhang_min: 3,
         };
 
         // Small gap (< align_intron_min) is deletion
@@ -515,6 +533,8 @@ mod tests {
             align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
             n_mm_max: 10,
             p_mm_max: 0.3,
+            align_sj_overhang_min: 5,
+            align_sjdb_overhang_min: 3,
         };
 
         // Gap starting at position 2 (GT), length 26 (>= 21) is splice junction
@@ -545,6 +565,8 @@ mod tests {
             align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
             n_mm_max: 10,
             p_mm_max: 0.3,
+            align_sj_overhang_min: 5,
+            align_sjdb_overhang_min: 3,
         };
 
         // Annotated junction should get bonus
@@ -579,6 +601,8 @@ mod tests {
             align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
             n_mm_max: 10,
             p_mm_max: 0.3,
+            align_sj_overhang_min: 5,
+            align_sjdb_overhang_min: 3,
         };
 
         // CT-AC motif: (1,3,0,1) — reverse complement of GT-AG

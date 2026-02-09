@@ -79,9 +79,9 @@ impl AlignmentScorer {
     pub fn stitch_mismatch_allowed(&self, motif: &SpliceMotif, n_mismatch: u32) -> bool {
         let idx = match motif {
             SpliceMotif::NonCanonical => 0,
-            SpliceMotif::GtAg => 1,
-            SpliceMotif::GcAg => 2,
-            SpliceMotif::AtAc => 3,
+            SpliceMotif::GtAg | SpliceMotif::CtAc => 1,
+            SpliceMotif::GcAg | SpliceMotif::CtGc => 2,
+            SpliceMotif::AtAc | SpliceMotif::GtAt => 3,
         };
         let max_mm = self.align_sj_stitch_mismatch_nmax[idx];
         max_mm < 0 || n_mismatch <= max_mm as u32
@@ -181,17 +181,20 @@ impl AlignmentScorer {
         intron_len: u32,
         genome: &Genome,
     ) -> SpliceMotif {
-        // Read 2bp donor and 2bp acceptor
+        // Read 2bp donor and 2bp acceptor from the FORWARD genome
         // Donor: donor_pos, donor_pos+1
         // Acceptor: donor_pos+intron_len-2, donor_pos+intron_len-1
+        // Always read forward strand — motif pattern determines the strand
         let d1 = genome.get_base(donor_pos);
         let d2 = genome.get_base(donor_pos + 1);
         let a1 = genome.get_base(donor_pos + intron_len as u64 - 2);
         let a2 = genome.get_base(donor_pos + intron_len as u64 - 1);
 
         // Check if all bases are valid
+        // A=0, C=1, G=2, T=3
         match (d1, d2, a1, a2) {
             (Some(d1), Some(d2), Some(a1), Some(a2)) => {
+                // Forward-strand motifs
                 // GT-AG: (2,3,0,2)
                 if d1 == 2 && d2 == 3 && a1 == 0 && a2 == 2 {
                     return SpliceMotif::GtAg;
@@ -204,6 +207,19 @@ impl AlignmentScorer {
                 if d1 == 0 && d2 == 3 && a1 == 0 && a2 == 1 {
                     return SpliceMotif::AtAc;
                 }
+                // Reverse-strand motifs (reverse complement on forward genome)
+                // CT-AC: (1,3,0,1) — reverse complement of GT-AG
+                if d1 == 1 && d2 == 3 && a1 == 0 && a2 == 1 {
+                    return SpliceMotif::CtAc;
+                }
+                // CT-GC: (1,3,2,1) — reverse complement of GC-AG
+                if d1 == 1 && d2 == 3 && a1 == 2 && a2 == 1 {
+                    return SpliceMotif::CtGc;
+                }
+                // GT-AT: (2,3,0,3) — reverse complement of AT-AC
+                if d1 == 2 && d2 == 3 && a1 == 0 && a2 == 3 {
+                    return SpliceMotif::GtAt;
+                }
                 SpliceMotif::NonCanonical
             }
             _ => SpliceMotif::NonCanonical,
@@ -213,9 +229,9 @@ impl AlignmentScorer {
     /// Score a splice junction based on motif
     fn score_splice_junction(&self, motif: &SpliceMotif) -> i32 {
         match motif {
-            SpliceMotif::GtAg => self.score_gap,
-            SpliceMotif::GcAg => self.score_gap_gcag,
-            SpliceMotif::AtAc => self.score_gap_atac,
+            SpliceMotif::GtAg | SpliceMotif::CtAc => self.score_gap,
+            SpliceMotif::GcAg | SpliceMotif::CtGc => self.score_gap_gcag,
+            SpliceMotif::AtAc | SpliceMotif::GtAt => self.score_gap_atac,
             SpliceMotif::NonCanonical => self.score_gap_noncan,
         }
     }
@@ -224,12 +240,18 @@ impl AlignmentScorer {
 /// Splice junction motif types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SpliceMotif {
-    /// GT-AG (canonical)
+    /// GT-AG (canonical, + strand)
     GtAg,
-    /// GC-AG (semi-canonical)
+    /// CT-AC (canonical, - strand; reverse complement of GT-AG)
+    CtAc,
+    /// GC-AG (semi-canonical, + strand)
     GcAg,
-    /// AT-AC (semi-canonical)
+    /// CT-GC (semi-canonical, - strand; reverse complement of GC-AG)
+    CtGc,
+    /// AT-AC (semi-canonical, + strand)
     AtAc,
+    /// GT-AT (semi-canonical, - strand; reverse complement of AT-AC)
+    GtAt,
     /// Non-canonical
     NonCanonical,
 }
@@ -536,5 +558,67 @@ mod tests {
         // Bonus applies to any base score
         let annotated_noncanon = scorer.score_annotated_junction(-8, true);
         assert_eq!(annotated_noncanon, -6); // -8 + 2
+    }
+
+    #[test]
+    fn test_detect_reverse_complement_motifs() {
+        // Test all 3 reverse-complement motifs on the forward genome
+        // These appear at minus-strand gene splice sites
+
+        let scorer = AlignmentScorer {
+            score_gap: 0,
+            score_gap_noncan: -8,
+            score_gap_gcag: -4,
+            score_gap_atac: -8,
+            score_del_open: -2,
+            score_del_base: -2,
+            score_ins_open: -2,
+            score_ins_base: -2,
+            align_intron_min: 21,
+            sjdb_score: 2,
+            align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
+            n_mm_max: 10,
+            p_mm_max: 0.3,
+        };
+
+        // CT-AC motif: (1,3,0,1) — reverse complement of GT-AG
+        let seq_ctac = vec![
+            0, 0, // AA
+            1, 3, // CT (donor)
+            1, 1, 1, 1, 1, 1, 1, 1, // 8 C's
+            0, 1, // AC (acceptor)
+            0, 0, // AA
+        ];
+        let genome_ctac = make_test_genome(&seq_ctac);
+        let motif = scorer.detect_splice_motif(2, 12, &genome_ctac);
+        assert_eq!(motif, SpliceMotif::CtAc);
+        // Should score same as canonical GT-AG
+        assert_eq!(scorer.score_splice_junction(&motif), 0);
+
+        // CT-GC motif: (1,3,2,1) — reverse complement of GC-AG
+        let seq_ctgc = vec![
+            0, 0, // AA
+            1, 3, // CT (donor)
+            1, 1, 1, 1, 1, 1, 1, 1, // 8 C's
+            2, 1, // GC (acceptor)
+            0, 0, // AA
+        ];
+        let genome_ctgc = make_test_genome(&seq_ctgc);
+        let motif = scorer.detect_splice_motif(2, 12, &genome_ctgc);
+        assert_eq!(motif, SpliceMotif::CtGc);
+        assert_eq!(scorer.score_splice_junction(&motif), -4);
+
+        // GT-AT motif: (2,3,0,3) — reverse complement of AT-AC
+        let seq_gtat = vec![
+            0, 0, // AA
+            2, 3, // GT (donor)
+            1, 1, 1, 1, 1, 1, 1, 1, // 8 C's
+            0, 3, // AT (acceptor)
+            0, 0, // AA
+        ];
+        let genome_gtat = make_test_genome(&seq_gtat);
+        let motif = scorer.detect_splice_motif(2, 12, &genome_gtat);
+        assert_eq!(motif, SpliceMotif::GtAt);
+        assert_eq!(scorer.score_splice_junction(&motif), -8);
     }
 }

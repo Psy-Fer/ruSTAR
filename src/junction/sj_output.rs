@@ -257,6 +257,7 @@ fn encode_motif(motif: SpliceMotif, strand: u8) -> u8 {
                 1 // GT/AG
             }
         }
+        SpliceMotif::CtAc => 2, // CT/AC (detected directly on forward genome)
         SpliceMotif::GcAg => {
             if strand == 2 {
                 4 // CT/GC (reverse complement)
@@ -264,7 +265,9 @@ fn encode_motif(motif: SpliceMotif, strand: u8) -> u8 {
                 3 // GC/AG
             }
         }
-        SpliceMotif::AtAc => 5,         // AT/AC
+        SpliceMotif::CtGc => 4, // CT/GC (detected directly on forward genome)
+        SpliceMotif::AtAc => 5, // AT/AC
+        SpliceMotif::GtAt => 6, // GT/AT (reverse complement of AT/AC)
         SpliceMotif::NonCanonical => 0, // Non-canonical
     }
 }

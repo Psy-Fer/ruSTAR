@@ -859,6 +859,25 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 
 ---
 
+## Phase 13.8b: Enforce alignIntronMax ✅
+
+**Status**: Complete
+
+**Goal**: Enforce `alignIntronMax` to eliminate false splice junctions with enormous intron spans (100kb-780kb). When `alignIntronMax=0` (default), STAR computes a maximum of `2^winBinNbits * winAnchorDistNbins = 65536 * 9 = 589,824bp`. Gaps exceeding this are treated as deletions (heavily penalized), not splice junctions.
+
+**Problem**: `alignIntronMax` was defined in `params.rs` but never enforced anywhere. ruSTAR accepted arbitrarily large introns, producing 527 ruSTAR-only junctions including spans of 779kb, 703kb, 328kb, and 190kb.
+
+**Changes**:
+- Added `align_intron_max` field to `AlignmentScorer`, wired from `from_params()` with default resolution (0 → 589,824)
+- Enforced upper-bound check in both splice junction branches of `score_gap()`: gaps exceeding `align_intron_max` fall through to deletion scoring (`score_del_open + score_del_base * len`), which is extremely negative for large gaps
+- Added `alignIntronMax` filtering to `filter_novel_junctions()` in two-pass mode
+- Updated all test `AlignmentScorer` constructors (~12 across score.rs, stitch.rs, lib.rs)
+- Added 4 unit tests: default resolution, custom value, boundary classification, exceeding-max classification
+
+**Files Modified**: `src/align/score.rs`, `src/align/stitch.rs`, `src/lib.rs`, `src/junction/mod.rs`
+
+---
+
 ## Phase 13.9: Multi-Mapping Tie-Breaking (Planned)
 
 **Status**: Not started

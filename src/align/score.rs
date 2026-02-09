@@ -36,6 +36,8 @@ pub struct AlignmentScorer {
     pub align_sj_overhang_min: u32,
     /// Minimum overhang for annotated splice junctions (alignSJDBoverhangMin, default 3)
     pub align_sjdb_overhang_min: u32,
+    /// Maximum intron length (alignIntronMax, 0 = use default 589824)
+    pub align_intron_max: u32,
 }
 
 impl AlignmentScorer {
@@ -62,6 +64,11 @@ impl AlignmentScorer {
             p_mm_max: params.out_filter_mismatch_nover_lmax,
             align_sj_overhang_min: params.align_sj_overhang_min,
             align_sjdb_overhang_min: params.align_sjdb_overhang_min,
+            align_intron_max: if params.align_intron_max == 0 {
+                589_824 // STAR default: 2^winBinNbits * winAnchorDistNbins = 65536 * 9
+            } else {
+                params.align_intron_max
+            },
         }
     }
 
@@ -120,7 +127,7 @@ impl AlignmentScorer {
             // Deletion or splice junction: genome advances but read doesn't
             (gg, 0) if gg > 0 => {
                 let len = gg as u32;
-                if len >= self.align_intron_min {
+                if len >= self.align_intron_min && len <= self.align_intron_max {
                     // Splice junction
                     let motif = self.detect_splice_motif(genome_pos, len, genome);
                     let score = self.score_splice_junction(&motif);
@@ -132,7 +139,7 @@ impl AlignmentScorer {
                         },
                     )
                 } else {
-                    // Deletion
+                    // Deletion (too short for intron, or exceeds max intron length)
                     let score = self.score_del_open + self.score_del_base * len as i32;
                     (score, GapType::Deletion(len))
                 }
@@ -143,7 +150,7 @@ impl AlignmentScorer {
                 let excess = gg - rg;
                 if excess > 0 {
                     let del_len = excess as u32;
-                    if del_len >= self.align_intron_min {
+                    if del_len >= self.align_intron_min && del_len <= self.align_intron_max {
                         let motif =
                             self.detect_splice_motif(genome_pos + rg as u64, del_len, genome);
                         let score = self.score_splice_junction(&motif);
@@ -337,6 +344,7 @@ mod tests {
             p_mm_max: 0.3,
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
+            align_intron_max: 589_824,
         };
 
         // Intron from position 2, length 12 (spans positions 2-13 inclusive)
@@ -375,6 +383,7 @@ mod tests {
             p_mm_max: 0.3,
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
+            align_intron_max: 589_824,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -412,6 +421,7 @@ mod tests {
             p_mm_max: 0.3,
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
+            align_intron_max: 589_824,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -447,6 +457,7 @@ mod tests {
             p_mm_max: 0.3,
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
+            align_intron_max: 589_824,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -475,6 +486,7 @@ mod tests {
             p_mm_max: 0.3,
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
+            align_intron_max: 589_824,
         };
 
         let (score, gap_type) = scorer.score_gap(0, 5, 0, &genome);
@@ -501,6 +513,7 @@ mod tests {
             p_mm_max: 0.3,
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
+            align_intron_max: 589_824,
         };
 
         // Small gap (< align_intron_min) is deletion
@@ -535,6 +548,7 @@ mod tests {
             p_mm_max: 0.3,
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
+            align_intron_max: 589_824,
         };
 
         // Gap starting at position 2 (GT), length 26 (>= 21) is splice junction
@@ -567,6 +581,7 @@ mod tests {
             p_mm_max: 0.3,
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
+            align_intron_max: 589_824,
         };
 
         // Annotated junction should get bonus
@@ -603,6 +618,7 @@ mod tests {
             p_mm_max: 0.3,
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
+            align_intron_max: 589_824,
         };
 
         // CT-AC motif: (1,3,0,1) — reverse complement of GT-AG
@@ -644,5 +660,125 @@ mod tests {
         let motif = scorer.detect_splice_motif(2, 12, &genome_gtat);
         assert_eq!(motif, SpliceMotif::GtAt);
         assert_eq!(scorer.score_splice_junction(&motif), -8);
+    }
+
+    #[test]
+    fn test_align_intron_max_default() {
+        // When align_intron_max is 0, from_params should resolve to 589824
+        use clap::Parser;
+        let params = crate::params::Parameters::try_parse_from(vec!["ruSTAR"]).unwrap();
+        assert_eq!(params.align_intron_max, 0);
+        let scorer = AlignmentScorer::from_params(&params);
+        assert_eq!(scorer.align_intron_max, 589_824);
+    }
+
+    #[test]
+    fn test_align_intron_max_custom() {
+        // Custom alignIntronMax should be passed through directly
+        use clap::Parser;
+        let params =
+            crate::params::Parameters::try_parse_from(vec!["ruSTAR", "--alignIntronMax", "100000"])
+                .unwrap();
+        assert_eq!(params.align_intron_max, 100_000);
+        let scorer = AlignmentScorer::from_params(&params);
+        assert_eq!(scorer.align_intron_max, 100_000);
+    }
+
+    #[test]
+    fn test_gap_at_intron_max_is_splice_junction() {
+        // A gap exactly at alignIntronMax should still be a splice junction
+        // Create genome large enough with GT-AG motif at boundaries
+        let mut seq = vec![0u8; 600_000]; // ~600kb genome
+        // Place GT at position 100
+        seq[100] = 2; // G
+        seq[101] = 3; // T
+        // Place AG at position 100 + 589824 - 2, 100 + 589824 - 1
+        let acceptor_pos = 100 + 589_824 - 2;
+        if acceptor_pos + 1 < seq.len() {
+            seq[acceptor_pos] = 0; // A
+            seq[acceptor_pos + 1] = 2; // G
+        }
+        let genome = make_test_genome(&seq);
+
+        let scorer = AlignmentScorer {
+            score_gap: 0,
+            score_gap_noncan: -8,
+            score_gap_gcag: -4,
+            score_gap_atac: -8,
+            score_del_open: -2,
+            score_del_base: -2,
+            score_ins_open: -2,
+            score_ins_base: -2,
+            align_intron_min: 21,
+            sjdb_score: 2,
+            align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
+            n_mm_max: 10,
+            p_mm_max: 0.3,
+            align_sj_overhang_min: 5,
+            align_sjdb_overhang_min: 3,
+            align_intron_max: 589_824,
+        };
+
+        // Gap of exactly 589824 starting at position 100 should be splice junction
+        let (score, gap_type) = scorer.score_gap(589_824, 0, 100, &genome);
+        assert_eq!(score, 0); // GT-AG canonical
+        assert!(matches!(
+            gap_type,
+            GapType::SpliceJunction {
+                intron_len: 589_824,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_gap_exceeding_intron_max_is_deletion() {
+        // A gap exceeding alignIntronMax should be treated as deletion
+        let seq = vec![0u8; 100]; // Small genome, gap length doesn't need real sequence
+        let genome = make_test_genome(&seq);
+
+        let scorer = AlignmentScorer {
+            score_gap: 0,
+            score_gap_noncan: -8,
+            score_gap_gcag: -4,
+            score_gap_atac: -8,
+            score_del_open: -2,
+            score_del_base: -2,
+            score_ins_open: -2,
+            score_ins_base: -2,
+            align_intron_min: 21,
+            sjdb_score: 2,
+            align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
+            n_mm_max: 10,
+            p_mm_max: 0.3,
+            align_sj_overhang_min: 5,
+            align_sjdb_overhang_min: 3,
+            align_intron_max: 1000, // Small max for testing
+        };
+
+        // Gap of 1001 (> 1000 max) should be deletion, not splice junction
+        let (_score, gap_type) = scorer.score_gap(1001, 0, 0, &genome);
+        assert!(matches!(gap_type, GapType::Deletion(1001)));
+
+        // Gap of 1000 (== max) should still be splice junction
+        let (_score, gap_type) = scorer.score_gap(1000, 0, 0, &genome);
+        assert!(matches!(
+            gap_type,
+            GapType::SpliceJunction {
+                intron_len: 1000,
+                ..
+            }
+        ));
+
+        // Gap of 21 (== min) should be splice junction
+        let (_score, gap_type) = scorer.score_gap(21, 0, 0, &genome);
+        assert!(matches!(
+            gap_type,
+            GapType::SpliceJunction { intron_len: 21, .. }
+        ));
+
+        // Gap of 20 (< min) should be deletion
+        let (_score, gap_type) = scorer.score_gap(20, 0, 0, &genome);
+        assert!(matches!(gap_type, GapType::Deletion(20)));
     }
 }

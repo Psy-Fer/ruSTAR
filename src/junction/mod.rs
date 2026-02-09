@@ -151,6 +151,11 @@ pub fn filter_novel_junctions(
     let min_overhang = params.align_sj_overhang_min;
     let min_unique = 1; // Configurable if needed in future
     let min_multi = 2; // Configurable if needed in future
+    let max_intron = if params.align_intron_max == 0 {
+        589_824u64 // STAR default: 2^winBinNbits * winAnchorDistNbins = 65536 * 9
+    } else {
+        params.align_intron_max as u64
+    };
 
     sj_stats
         .iter()
@@ -173,7 +178,11 @@ pub fn filter_novel_junctions(
             // Overhang threshold
             let has_overhang = max_overhang >= min_overhang;
 
-            if has_coverage && has_overhang {
+            // Intron length threshold
+            let intron_len = key.intron_end.saturating_sub(key.intron_start) + 1;
+            let within_intron_limit = intron_len <= max_intron;
+
+            if has_coverage && has_overhang && within_intron_limit {
                 let novel_key = NovelJunctionKey {
                     chr_idx: key.chr_idx,
                     intron_start: key.intron_start,

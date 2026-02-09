@@ -619,6 +619,7 @@ mod tests {
             n_mismatch: 2,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: vec![],
             read_seq: vec![0, 1, 2, 3],
         };
 
@@ -709,6 +710,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: vec![],
             read_seq: vec![0, 1, 2, 3],
         };
 
@@ -778,6 +780,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: vec![],
             read_seq: vec![0; 100],
         };
 

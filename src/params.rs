@@ -36,6 +36,45 @@ impl std::fmt::Display for RunMode {
 }
 
 // ---------------------------------------------------------------------------
+// Junction motif filter enum
+// ---------------------------------------------------------------------------
+
+/// Filter mode for splice junction motifs (outFilterIntronMotifs)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntronMotifFilter {
+    /// Accept all junction motifs (no filtering)
+    None,
+    /// Remove alignments with non-canonical junctions (STAR default for RNA-seq)
+    RemoveNoncanonical,
+    /// Remove non-canonical junctions only if unannotated
+    RemoveNoncanonicalUnannotated,
+}
+
+impl std::str::FromStr for IntronMotifFilter {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "None" => Ok(Self::None),
+            "RemoveNoncanonical" => Ok(Self::RemoveNoncanonical),
+            "RemoveNoncanonicalUnannotated" => Ok(Self::RemoveNoncanonicalUnannotated),
+            _ => Err(format!(
+                "unknown outFilterIntronMotifs '{s}'; expected 'None', 'RemoveNoncanonical', or 'RemoveNoncanonicalUnannotated'"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for IntronMotifFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "None"),
+            Self::RemoveNoncanonical => write!(f, "RemoveNoncanonical"),
+            Self::RemoveNoncanonicalUnannotated => write!(f, "RemoveNoncanonicalUnannotated"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SAM output type enums
 // ---------------------------------------------------------------------------
 
@@ -293,6 +332,10 @@ pub struct Parameters {
     /// Min matched bases normalized to read length
     #[arg(long = "outFilterMatchNminOverLread", default_value_t = 0.66)]
     pub out_filter_match_nmin_over_lread: f64,
+
+    /// Filter alignments based on junction motifs
+    #[arg(long = "outFilterIntronMotifs", default_value = "None")]
+    pub out_filter_intron_motifs: IntronMotifFilter,
 
     // ── Alignment scoring ───────────────────────────────────────────────
     /// Min intron size (smaller gaps are deletions)

@@ -55,6 +55,37 @@ fn verify_match_at_position(
 ///
 /// # Returns
 /// Number of mismatched bases (excluding N bases)
+/// Count mismatches in a simple region (no CIGAR, just read vs genome)
+fn count_mismatches_in_region(
+    read_seq: &[u8],
+    read_start: usize,
+    genome_start: u64,
+    length: usize,
+    index: &GenomeIndex,
+    is_reverse: bool,
+) -> u32 {
+    let genome_offset = if is_reverse { index.genome.n_genome } else { 0 };
+    let mut n_mismatch = 0u32;
+
+    for i in 0..length {
+        let read_pos = read_start + i;
+        if read_pos >= read_seq.len() {
+            break;
+        }
+        let read_base = read_seq[read_pos];
+        if let Some(genome_base) = index
+            .genome
+            .get_base(genome_start + i as u64 + genome_offset)
+        {
+            if read_base != genome_base && read_base != 4 && genome_base != 4 {
+                n_mismatch += 1;
+            }
+        }
+    }
+
+    n_mismatch
+}
+
 fn count_mismatches(
     read_seq: &[u8],
     cigar_ops: &[CigarOp],
@@ -257,6 +288,7 @@ struct DpState {
     n_mismatch: u32,
     n_gap: u32,
     n_junction: u32,
+    junction_motifs: Vec<crate::align::score::SpliceMotif>,
 }
 
 /// Expanded seed with specific genome position
@@ -367,6 +399,7 @@ pub fn stitch_seeds(
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: Vec::new(),
         });
     }
 
@@ -376,42 +409,96 @@ pub fn stitch_seeds(
         let curr = &expanded_seeds[i];
         let mut best_score = dp[i].score;
         let mut best_j: Option<usize> = None;
-        let mut best_gap_score = 0i32;
         let mut best_gap_type = GapType::Deletion(0);
         let mut best_read_gap = 0i64;
         let mut best_genome_gap = 0i64;
+        let mut best_gap_mismatches = 0u32;
+        let mut best_eff_length = curr.length;
 
         for j in 0..i {
             let prev = &expanded_seeds[j];
 
-            // Check compatibility: no overlap in read, consistent genome order
-            if prev.read_end > curr.read_pos {
-                continue; // Overlapping in read
+            // STAR-style overlap trimming: if seeds overlap in read, trim seed B's start
+            let mut eff_read_pos = curr.read_pos;
+            let mut eff_genome_pos = curr.genome_pos;
+            let mut eff_length = curr.length;
+
+            if prev.read_end > eff_read_pos {
+                let overlap = prev.read_end - eff_read_pos;
+                if overlap >= eff_length {
+                    continue; // Seed B fully consumed by overlap
+                }
+                eff_read_pos = prev.read_end;
+                eff_genome_pos += overlap as u64;
+                eff_length -= overlap;
             }
 
-            if prev.genome_end > curr.genome_pos && curr.genome_pos > prev.genome_pos {
-                continue; // Overlapping in genome (not a clean gap)
+            // Similarly handle genome overlap
+            if prev.genome_end > eff_genome_pos && eff_genome_pos > prev.genome_pos {
+                let g_overlap = (prev.genome_end - eff_genome_pos) as usize;
+                if g_overlap >= eff_length {
+                    continue; // Seed B fully consumed by genome overlap
+                }
+                eff_read_pos += g_overlap;
+                eff_genome_pos += g_overlap as u64;
+                eff_length -= g_overlap;
             }
 
-            // Calculate gaps
-            let read_gap = (curr.read_pos - prev.read_end) as i64;
-            let genome_gap = (curr.genome_pos - prev.genome_end) as i64;
+            // Calculate gaps using effective (trimmed) coordinates
+            let read_gap = (eff_read_pos as i64) - (prev.read_end as i64);
+            let genome_gap = (eff_genome_pos as i64) - (prev.genome_end as i64);
 
             // Score the gap
             let (gap_score, gap_type) =
                 scorer.score_gap(genome_gap, read_gap, prev.genome_end, &index.genome);
 
-            // Transition score = prev_score + gap_penalty + current_seed_match_score
-            // Current seed contributes +1 per matched base (STAR convention)
-            let transition_score = dp[j].score + gap_score + (curr.length as i32);
+            // Count mismatches in the gap region (shared match portion)
+            let gap_mismatches = if read_gap > 0 && genome_gap > 0 {
+                let shared = (read_gap.min(genome_gap)) as usize;
+                if shared > 0 {
+                    count_mismatches_in_region(
+                        read_seq,
+                        prev.read_end,
+                        prev.genome_end,
+                        shared,
+                        index,
+                        cluster.is_reverse,
+                    )
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+
+            // Apply alignSJstitchMismatchNmax filter
+            // STAR rejects junction stitches with too many mismatches for the motif type
+            if let GapType::SpliceJunction { ref motif, .. } = gap_type {
+                if !scorer.stitch_mismatch_allowed(motif, gap_mismatches) {
+                    continue; // Reject: too many mismatches at this junction type
+                }
+            }
+
+            // STAR: shared region scores +1 per match, -1 per mismatch
+            // Total = shared_length - 2*mismatches (each mismatch flips from +1 to -1)
+            let shared_bases = if read_gap > 0 && genome_gap > 0 {
+                read_gap.min(genome_gap) as i32
+            } else {
+                0
+            };
+            let shared_score = shared_bases - (2 * gap_mismatches as i32);
+
+            // Transition score = prev_score + gap_penalty + shared_region_score + current_seed_match_score
+            let transition_score = dp[j].score + gap_score + shared_score + (eff_length as i32);
 
             if transition_score > best_score {
                 best_score = transition_score;
                 best_j = Some(j);
-                best_gap_score = gap_score;
                 best_gap_type = gap_type;
                 best_read_gap = read_gap;
                 best_genome_gap = genome_gap;
+                best_gap_mismatches = gap_mismatches;
+                best_eff_length = eff_length;
             }
         }
 
@@ -421,15 +508,12 @@ pub fn stitch_seeds(
 
             // Emit CIGAR operations for the gap between seeds
             // Handle negative gaps explicitly to avoid integer overflow
-            let has_gap;
-
             if best_read_gap == 0 && best_genome_gap == 0 {
                 // No gap - seeds are adjacent
-                has_gap = false;
             } else if best_read_gap < 0 || best_genome_gap < 0 {
                 // Negative gap indicates overlapping seeds or error
                 // score_gap() already penalized this, but we skip the connection
-                log::warn!(
+                log::trace!(
                     "Skipping connection with negative gap: read_gap={}, genome_gap={}",
                     best_read_gap,
                     best_genome_gap
@@ -446,12 +530,10 @@ pub fn stitch_seeds(
                         cigar.push(CigarOp::Del(gg));
                     }
                 }
-                has_gap = true;
             } else if best_read_gap > 0 && best_genome_gap == 0 {
                 // Pure insertion (read advances, genome doesn't)
                 let rg = best_read_gap as u32; // Safe: checked > 0
                 cigar.push(CigarOp::Ins(rg));
-                has_gap = true;
             } else {
                 // Both gaps positive: combined gap region
                 let rg = best_read_gap as u32; // Safe: checked > 0 above
@@ -482,33 +564,35 @@ pub fn stitch_seeds(
                 if excess_read > 0 {
                     cigar.push(CigarOp::Ins(excess_read));
                 }
-                has_gap = true;
             }
 
-            // Add current seed match (always try to merge with previous Match op)
+            // Add current seed match using effective length (after overlap trimming)
             if let Some(CigarOp::Match(prev_len)) = cigar.last_mut() {
                 // Merge with previous Match operation
-                *prev_len += curr.length as u32;
+                *prev_len += best_eff_length as u32;
             } else {
                 // No previous Match, or previous op was not Match
-                cigar.push(CigarOp::Match(curr.length as u32));
+                cigar.push(CigarOp::Match(best_eff_length as u32));
             }
 
             let mut n_gap = dp[j].n_gap;
             let mut n_junction = dp[j].n_junction;
+            let mut junction_motifs = dp[j].junction_motifs.clone();
             match best_gap_type {
                 GapType::Insertion(_) | GapType::Deletion(_) => n_gap += 1,
-                GapType::SpliceJunction { .. } => n_junction += 1,
+                GapType::SpliceJunction { motif, .. } => {
+                    n_junction += 1;
+                    junction_motifs.push(motif);
+                }
             }
-            let _ = best_gap_score;
-
             dp[i].score = best_score;
             dp[i].prev_seed = Some(j);
             dp[i].genome_pos = curr.genome_pos;
             dp[i].cigar_ops = cigar;
-            dp[i].n_mismatch = 0;
+            dp[i].n_mismatch = dp[j].n_mismatch + best_gap_mismatches;
             dp[i].n_gap = n_gap;
             dp[i].n_junction = n_junction;
+            dp[i].junction_motifs = junction_motifs;
         }
         // If no best_j, dp[i] keeps its initial state (single seed)
     }
@@ -652,6 +736,7 @@ pub fn stitch_seeds(
         n_mismatch,
         n_gap: best_state.n_gap,
         n_junction: best_state.n_junction,
+        junction_motifs: best_state.junction_motifs.clone(),
         read_seq: read_seq.to_vec(),
     };
 

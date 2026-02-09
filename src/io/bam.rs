@@ -162,6 +162,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: vec![],
             read_seq: vec![],
         };
 

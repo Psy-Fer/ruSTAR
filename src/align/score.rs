@@ -25,6 +25,9 @@ pub struct AlignmentScorer {
     pub align_intron_min: u32,
     /// Bonus for annotated splice junctions (from GTF)
     pub sjdb_score: i32,
+    /// Max mismatches for stitching SJs: [non-canonical, GT-AG, GC-AG, AT-AC]
+    /// -1 means unlimited
+    pub align_sj_stitch_mismatch_nmax: [i32; 4],
 }
 
 impl AlignmentScorer {
@@ -41,6 +44,12 @@ impl AlignmentScorer {
             score_ins_base: params.score_ins_base,
             align_intron_min: params.align_intron_min,
             sjdb_score: params.sjdb_score,
+            align_sj_stitch_mismatch_nmax: [
+                params.align_sj_stitch_mismatch_nmax[0],
+                params.align_sj_stitch_mismatch_nmax[1],
+                params.align_sj_stitch_mismatch_nmax[2],
+                params.align_sj_stitch_mismatch_nmax[3],
+            ],
         }
     }
 
@@ -58,6 +67,18 @@ impl AlignmentScorer {
         } else {
             base_score
         }
+    }
+
+    /// Check if the number of mismatches is allowed for this junction motif type
+    pub fn stitch_mismatch_allowed(&self, motif: &SpliceMotif, n_mismatch: u32) -> bool {
+        let idx = match motif {
+            SpliceMotif::NonCanonical => 0,
+            SpliceMotif::GtAg => 1,
+            SpliceMotif::GcAg => 2,
+            SpliceMotif::AtAc => 3,
+        };
+        let max_mm = self.align_sj_stitch_mismatch_nmax[idx];
+        max_mm < 0 || n_mismatch <= max_mm as u32
     }
 
     /// Score a gap between two aligned regions
@@ -277,6 +298,7 @@ mod tests {
             score_ins_base: -2,
             align_intron_min: 21,
             sjdb_score: 2,
+            align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
         };
 
         // Intron from position 2, length 12 (spans positions 2-13 inclusive)
@@ -310,6 +332,7 @@ mod tests {
             score_ins_base: -2,
             align_intron_min: 21,
             sjdb_score: 2,
+            align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -342,6 +365,7 @@ mod tests {
             score_ins_base: -2,
             align_intron_min: 21,
             sjdb_score: 2,
+            align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -372,6 +396,7 @@ mod tests {
             score_ins_base: -2,
             align_intron_min: 21,
             sjdb_score: 2,
+            align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -395,6 +420,7 @@ mod tests {
             score_ins_base: -2,
             align_intron_min: 21,
             sjdb_score: 2,
+            align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
         };
 
         let (score, gap_type) = scorer.score_gap(0, 5, 0, &genome);
@@ -416,6 +442,7 @@ mod tests {
             score_ins_base: -2,
             align_intron_min: 21,
             sjdb_score: 2,
+            align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
         };
 
         // Small gap (< align_intron_min) is deletion
@@ -445,6 +472,7 @@ mod tests {
             score_ins_base: -2,
             align_intron_min: 21,
             sjdb_score: 2,
+            align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
         };
 
         // Gap starting at position 2 (GT), length 26 (>= 21) is splice junction
@@ -472,6 +500,7 @@ mod tests {
             score_ins_base: -2,
             align_intron_min: 21,
             sjdb_score: 2,
+            align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
         };
 
         // Annotated junction should get bonus

@@ -734,6 +734,7 @@ fn record_transcript_junctions(
                     score_ins_base: -2,
                     align_intron_min: 21,
                     sjdb_score: 2,
+                    align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
                 };
                 let motif = scorer.detect_splice_motif(genome_pos, intron_len, &index.genome);
 

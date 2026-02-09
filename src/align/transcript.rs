@@ -24,6 +24,8 @@ pub struct Transcript {
     pub n_gap: u32,
     /// Number of splice junctions
     pub n_junction: u32,
+    /// Splice junction motifs (one per junction in CIGAR)
+    pub junction_motifs: Vec<crate::align::score::SpliceMotif>,
     /// Original read sequence
     pub read_seq: Vec<u8>,
 }
@@ -213,6 +215,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 1,
+            junction_motifs: vec![],
             read_seq: vec![],
         };
 
@@ -256,6 +259,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 1,
             n_junction: 1,
+            junction_motifs: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -301,6 +305,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: vec![],
             read_seq: vec![],
         };
 
@@ -322,6 +327,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: vec![],
             read_seq: vec![],
         };
 
@@ -343,6 +349,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: vec![],
             read_seq: vec![],
         };
 

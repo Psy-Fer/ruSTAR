@@ -1,11 +1,11 @@
 /// Read alignment driver function
-use crate::align::score::AlignmentScorer;
+use crate::align::score::{AlignmentScorer, SpliceMotif};
 use crate::align::seed::Seed;
 use crate::align::stitch::{cluster_seeds, stitch_seeds};
 use crate::align::transcript::Transcript;
 use crate::error::Error;
 use crate::index::GenomeIndex;
-use crate::params::Parameters;
+use crate::params::{IntronMotifFilter, Parameters};
 
 /// Paired-end alignment result
 #[derive(Debug, Clone)]
@@ -151,6 +151,36 @@ pub fn align_read(
         if (n_matched as f64) < params.out_filter_match_nmin_over_lread * read_length {
             *filter_reasons.entry("match_min_relative").or_insert(0) += 1;
             return false;
+        }
+
+        // Junction motif filtering
+        match params.out_filter_intron_motifs {
+            IntronMotifFilter::None => {
+                // Accept all motifs
+            }
+            IntronMotifFilter::RemoveNoncanonical => {
+                // Reject if any junction is non-canonical
+                if t.junction_motifs
+                    .iter()
+                    .any(|m| *m == SpliceMotif::NonCanonical)
+                {
+                    *filter_reasons.entry("noncanonical_junction").or_insert(0) += 1;
+                    return false;
+                }
+            }
+            IntronMotifFilter::RemoveNoncanonicalUnannotated => {
+                // TODO: requires checking junction database for annotation status
+                // For now, treat same as RemoveNoncanonical
+                if t.junction_motifs
+                    .iter()
+                    .any(|m| *m == SpliceMotif::NonCanonical)
+                {
+                    *filter_reasons
+                        .entry("noncanonical_unannotated_junction")
+                        .or_insert(0) += 1;
+                    return false;
+                }
+            }
         }
 
         true
@@ -612,6 +642,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -631,6 +662,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -661,6 +693,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -680,6 +713,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -708,6 +742,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -727,6 +762,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -755,6 +791,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -774,6 +811,7 @@ mod tests {
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
+            junction_motifs: vec![],
             read_seq: vec![0; 100],
         };
 

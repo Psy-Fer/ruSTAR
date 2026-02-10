@@ -38,6 +38,8 @@ pub struct AlignmentScorer {
     pub align_sjdb_overhang_min: u32,
     /// Maximum intron length (alignIntronMax, 0 = use default 589824)
     pub align_intron_max: u32,
+    /// Extra score log-scaled with genomic length: scale * log2(genomicLength)
+    pub score_genomic_length_log2_scale: f64,
 }
 
 impl AlignmentScorer {
@@ -60,6 +62,7 @@ impl AlignmentScorer {
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
+            score_genomic_length_log2_scale: -0.25,
         }
     }
 
@@ -91,7 +94,17 @@ impl AlignmentScorer {
             } else {
                 params.align_intron_max
             },
+            score_genomic_length_log2_scale: params.score_genomic_length_log2_scale,
         }
+    }
+
+    /// Compute genomic length penalty for a transcript.
+    /// STAR formula: ceil(log2(genomicLength) * scale - 0.5), clamped so score >= 0.
+    pub fn genomic_length_penalty(&self, genomic_span: u64) -> i32 {
+        if self.score_genomic_length_log2_scale == 0.0 || genomic_span == 0 {
+            return 0;
+        }
+        ((genomic_span as f64).log2() * self.score_genomic_length_log2_scale - 0.5).ceil() as i32
     }
 
     /// Apply annotation bonus to junction score
@@ -139,6 +152,23 @@ impl AlignmentScorer {
         genome_pos: u64,
         genome: &Genome,
     ) -> (i32, GapType) {
+        self.score_gap_with_strand(genome_gap, read_gap, genome_pos, genome, false, 0)
+    }
+
+    /// Score a gap between consecutive seeds, with strand-aware motif detection.
+    ///
+    /// For reverse-strand reads, `genome_pos` is a raw SA position in the RC genome.
+    /// The donor position must be converted to forward genome coordinates for motif
+    /// detection: `forward_donor = n_genome - rc_donor - intron_len`.
+    pub fn score_gap_with_strand(
+        &self,
+        genome_gap: i64,
+        read_gap: i64,
+        genome_pos: u64,
+        genome: &Genome,
+        is_reverse: bool,
+        n_genome: u64,
+    ) -> (i32, GapType) {
         match (genome_gap, read_gap) {
             // Insertion: read advances but genome doesn't
             (0, rg) if rg > 0 => {
@@ -150,8 +180,13 @@ impl AlignmentScorer {
             (gg, 0) if gg > 0 => {
                 let len = gg as u32;
                 if len >= self.align_intron_min && len <= self.align_intron_max {
-                    // Splice junction
-                    let motif = self.detect_splice_motif(genome_pos, len, genome);
+                    // Splice junction — detect motif on forward genome
+                    let donor = if is_reverse {
+                        n_genome - genome_pos - len as u64
+                    } else {
+                        genome_pos
+                    };
+                    let motif = self.detect_splice_motif(donor, len, genome);
                     let score = self.score_splice_junction(&motif);
                     (
                         score,
@@ -173,8 +208,13 @@ impl AlignmentScorer {
                 if excess > 0 {
                     let del_len = excess as u32;
                     if del_len >= self.align_intron_min && del_len <= self.align_intron_max {
-                        let motif =
-                            self.detect_splice_motif(genome_pos + rg as u64, del_len, genome);
+                        let rc_donor = genome_pos + rg as u64;
+                        let donor = if is_reverse {
+                            n_genome - rc_donor - del_len as u64
+                        } else {
+                            rc_donor
+                        };
+                        let motif = self.detect_splice_motif(donor, del_len, genome);
                         let score = self.score_splice_junction(&motif);
                         (
                             score,
@@ -403,6 +443,7 @@ mod tests {
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
+            score_genomic_length_log2_scale: -0.25,
         };
 
         // Intron from position 2, length 12 (spans positions 2-13 inclusive)
@@ -442,6 +483,7 @@ mod tests {
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
+            score_genomic_length_log2_scale: -0.25,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -480,6 +522,7 @@ mod tests {
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
+            score_genomic_length_log2_scale: -0.25,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -516,6 +559,7 @@ mod tests {
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
+            score_genomic_length_log2_scale: -0.25,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -545,6 +589,7 @@ mod tests {
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
+            score_genomic_length_log2_scale: -0.25,
         };
 
         let (score, gap_type) = scorer.score_gap(0, 5, 0, &genome);
@@ -572,6 +617,7 @@ mod tests {
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
+            score_genomic_length_log2_scale: -0.25,
         };
 
         // Small gap (< align_intron_min) is deletion
@@ -607,6 +653,7 @@ mod tests {
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
+            score_genomic_length_log2_scale: -0.25,
         };
 
         // Gap starting at position 2 (GT), length 26 (>= 21) is splice junction
@@ -640,6 +687,7 @@ mod tests {
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
+            score_genomic_length_log2_scale: -0.25,
         };
 
         // Annotated junction should get bonus
@@ -677,6 +725,7 @@ mod tests {
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
+            score_genomic_length_log2_scale: -0.25,
         };
 
         // CT-AC motif: (1,3,0,1) — reverse complement of GT-AG
@@ -775,6 +824,7 @@ mod tests {
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
+            score_genomic_length_log2_scale: -0.25,
         };
 
         // Gap of exactly 589824 starting at position 100 should be splice junction
@@ -849,6 +899,7 @@ mod tests {
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
             align_intron_max: 1000, // Small max for testing
+            score_genomic_length_log2_scale: -0.25,
         };
 
         // Gap of 1001 (> 1000 max) should be deletion, not splice junction

@@ -603,9 +603,15 @@ pub fn stitch_seeds(
             let read_gap = (eff_read_pos as i64) - (prev.read_end as i64);
             let genome_gap = (eff_genome_pos as i64) - (prev.genome_end as i64);
 
-            // Score the gap
-            let (gap_score, gap_type) =
-                scorer.score_gap(genome_gap, read_gap, prev.genome_end, &index.genome);
+            // Score the gap — pass strand info for correct splice motif detection
+            let (gap_score, gap_type) = scorer.score_gap_with_strand(
+                genome_gap,
+                read_gap,
+                prev.genome_end,
+                &index.genome,
+                cluster.is_reverse,
+                index.genome.n_genome,
+            );
 
             // Count mismatches in the gap region (shared match portion)
             let gap_mismatches = if read_gap > 0 && genome_gap > 0 {
@@ -904,6 +910,7 @@ pub fn stitch_seeds(
 
     // Count mismatches in the final alignment
     // count_mismatches uses raw SA position + n_genome offset for reverse strand
+    // MUST be called BEFORE CIGAR reversal since it walks in RC genome order
     let n_mismatch = count_mismatches(
         read_seq,
         &final_cigar,
@@ -912,6 +919,12 @@ pub fn stitch_seeds(
         index,
         cluster.is_reverse, // Pass reverse-strand flag for correct sequence comparison
     );
+
+    // SAM CIGAR must be in forward genome order (5'→3' reference direction).
+    // The DP builds CIGAR in read/RC-genome order; for reverse strand this is reversed.
+    if cluster.is_reverse {
+        final_cigar.reverse();
+    }
 
     // Compute total reference-consuming length from CIGAR
     let mut ref_len = 0u64;
@@ -981,20 +994,28 @@ pub fn stitch_seeds(
     }
 
     // Build transcript
+    let t_genome_start = merged_exons
+        .first()
+        .map(|e| e.genome_start)
+        .unwrap_or(forward_genome_start);
+    let t_genome_end = merged_exons
+        .last()
+        .map(|e| e.genome_end)
+        .unwrap_or(forward_genome_end);
+
+    // Apply STAR's genomic length penalty: penalizes long-spanning alignments
+    let genomic_span = t_genome_end - t_genome_start;
+    let length_penalty = scorer.genomic_length_penalty(genomic_span);
+    let final_score = (adjusted_score + length_penalty).max(0);
+
     let transcript = Transcript {
         chr_idx: cluster.chr_idx,
-        genome_start: merged_exons
-            .first()
-            .map(|e| e.genome_start)
-            .unwrap_or(forward_genome_start),
-        genome_end: merged_exons
-            .last()
-            .map(|e| e.genome_end)
-            .unwrap_or(forward_genome_end),
+        genome_start: t_genome_start,
+        genome_end: t_genome_end,
         is_reverse: cluster.is_reverse,
         exons: merged_exons,
         cigar: final_cigar, // Use CIGAR with extensions + soft clips
-        score: adjusted_score,
+        score: final_score,
         n_mismatch,
         n_gap: best_state.n_gap,
         n_junction: best_state.n_junction,
@@ -1349,6 +1370,7 @@ mod tests {
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
+            score_genomic_length_log2_scale: -0.25,
         };
 
         // Left overhang (prev.length) = 3, below min of 5
@@ -1387,6 +1409,7 @@ mod tests {
             align_sj_overhang_min: 5,
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
+            score_genomic_length_log2_scale: -0.25,
         };
 
         // Both overhangs >= 5

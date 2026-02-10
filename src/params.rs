@@ -452,6 +452,10 @@ pub struct Parameters {
     #[arg(long = "scoreStitchSJshift", default_value_t = 1)]
     pub score_stitch_sj_shift: i32,
 
+    /// Extra score log-scaled with genomic length: scoreGenomicLengthLog2scale*log2(genomicLength)
+    #[arg(long = "scoreGenomicLengthLog2scale", default_value_t = -0.25, allow_hyphen_values = true)]
+    pub score_genomic_length_log2_scale: f64,
+
     // ── Seed and anchor parameters ──────────────────────────────────────
     /// Max number of loci a seed can map to (seeds with more loci are discarded)
     #[arg(long = "seedMultimapNmax", default_value_t = 10000)]

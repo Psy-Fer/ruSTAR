@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.11 complete (96.3% position agreement, 97.8% CIGAR agreement, 2 false junctions). Next: Phase 13.12** (further accuracy improvements).
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.12 complete (96.3% position agreement, 97.8% CIGAR agreement, 100% motif agreement, 2 false junctions). Next: splice rate improvement.**
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -56,16 +56,17 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 13.9c (Deterministic tie-breaking) ← **Reproducible multi-mapper ordering**
 - Phase 13.10 (Accuracy parity) ← **Terminal exon filter, annotation bonus, coverage filter, seed caps**
 - Phase 13.11 (R→L seeding) ← **Bidirectional seed search, +127 multi-mapped, 3.3x more shared junctions**
+- Phase 13.12 (SJ motif/strand fix) ← **100% motif agreement on shared junctions, motif-derived strand**
 
 **Current Status** (10k yeast reads, single-end):
 - ✅ **96.3% position agreement** with STAR (was 51% → 94.5% → 95.3% → 96.3%)
 - ✅ **97.8% CIGAR agreement** among position-matching reads (was 84.3% → 96.5% → 97.4% → 97.8%)
 - ✅ 84.0% unique mapped (STAR: 82.6%), 4.92% multi-mapped (STAR: 7.4%)
 - ✅ 26.5% soft clips (STAR: 26.0%)
-- ✅ 80% motif agreement on shared junctions (24/30)
+- ✅ **100% motif agreement** on shared junctions (30/30)
 - ✅ 30 shared junctions (was 9, STAR has 72 total)
 - ✅ SAM SEQ properly reverse-complemented for reverse-strand reads
-- ✅ 196 unit tests passing
+- ✅ 199 unit tests passing
 - ✅ Deterministic output (identical SAM across runs)
 - ✅ Bidirectional seed search (L→R + R→L)
 - ✅ **Only 2 false junctions** (was 33 → 3 → 2)
@@ -155,7 +156,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 196/196 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, implicit_saturating_sub × 1, manual_contains × 2)
+**Current test status**: 199/199 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, implicit_saturating_sub × 1, manual_contains × 2)
 
 **Note**: Phase 9 integration tests fail due to pathologically repetitive test genomes (50 exact copies of 20bp). These tests need realistic genomes (deferred to Phase 13).
 
@@ -199,7 +200,7 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 7. **188 same-chr >500bp apart**: Mostly chrXII rDNA repeats — STAR=MAPQ 1-3, ruSTAR=MAPQ 255. R→L seeding improved but didn't fully resolve.
 8. **103 diff-chr disagreements**: 101 are multi-mappers (harmless tie-breaking), 2 have MAPQ mismatches.
 9. **60 STAR-only mapped reads**: Stable.
-10. **SJ motif strand disagreement** (6/30 shared): CT/AC vs GT/AG — strand assignment issue in SJ.out.tab writer.
+10. ~~**SJ motif strand disagreement**~~ ✅ FIXED in Phase 13.12 — strand now derived from splice motif (`implied_strand()`), not read alignment strand. `encode_motif()` simplified to direct mapping.
 
 ## Limitations (to be addressed in future phases)
 

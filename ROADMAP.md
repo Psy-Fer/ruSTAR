@@ -23,7 +23,8 @@ Phase 1 (CLI) ✅
                                                                    └→ Phase 13.9c (deterministic tie-breaking) ✅
                                                                         └→ Phase 13.10 (accuracy parity) ✅
                                                                              └→ Phase 13.11 (R→L seeding) ✅
-                                                                                  └→ Phase 14 (STARsolo) [DEFERRED]
+                                                                                  └→ Phase 13.12 (SJ motif/strand fix) ✅
+                                                                                       └→ Phase 14 (STARsolo) [DEFERRED]
 ```
 
 **Phase ordering rationale**: Threading (Phase 9) done first to establish parallel architecture foundation.
@@ -1161,6 +1162,50 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 - rDNA: R→L improved but still misses some tandem repeat copies → inflated MAPQ
 
 **Verified**: 196/196 tests passing, clippy clean (6 pre-existing warnings), `cargo fmt --check` pass
+
+---
+
+## Phase 13.12: SJ.out.tab Motif/Strand Fix ✅
+
+**Status**: Complete
+
+**Goal**: Fix SJ.out.tab motif/strand assignment to match STAR convention. Strand should derive from splice motif dinucleotides, not from read alignment strand.
+
+**Root Cause**: `record_transcript_junctions()` in `lib.rs` derived junction strand from `transcript.is_reverse` (read alignment strand), but STAR derives it from the splice motif dinucleotides (GT/AG → strand=1, CT/AC → strand=2). Additionally, `encode_motif()` incorrectly transformed the motif code based on strand, when it should map directly from the detected motif.
+
+**Fixes Applied**:
+
+1. **Strand from motif** (`src/lib.rs`):
+   - Changed `let strand = if transcript.is_reverse { 2 } else { 1 }` to use `motif.implied_strand()`:
+     - `Some('+')` → strand=1, `Some('-')` → strand=2, `None` → strand=0
+
+2. **Direct motif encoding** (`src/junction/sj_output.rs`):
+   - Simplified `encode_motif()` to direct mapping without strand parameter
+   - GtAg→1, CtAc→2, GcAg→3, CtGc→4, AtAc→5, GtAt→6, NonCanonical→0
+   - Updated call site to remove strand argument
+
+3. **Full test coverage** — 7 `encode_motif` tests covering all motif variants (was 4)
+
+**Files Modified**:
+- `src/lib.rs` — ~3 lines: motif-derived strand
+- `src/junction/sj_output.rs` — ~25 lines: simplified `encode_motif()`, updated call site + tests
+
+### 10k-read STAR Comparison
+
+| Metric | Before (13.11) | After (13.12) | STAR |
+|--------|----------------|---------------|------|
+| Position agreement | 96.3% | **96.3%** | — |
+| CIGAR agree (of pos-agree) | 97.8% | **97.8%** | — |
+| Motif agreement | 80% (24/30) | **100% (30/30)** | — |
+| Unique mapped | 84.0% | **84.0%** | 82.6% |
+| Multi mapped | 4.92% | **4.92%** | 7.4% |
+| Spliced rate | 0.9% | **0.9%** | 2.2% |
+| Shared junctions | 30 | **30** | 72 total |
+| ruSTAR-only junctions | 2 | **2** | — |
+
+**Key Result**: Motif agreement on shared junctions improved from 80% to **100%**. Duplicate junction entries (same coordinates, different strand/motif) eliminated.
+
+**Verified**: 199/199 tests passing, clippy clean (6 pre-existing warnings), `cargo fmt --check` pass
 
 ---
 

@@ -9,6 +9,8 @@ use crate::params::Parameters;
 use noodles::sam;
 use noodles::sam::alignment::io::Write;
 use noodles::sam::alignment::record::MappingQuality;
+use noodles::sam::alignment::record::data::field::Tag;
+use noodles::sam::alignment::record_buf::data::field::Value;
 use noodles::sam::alignment::record_buf::{QualityScores, RecordBuf, Sequence};
 use noodles::sam::header::record::value::{Map, map::Program};
 use std::fs::File;
@@ -240,7 +242,9 @@ impl SamWriter {
 
         let mut records = Vec::with_capacity(n_alignments * 2);
 
-        for paired_aln in paired_alignments {
+        for (pair_idx, paired_aln) in paired_alignments.iter().enumerate() {
+            let hit_index = pair_idx + 1; // 1-based
+
             // Create record for mate1
             let rec1 = build_paired_mate_record(
                 read_name,
@@ -252,6 +256,8 @@ impl SamWriter {
                 true, // is_first_mate
                 paired_aln.is_proper_pair,
                 paired_aln.insert_size,
+                n_alignments,
+                hit_index,
             )?;
             records.push(rec1);
 
@@ -266,6 +272,8 @@ impl SamWriter {
                 false, // is_first_mate
                 paired_aln.is_proper_pair,
                 -paired_aln.insert_size, // Negative for mate2
+                n_alignments,
+                hit_index,
             )?;
             records.push(rec2);
         }
@@ -355,8 +363,8 @@ fn transcript_to_record(
     read_qual: &[u8],
     genome: &Genome,
     mapq: u8,
-    _n_alignments: usize,
-    _hit_index: usize,
+    n_alignments: usize,
+    hit_index: usize,
 ) -> Result<RecordBuf, Error> {
     let mut record = RecordBuf::default();
 
@@ -418,11 +426,30 @@ fn transcript_to_record(
         *record.quality_scores_mut() = QualityScores::from(read_qual.to_vec());
     }
 
-    // Optional tags
-    // TODO: Add SAM tags (AS, NM, NH, HI, nM, jM, jI) in Phase 6 refinement
-    // For now, minimal tags are sufficient for basic alignment output
+    // Optional tags: NH, HI, AS, NM
+    let data = record.data_mut();
+    data.insert(Tag::ALIGNMENT_HIT_COUNT, Value::from(n_alignments as i32)); // NH
+    data.insert(Tag::HIT_INDEX, Value::from(hit_index as i32)); // HI
+    data.insert(Tag::ALIGNMENT_SCORE, Value::from(transcript.score)); // AS
+    data.insert(
+        Tag::EDIT_DISTANCE,
+        Value::from(compute_edit_distance(transcript)),
+    ); // NM
 
     Ok(record)
+}
+
+/// Compute edit distance (NM tag): mismatches + inserted bases + deleted bases
+fn compute_edit_distance(transcript: &Transcript) -> i32 {
+    let indel_bases: u32 = transcript
+        .cigar
+        .iter()
+        .filter_map(|op| match op {
+            CigarOp::Ins(n) | CigarOp::Del(n) => Some(*n),
+            _ => None,
+        })
+        .sum();
+    (transcript.n_mismatch + indel_bases) as i32
 }
 
 /// Convert ruSTAR CigarOp to noodles Cigar
@@ -463,6 +490,8 @@ fn build_paired_mate_record(
     is_first_mate: bool,
     is_proper_pair: bool,
     insert_size: i32,
+    n_alignments: usize,
+    hit_index: usize,
 ) -> Result<RecordBuf, Error> {
     let mut record = RecordBuf::default();
 
@@ -552,12 +581,18 @@ fn build_paired_mate_record(
         *record.quality_scores_mut() = QualityScores::from(mate_qual.to_vec());
     }
 
+    // Optional tags: NH, HI, AS, NM
+    let data = record.data_mut();
+    data.insert(Tag::ALIGNMENT_HIT_COUNT, Value::from(n_alignments as i32)); // NH
+    data.insert(Tag::HIT_INDEX, Value::from(hit_index as i32)); // HI
+    data.insert(Tag::ALIGNMENT_SCORE, Value::from(transcript.score)); // AS
+    data.insert(
+        Tag::EDIT_DISTANCE,
+        Value::from(compute_edit_distance(transcript)),
+    ); // NM
+
     Ok(record)
 }
-
-// TODO: SAM optional tags will be added in Phase 6 refinement
-// The noodles API for tags requires careful handling of lifetimes
-// For now, we'll focus on getting the core alignment working
 
 #[cfg(test)]
 mod tests {
@@ -754,6 +789,8 @@ mod tests {
             true, // is_first_mate
             true, // is_proper_pair
             300,
+            1, // n_alignments
+            1, // hit_index
         )
         .unwrap();
 
@@ -774,6 +811,8 @@ mod tests {
             false, // is_first_mate
             true,  // is_proper_pair
             -300,
+            1, // n_alignments
+            1, // hit_index
         )
         .unwrap();
 
@@ -823,6 +862,8 @@ mod tests {
             true,
             true,
             250,
+            1, // n_alignments
+            1, // hit_index
         )
         .unwrap();
 
@@ -839,5 +880,193 @@ mod tests {
         assert_eq!(rec.template_length(), 250);
     }
 
-    // TODO: Add tests for SAM tags when they are implemented
+    #[test]
+    fn test_tags_nh_hi_as_nm() {
+        let genome = make_test_genome();
+
+        // Transcript with 2 mismatches and a 3bp deletion → NM = 2 + 3 = 5
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 60,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![CigarOp::Match(20), CigarOp::Del(3), CigarOp::Match(30)],
+            score: 100,
+            n_mismatch: 2,
+            n_gap: 1,
+            n_junction: 0,
+            junction_motifs: vec![],
+            read_seq: vec![0, 1, 2, 3],
+        };
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let record = transcript_to_record(
+            &transcript,
+            "read1",
+            &read_seq,
+            &read_qual,
+            &genome,
+            255,
+            3, // n_alignments
+            2, // hit_index
+        )
+        .unwrap();
+
+        let data = record.data();
+        assert_eq!(
+            data.get(&Tag::ALIGNMENT_HIT_COUNT),
+            Some(&Value::from(3_i32)),
+            "NH tag should be 3"
+        );
+        assert_eq!(
+            data.get(&Tag::HIT_INDEX),
+            Some(&Value::from(2_i32)),
+            "HI tag should be 2"
+        );
+        assert_eq!(
+            data.get(&Tag::ALIGNMENT_SCORE),
+            Some(&Value::from(100_i32)),
+            "AS tag should be 100"
+        );
+        assert_eq!(
+            data.get(&Tag::EDIT_DISTANCE),
+            Some(&Value::from(5_i32)),
+            "NM tag should be 5 (2 mismatches + 3 deleted bases)"
+        );
+    }
+
+    #[test]
+    fn test_edit_distance_computation() {
+        // Pure match: NM = n_mismatch only
+        let t1 = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 50,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![CigarOp::Match(50)],
+            score: 100,
+            n_mismatch: 3,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            read_seq: vec![],
+        };
+        assert_eq!(compute_edit_distance(&t1), 3);
+
+        // Match + Ins + Del: NM = n_mismatch + ins_len + del_len
+        let t2 = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 60,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![
+                CigarOp::Match(20),
+                CigarOp::Ins(5),
+                CigarOp::Match(10),
+                CigarOp::Del(7),
+                CigarOp::Match(20),
+            ],
+            score: 80,
+            n_mismatch: 1,
+            n_gap: 2,
+            n_junction: 0,
+            junction_motifs: vec![],
+            read_seq: vec![],
+        };
+        assert_eq!(compute_edit_distance(&t2), 13); // 1 + 5 + 7
+
+        // RefSkip (splice junction) should NOT count toward NM
+        let t3 = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 200,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![
+                CigarOp::Match(25),
+                CigarOp::RefSkip(1000),
+                CigarOp::Match(25),
+            ],
+            score: 50,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 1,
+            junction_motifs: vec![],
+            read_seq: vec![],
+        };
+        assert_eq!(compute_edit_distance(&t3), 0);
+
+        // Soft clips should NOT count toward NM
+        let t4 = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 40,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![
+                CigarOp::SoftClip(10),
+                CigarOp::Match(40),
+                CigarOp::SoftClip(10),
+            ],
+            score: 40,
+            n_mismatch: 2,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            read_seq: vec![],
+        };
+        assert_eq!(compute_edit_distance(&t4), 2);
+    }
+
+    #[test]
+    fn test_transcript_to_record_has_tags() {
+        // Verify the existing test_transcript_to_record scenario also has tags
+        let genome = make_test_genome();
+
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 10,
+            genome_end: 60,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![CigarOp::Match(50)],
+            score: 100,
+            n_mismatch: 2,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            read_seq: vec![0, 1, 2, 3],
+        };
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let record = transcript_to_record(
+            &transcript,
+            "read1",
+            &read_seq,
+            &read_qual,
+            &genome,
+            255,
+            1, // unique mapper
+            1,
+        )
+        .unwrap();
+
+        let data = record.data();
+        // Unique mapper: NH=1, HI=1
+        assert_eq!(
+            data.get(&Tag::ALIGNMENT_HIT_COUNT),
+            Some(&Value::from(1_i32))
+        );
+        assert_eq!(data.get(&Tag::HIT_INDEX), Some(&Value::from(1_i32)));
+        assert_eq!(data.get(&Tag::ALIGNMENT_SCORE), Some(&Value::from(100_i32)));
+        // NM = 2 mismatches, no indels
+        assert_eq!(data.get(&Tag::EDIT_DISTANCE), Some(&Value::from(2_i32)));
+    }
 }

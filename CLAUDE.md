@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 complete. Normal mode: 95.7% position agreement, 97.3% CIGAR agreement, 3.4% splice rate. BySJout mode: 96.7% position, 98.3% CIGAR, 1.1% splice rate.**
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1 complete. Normal mode: 95.7% position agreement, 97.3% CIGAR agreement, 3.4% splice rate. BySJout mode: 96.7% position, 98.3% CIGAR, 1.1% splice rate. NH/HI/AS/NM SAM tags: 98.3%/100%/98.7%/97.7% agreement with STAR.**
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -59,9 +59,10 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 13.12 (SJ motif/strand fix) ← **100% motif agreement on shared junctions, motif-derived strand**
 - Phase 13.13 (Splice rate fix) ← **Relaxed terminal exon overhang, splice rate 0.9% → 3.4%, shared junctions 30 → 50**
 - Phase 13.14 (outFilterBySJout) ← **Implemented outFilterType BySJout, +1% position/CIGAR agreement**
+- Phase 15.1 (NH/HI/AS/NM tags) ← **SAM tags added, 98.3% NH / 100% HI / 98.7% AS agreement with STAR**
 
 **In Progress**:
-- Phase 15 (SAM tags + output correctness) ← NH/HI/AS/NM/XS/jM/jI/MD tags, secondary alignments, PE fixes
+- Phase 15.2 (XS tag + secondary alignments) ← XS strand tag, FLAG 0x100 for multi-mappers
 
 **Planned**:
 - Phase 16 (Accuracy + algorithm parity) ← jR scanning, rDNA MAPQ, seed params, PE joint DP
@@ -86,7 +87,7 @@ Both modes:
 - ✅ **100% motif agreement** on shared junctions (50/50)
 - ✅ **50 shared junctions** (STAR has 72 total)
 - ✅ SAM SEQ properly reverse-complemented for reverse-strand reads
-- ✅ 205 unit tests passing
+- ✅ 208 unit tests passing
 - ✅ Deterministic output (identical SAM across runs)
 - ✅ Bidirectional seed search (L→R + R→L)
 - ✅ Annotation-aware DP scoring (sjdbScore bonus during stitching)
@@ -175,7 +176,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 205/205 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, implicit_saturating_sub × 1, manual_contains × 2)
+**Current test status**: 208/208 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, implicit_saturating_sub × 1, manual_contains × 2)
 
 **Note**: Phase 9 integration tests fail due to pathologically repetitive test genomes (50 exact copies of 20bp). These tests need realistic genomes (deferred to Phase 13).
 
@@ -198,6 +199,7 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
   - MAPQ scores
   - 1-based genomic positions
   - Mate information (RNEXT, PNEXT, TLEN for paired-end)
+  - SAM optional tags: NH (hit count), HI (hit index), AS (alignment score), NM (edit distance)
 - Splice junction statistics output (SJ.out.tab, SJ.pass1.out.tab in two-pass mode)
 - Chimeric alignment detection for single-end reads (`--chimSegmentMin` > 0):
   - Detects inter-chromosomal fusions (e.g., BCR-ABL chr9→chr22)
@@ -229,8 +231,11 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 
 ## Limitations (to be addressed in future phases)
 
-- **SAM optional tags** (AS, NM, NH, HI, XS, jM, jI, MD) — **Phase 15 (in progress)**
+- ~~**SAM optional tags NH/HI/AS/NM**~~ ✅ DONE in Phase 15.1 — 98.3% NH / 100% HI / 98.7% AS agreement with STAR
+- **STAR uses `nM` (mismatches only), ruSTAR uses `NM` (edit distance)** — different tags, both valid; may need `nM` for compat — Phase 15.6
+- **XS strand tag** (required by StringTie/Cufflinks) — Phase 15.2
 - **Secondary alignment output** (FLAG 0x100, --outSAMmultNmax) — Phase 15.2
+- **jM/jI/MD tags** (STAR junction tags, GATK variant calling) — Phase 15.3
 - **Paired-end FLAG/PNEXT bugs** (mate strand flag, mate position) — Phase 15.4
 - **--outSAMattributes** parsed but not enforced — Phase 15.5
 - **No coordinate-sorted BAM output** (unsorted only; use `samtools sort`) — Phase 17.2

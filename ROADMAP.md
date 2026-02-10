@@ -26,7 +26,8 @@ Phase 1 (CLI) ✅
                                                                                   └→ Phase 13.12 (SJ motif/strand fix) ✅
                                                                                        └→ Phase 13.13 (splice rate fix) ✅
                                                                                             └→ Phase 13.14 (outFilterBySJout) ✅
-                                                                                                 └→ Phase 15 (SAM tags + output) ← In Progress
+                                                                                                 └→ Phase 15.1 (NH/HI/AS/NM tags) ✅
+                                                                                                      └→ Phase 15.2+ (XS, jM/jI/MD, PE fixes) ← Next
                                                                                                       └→ Phase 16 (accuracy parity)
                                                                                                            └→ Phase 17 (features + polish)
                                                                                                                 └→ Phase 14 (STARsolo) [DEFERRED]
@@ -1324,17 +1325,34 @@ BySJout mode (`--outFilterType BySJout`):
 
 **Goal**: Add all SAM optional tags required by downstream tools (featureCounts, RSEM, StringTie, GATK, Picard, samtools markdup). Fix paired-end output bugs. Implement `--outSAMattributes` enforcement.
 
-### Phase 15.1: NH, HI, AS, NM Tags (Foundation) — In Progress
+### Phase 15.1: NH, HI, AS, NM Tags (Foundation) ✅ COMPLETE (2026-02-10)
 
 **Problem**: All downstream tools require one or more of NH/HI/AS/NM. Without them, ruSTAR output is unusable in standard pipelines.
 
-**Current state**: `src/io/sam.rs:422` TODO. `transcript_to_record()` accepts `_n_alignments` and `_hit_index` but ignores them.
+**Implementation** (`src/io/sam.rs` only):
+1. Added imports for `Tag` and `Value` from noodles `record::data::field` and `record_buf::data::field`
+2. Added `compute_edit_distance()` helper — sums `n_mismatch + Ins(n) + Del(n)` from CIGAR (excludes RefSkip/SoftClip)
+3. Updated `transcript_to_record()` — removed `_n_alignments`/`_hit_index` underscore prefixes, replaced TODO with 4 tag insertions via `record.data_mut().insert()`
+4. Updated `build_paired_mate_record()` — added `n_alignments`/`hit_index` params + same 4 tag insertions
+5. Updated `build_paired_records()` — passes `n_alignments`/`hit_index` (1-based from enumerate) to both mate record builders
+6. Updated existing test call sites for new `build_paired_mate_record()` signature
+7. Added 3 new tests: `test_tags_nh_hi_as_nm`, `test_edit_distance_computation`, `test_transcript_to_record_has_tags`
 
-**Fix**: Use noodles `record_buf::data` API to add tags:
-- NH:i = n_alignments (number of reported alignments)
-- HI:i = hit_index (1-based index of this alignment)
-- AS:i = transcript.score (alignment score)
-- NM:i = edit distance (mismatches + D/I bases from CIGAR)
+**Tag Comparison vs STAR** (8484 position-matching reads, 10k yeast):
+
+| Tag | Agreement | Rate | Notes |
+|-----|-----------|------|-------|
+| NH | 8340/8484 | 98.3% | 144 differ (multi-mapper count from different seeding; 122 off-by-1) |
+| HI | 8484/8484 | 100.0% | Perfect agreement |
+| AS | 8373/8484 | 98.7% | 2 same-CIGAR diffs (minor), 109 from different CIGARs |
+| NM vs nM | 8287/8484 | 97.7% | **0 unexplained**: 40 = indel bases (NM counts, nM doesn't), 157 from different CIGARs |
+
+**Identified Problems**:
+1. **STAR uses `nM` (mismatches only), ruSTAR uses `NM` (edit distance)** — different tags with different semantics. Both valid SAM tags. May need to also emit `nM` for STAR-compatible output.
+2. **2 same-CIGAR AS disagreements** — both 150M with 0 mismatches but STAR gives slightly lower AS (147/144 vs 148). Likely base-quality or annotation scoring penalty in STAR.
+3. **NH disagrees on 1.7%** — 52 STAR finds more hits, 92 ruSTAR finds more. From different seed search strategies.
+
+**Test Results**: 208/208 tests passing (+3 new), clippy clean (pre-existing only), `cargo fmt --check` pass
 
 **Files**: `src/io/sam.rs`
 
@@ -1379,9 +1397,11 @@ BySJout mode (`--outFilterType BySJout`):
 **Files**: `src/io/sam.rs`, `src/params.rs`
 **Depends on**: 15.3
 
-### Phase 15.6: nM Tag (Paired Mismatch Count)
+### Phase 15.6: nM Tag (STAR-compatible Mismatch Count)
 
-**Fix**: Sum mismatches from both mates.
+**Problem**: STAR outputs `nM:i:N` (mismatches only, excluding indels). ruSTAR outputs `NM:i:N` (edit distance = mismatches + indels, SAM spec). Both are valid tags but some downstream tools expect STAR's `nM`. On same-CIGAR reads with indels, the values differ by exactly the indel base count.
+
+**Fix**: Add `nM` tag alongside `NM`. `nM` = `transcript.n_mismatch` directly (no indel sum). Custom tag: `Tag::new(b'n', b'M')`.
 
 **Files**: `src/io/sam.rs`
 **Depends on**: 15.1

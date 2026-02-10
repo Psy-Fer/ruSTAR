@@ -100,7 +100,7 @@ impl SpliceJunctionStats {
             intron_start: start,
             intron_end: end,
             strand,
-            motif: encode_motif(motif, strand),
+            motif: encode_motif(motif),
         };
 
         // Get or create entry
@@ -318,35 +318,27 @@ impl SjCounts {
 
 /// Encode splice motif for SJ.out.tab
 ///
+/// Direct mapping from detected motif to STAR's numeric encoding.
+/// The motif is already detected on the forward genome, so no strand
+/// transformation is needed — strand is derived separately from the motif.
+///
 /// STAR convention:
 /// 0 = non-canonical
-/// 1 = GT/AG (canonical, + strand)
-/// 2 = CT/AC (reverse complement of GT/AG, - strand)
-/// 3 = GC/AG (+ strand)
-/// 4 = CT/GC (reverse complement of GC/AG, - strand)
-/// 5 = AT/AC (+ strand)
-/// 6 = GT/AT (rare)
-fn encode_motif(motif: SpliceMotif, strand: u8) -> u8 {
+/// 1 = GT/AG
+/// 2 = CT/AC
+/// 3 = GC/AG
+/// 4 = CT/GC
+/// 5 = AT/AC
+/// 6 = GT/AT
+fn encode_motif(motif: SpliceMotif) -> u8 {
     match motif {
-        SpliceMotif::GtAg => {
-            if strand == 2 {
-                2 // CT/AC (reverse complement)
-            } else {
-                1 // GT/AG
-            }
-        }
-        SpliceMotif::CtAc => 2, // CT/AC (detected directly on forward genome)
-        SpliceMotif::GcAg => {
-            if strand == 2 {
-                4 // CT/GC (reverse complement)
-            } else {
-                3 // GC/AG
-            }
-        }
-        SpliceMotif::CtGc => 4, // CT/GC (detected directly on forward genome)
-        SpliceMotif::AtAc => 5, // AT/AC
-        SpliceMotif::GtAt => 6, // GT/AT (reverse complement of AT/AC)
-        SpliceMotif::NonCanonical => 0, // Non-canonical
+        SpliceMotif::GtAg => 1,
+        SpliceMotif::CtAc => 2,
+        SpliceMotif::GcAg => 3,
+        SpliceMotif::CtGc => 4,
+        SpliceMotif::AtAc => 5,
+        SpliceMotif::GtAt => 6,
+        SpliceMotif::NonCanonical => 0,
     }
 }
 
@@ -423,26 +415,37 @@ mod tests {
 
     #[test]
     fn test_encode_motif_gtag() {
-        assert_eq!(encode_motif(SpliceMotif::GtAg, 1), 1); // + strand
-        assert_eq!(encode_motif(SpliceMotif::GtAg, 2), 2); // - strand (reverse complement)
+        assert_eq!(encode_motif(SpliceMotif::GtAg), 1);
+    }
+
+    #[test]
+    fn test_encode_motif_ctac() {
+        assert_eq!(encode_motif(SpliceMotif::CtAc), 2);
     }
 
     #[test]
     fn test_encode_motif_gcag() {
-        assert_eq!(encode_motif(SpliceMotif::GcAg, 1), 3); // + strand
-        assert_eq!(encode_motif(SpliceMotif::GcAg, 2), 4); // - strand (reverse complement)
+        assert_eq!(encode_motif(SpliceMotif::GcAg), 3);
+    }
+
+    #[test]
+    fn test_encode_motif_ctgc() {
+        assert_eq!(encode_motif(SpliceMotif::CtGc), 4);
     }
 
     #[test]
     fn test_encode_motif_atac() {
-        assert_eq!(encode_motif(SpliceMotif::AtAc, 1), 5);
-        assert_eq!(encode_motif(SpliceMotif::AtAc, 2), 5); // No reverse complement encoding
+        assert_eq!(encode_motif(SpliceMotif::AtAc), 5);
+    }
+
+    #[test]
+    fn test_encode_motif_gtat() {
+        assert_eq!(encode_motif(SpliceMotif::GtAt), 6);
     }
 
     #[test]
     fn test_encode_motif_noncanonical() {
-        assert_eq!(encode_motif(SpliceMotif::NonCanonical, 1), 0);
-        assert_eq!(encode_motif(SpliceMotif::NonCanonical, 2), 0);
+        assert_eq!(encode_motif(SpliceMotif::NonCanonical), 0);
     }
 
     #[test]
@@ -524,7 +527,7 @@ mod tests {
         assert_eq!(fields2[1], "300");
         assert_eq!(fields2[2], "400");
         assert_eq!(fields2[3], "2"); // - strand
-        assert_eq!(fields2[4], "4"); // motif (CT/GC, reverse of GC/AG)
+        assert_eq!(fields2[4], "3"); // motif (GC/AG, direct encoding)
         assert_eq!(fields2[5], "1"); // annotated
         assert_eq!(fields2[6], "0"); // unique count
         assert_eq!(fields2[7], "1"); // multi count

@@ -759,8 +759,12 @@ fn record_transcript_junctions(
                 let right_exon = exon_lengths[junction_idx + 1];
                 let overhang = left_exon.min(right_exon);
 
-                // Check if annotated
-                let strand = if transcript.is_reverse { 2 } else { 1 };
+                // Derive strand from splice motif (STAR convention)
+                let strand = match motif.implied_strand() {
+                    Some('+') => 1u8,
+                    Some('-') => 2u8,
+                    _ => 0u8, // non-canonical: unknown strand
+                };
                 let annotated = index.junction_db.is_annotated(
                     transcript.chr_idx,
                     intron_start,

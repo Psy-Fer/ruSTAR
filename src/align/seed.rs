@@ -51,6 +51,10 @@ impl Seed {
                 find_seed_at_position(read_seq, read_pos, index, min_seed_length, false, params)?
             {
                 seeds.push(seed);
+                // Cap total seeds per read (STAR: seedPerReadNmax)
+                if seeds.len() >= params.seed_per_read_nmax {
+                    break;
+                }
             }
         }
 

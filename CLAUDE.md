@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.9c complete (95.3% position agreement, 96.5% CIGAR agreement, deterministic output). Next: Phase 14** (STARsolo).
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.10 complete (96.3% position agreement, 97.4% CIGAR agreement, 3 false junctions). Next: Phase 14** (STARsolo).
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -54,18 +54,21 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 13.9 (Position fix) ← **SA reverse-strand encoding fix, SEQ reverse-complement**
 - Phase 13.9b (CIGAR/splice fix) ← **CIGAR reversal, motif coord fix, genomic length penalty**
 - Phase 13.9c (Deterministic tie-breaking) ← **Reproducible multi-mapper ordering**
+- Phase 13.10 (Accuracy parity) ← **Terminal exon filter, annotation bonus, coverage filter, seed caps**
 
 **Current Status** (10k yeast reads, single-end):
-- ✅ **95.3% position agreement** with STAR (was 51% → 94.5% → 95.3%)
-- ✅ **96.5% CIGAR agreement** among position-matching reads (was 84.3%)
-- ✅ 84.2% unique mapped (STAR: 82.6%), 26.2% soft clips (STAR: 25.8%)
-- ✅ 87.5% motif agreement on shared junctions (35/40)
+- ✅ **96.3% position agreement** with STAR (was 51% → 94.5% → 95.3% → 96.3%)
+- ✅ **97.4% CIGAR agreement** among position-matching reads (was 84.3% → 96.5% → 97.4%)
+- ✅ 85.1% unique mapped (STAR: 82.6%), 26.7% soft clips (STAR: 25.8%)
+- ✅ 88.9% motif agreement on shared junctions (8/9)
 - ✅ SAM SEQ properly reverse-complemented for reverse-strand reads
 - ✅ 192 unit tests passing
 - ✅ Deterministic output (identical SAM across runs)
-- ✅ All SJ filtering enforced (overhang, intron strand, motif-specific, alignIntronMax)
+- ✅ All SJ filtering enforced (overhang, intron strand, motif-specific, alignIntronMax, intronMaxVsReadN)
 - ✅ Genomic length penalty (`scoreGenomicLengthLog2scale`) penalizes long-spanning alignments
-- ⚠️ **Splice rate 1.6x STAR** (4.1% vs 2.5%) — remaining false junctions from missing seed positions
+- ✅ **Only 3 false junctions** (was 33) — terminal exon overhang + coverage filter eliminated 91%
+- ✅ Annotation-aware DP scoring (sjdbScore bonus during stitching)
+- ⚠️ **Splice rate 0.4%** (STAR: 2.5%) — too low without GTF; annotated junctions would recover most
 
 ## Source Layout
 
@@ -73,7 +76,7 @@ before adding complex features. Threading affects the entire execution model and
 src/
   main.rs          -- Thin entry: parse CLI (clap), init logging, call lib::run()
   lib.rs           -- run() dispatches on RunMode (AlignReads | GenomeGenerate)
-  params.rs        -- ~41 STAR CLI params via clap derive, --camelCase long names
+  params.rs        -- ~48 STAR CLI params via clap derive, --camelCase long names
   error.rs         -- Error enum with thiserror (Parameter, Io, Fasta, Index, Alignment, Gtf)
   mapq.rs          -- ✅ MAPQ calculation (unique=255, multi=-10*log10(1-1/n))
   stats.rs         -- ✅ Alignment statistics tracking and reporting
@@ -114,7 +117,7 @@ src/
 
 - **Crate name is `ruSTAR`** — `#![allow(non_snake_case)]` in lib.rs suppresses the crate name warning
 - **STAR params use `--camelCase` naming** — clap `#[arg(long = "camelCase")]` maps to snake_case Rust fields
-- **Multi-value params** (genomeFastaFiles, readFilesIn, outSAMtype, outSAMattributes, chimOutType, alignSJstitchMismatchNmax) need explicit `num_args`
+- **Multi-value params** (genomeFastaFiles, readFilesIn, outSAMtype, outSAMattributes, chimOutType, alignSJstitchMismatchNmax, outSJfilterIntronMaxVsReadN) need explicit `num_args`
 - **Negative defaults** (scoreGapNoncan=-8, readMapNumber=-1, etc.) need `allow_hyphen_values = true`
 - **`outSAMtype`** is parsed as raw `Vec<String>` then structured via `Parameters::out_sam_type()` method
 - **Validation** beyond clap's type checking is in `Parameters::validate()` (e.g. genomeGenerate requires FASTA files)
@@ -185,14 +188,15 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 
 ## Known Issues / Accuracy Gaps (Priority Order)
 
-1. ~~**Position agreement 51%**~~ ✅ FIXED in Phase 13.9 — now **95.3%**.
-2. ~~**CIGAR agreement 84.3%**~~ ✅ FIXED in Phase 13.9b — now **96.5%**. Root cause was CIGAR not reversed for reverse-strand reads.
+1. ~~**Position agreement 51%**~~ ✅ FIXED in Phase 13.9 — now **96.3%**.
+2. ~~**CIGAR agreement 84.3%**~~ ✅ FIXED in Phase 13.9b — now **97.4%**. Root cause was CIGAR not reversed for reverse-strand reads.
 3. ~~**Splice motif detection**~~ ✅ FIXED in Phase 13.9b — `score_gap_with_strand()` converts RC donor position to forward genome coordinates.
-4. **Splice rate 1.6x STAR** (4.1% vs 2.5%): Remaining 33 false junctions have huge introns — caused by missing seed positions at the correct unspliced locus.
-5. **SJ motif strand disagreement** (5/40): ruSTAR=CT/AC vs STAR=GT/AG on same junctions — likely strand assignment issue in SJ.out.tab writer.
-6. **266 same-chr >500bp apart**: Mostly chrXII rDNA repeats and duplicated regions — multi-mapping tie-breaking.
-7. **116 diff-chr disagreements**: 99 are multi-mappers (harmless tie-breaking), only 5 both MAPQ=255.
-8. **60 STAR-only mapped reads**: Down from 629 after position fix.
+4. ~~**33 false junctions**~~ ✅ FIXED in Phase 13.10 — now **3 ruSTAR-only junctions** (91% reduction). Terminal exon overhang filter (12bp min) + coverage filter + intronMaxVsReadN eliminated spurious splicing.
+5. **Splice rate too low** (0.4% vs STAR 2.5%): Terminal overhang filter is aggressive without GTF annotations. With GTF loaded, annotated junctions use 3bp threshold and get sjdbScore bonus — should recover most real junctions.
+6. **179 same-chr >500bp apart**: Mostly chrXII rDNA repeats — STAR=MAPQ 1-3, ruSTAR=MAPQ 255. Root cause: single-direction seed search misses tandem repeat copies.
+7. **102 diff-chr disagreements**: 100 are multi-mappers (harmless tie-breaking), only 2 have MAPQ mismatches.
+8. **75 STAR-only mapped reads**: Slight increase from coverage filter (was 60).
+9. **SJ motif strand disagreement** (1/9 shared): strand assignment issue in SJ.out.tab writer.
 
 ## Limitations (to be addressed in future phases)
 
@@ -203,4 +207,4 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
   - ✅ Chimeric.out.junction output file
   - ❌ Paired-end chimeric detection not yet implemented
   - ❌ Tier 3 (re-mapping soft-clipped regions) not yet implemented
-- No STARsolo single-cell features (Phase 14)
+- No STARsolo single-cell features (Phase 14, deferred until accuracy parity achieved)

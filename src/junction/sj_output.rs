@@ -210,6 +210,21 @@ impl SpliceJunctionStats {
                 if dist_min[cat] > 0 && min_dist_to_neighbor[idx] < dist_min[cat] as u64 {
                     continue;
                 }
+
+                // Intron length vs read count filter (outSJfilterIntronMaxVsReadN)
+                let intron_len = end.saturating_sub(start);
+                let total = unique + multi;
+                let intron_max_thresholds = &params.out_sj_filter_intron_max_vs_read_n;
+                let max_intron_for_reads = if total >= 3 {
+                    intron_max_thresholds.get(2).copied().unwrap_or(200000)
+                } else if total >= 2 {
+                    intron_max_thresholds.get(1).copied().unwrap_or(100000)
+                } else {
+                    intron_max_thresholds.first().copied().unwrap_or(50000)
+                };
+                if intron_len as i64 > max_intron_for_reads {
+                    continue;
+                }
             }
 
             let chr_name = genome

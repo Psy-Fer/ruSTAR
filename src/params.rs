@@ -390,6 +390,12 @@ pub struct Parameters {
           default_values_t = vec![10, 0, 5, 10])]
     pub out_sj_filter_dist_to_other_sjmin: Vec<i32>,
 
+    /// SJ filter: max intron length vs supporting read count
+    /// [1_read, 2_reads, 3+_reads] — junctions with intron > threshold for their read count are filtered
+    #[arg(long = "outSJfilterIntronMaxVsReadN", num_args = 3,
+          default_values_t = vec![50000, 100000, 200000])]
+    pub out_sj_filter_intron_max_vs_read_n: Vec<i64>,
+
     // ── Alignment scoring ───────────────────────────────────────────────
     /// Min intron size (smaller gaps are deletions)
     #[arg(long = "alignIntronMin", default_value_t = 21)]
@@ -457,9 +463,21 @@ pub struct Parameters {
     pub score_genomic_length_log2_scale: f64,
 
     // ── Seed and anchor parameters ──────────────────────────────────────
+    /// Min read coverage for a window (relative to read length)
+    #[arg(long = "winReadCoverageRelativeMin", default_value_t = 0.5)]
+    pub win_read_coverage_relative_min: f64,
+
     /// Max number of loci a seed can map to (seeds with more loci are discarded)
     #[arg(long = "seedMultimapNmax", default_value_t = 10000)]
     pub seed_multimap_nmax: usize,
+
+    /// Max number of seeds per read
+    #[arg(long = "seedPerReadNmax", default_value_t = 1000)]
+    pub seed_per_read_nmax: usize,
+
+    /// Max number of seeds per window
+    #[arg(long = "seedPerWindowNmax", default_value_t = 50)]
+    pub seed_per_window_nmax: usize,
 
     /// Max number of loci anchors are allowed to map to
     #[arg(long = "winAnchorMultimapNmax", default_value_t = 50)]
@@ -468,6 +486,14 @@ pub struct Parameters {
     /// Max number of seed loci per window
     #[arg(long = "seedNoneLociPerWindow", default_value_t = 10)]
     pub seed_none_loci_per_window: usize,
+
+    /// Max number of alignment windows per read
+    #[arg(long = "alignWindowsPerReadNmax", default_value_t = 10000)]
+    pub align_windows_per_read_nmax: usize,
+
+    /// Max number of transcripts per window
+    #[arg(long = "alignTranscriptsPerWindowNmax", default_value_t = 100)]
+    pub align_transcripts_per_window_nmax: usize,
 
     // ── Splice junction database ────────────────────────────────────────
     /// GTF file for splice junction annotations
@@ -623,8 +649,13 @@ mod tests {
         assert_eq!(p.score_ins_base, -2);
         assert_eq!(p.score_stitch_sj_shift, 1);
         assert_eq!(p.seed_multimap_nmax, 10000);
+        assert_eq!(p.seed_per_read_nmax, 1000);
+        assert_eq!(p.seed_per_window_nmax, 50);
         assert_eq!(p.win_anchor_multimap_nmax, 50);
         assert_eq!(p.seed_none_loci_per_window, 10);
+        assert_eq!(p.align_windows_per_read_nmax, 10000);
+        assert_eq!(p.align_transcripts_per_window_nmax, 100);
+        assert!((p.win_read_coverage_relative_min - 0.5).abs() < f64::EPSILON);
         assert!(p.sjdb_gtf_file.is_none());
         assert_eq!(p.sjdb_overhang, 100);
         assert_eq!(p.sjdb_score, 2);
@@ -641,6 +672,10 @@ mod tests {
         assert_eq!(p.out_sj_filter_count_unique_min, vec![3, 1, 1, 1]);
         assert_eq!(p.out_sj_filter_count_total_min, vec![3, 1, 1, 1]);
         assert_eq!(p.out_sj_filter_dist_to_other_sjmin, vec![10, 0, 5, 10]);
+        assert_eq!(
+            p.out_sj_filter_intron_max_vs_read_n,
+            vec![50000, 100000, 200000]
+        );
     }
 
     #[test]

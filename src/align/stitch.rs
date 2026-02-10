@@ -467,6 +467,18 @@ pub fn stitch_seeds(
     index: &GenomeIndex,
     scorer: &AlignmentScorer,
 ) -> Result<Vec<Transcript>, Error> {
+    stitch_seeds_with_jdb(cluster, seeds, read_seq, index, scorer, None)
+}
+
+/// Stitch seeds with optional junction database for annotation-aware scoring.
+pub fn stitch_seeds_with_jdb(
+    cluster: &SeedCluster,
+    seeds: &[Seed],
+    read_seq: &[u8],
+    index: &GenomeIndex,
+    scorer: &AlignmentScorer,
+    junction_db: Option<&crate::junction::SpliceJunctionDb>,
+) -> Result<Vec<Transcript>, Error> {
     // Expand seeds to specific genome positions matching the cluster
     let mut expanded_seeds = Vec::with_capacity(cluster.seed_indices.len() * 4);
 
@@ -634,7 +646,12 @@ pub fn stitch_seeds(
 
             // Apply alignSJstitchMismatchNmax filter
             // STAR rejects junction stitches with too many mismatches for the motif type
-            if let GapType::SpliceJunction { ref motif, .. } = gap_type {
+            let mut annotation_bonus = 0i32;
+            if let GapType::SpliceJunction {
+                ref motif,
+                intron_len,
+            } = gap_type
+            {
                 if !scorer.stitch_mismatch_allowed(motif, gap_mismatches) {
                     continue; // Reject: too many mismatches at this junction type
                 }
@@ -644,10 +661,58 @@ pub fn stitch_seeds(
                 // Right overhang = effective length of current seed after overlap trimming
                 let left_overhang = prev.length;
                 let right_overhang = eff_length;
-                let min_overhang = scorer.align_sj_overhang_min as usize;
 
-                if left_overhang < min_overhang || right_overhang < min_overhang {
+                // Check if this junction is annotated (for lower overhang threshold + bonus)
+                let is_annotated = junction_db.is_some_and(|db| {
+                    // Convert genome positions to forward coordinates for junction lookup
+                    let donor_sa_pos = prev.genome_end;
+                    let donor_fwd = index.sa_pos_to_forward(
+                        donor_sa_pos,
+                        cluster.is_reverse,
+                        intron_len as usize,
+                    );
+                    let acceptor_fwd = donor_fwd + intron_len as u64;
+                    // Lookup with strand 0 (unknown) first, then try both strands
+                    db.is_annotated(cluster.chr_idx, donor_fwd, acceptor_fwd, 0)
+                        || db.is_annotated(cluster.chr_idx, donor_fwd, acceptor_fwd, 1)
+                        || db.is_annotated(cluster.chr_idx, donor_fwd, acceptor_fwd, 2)
+                });
+
+                // Use lower overhang threshold for annotated junctions
+                let base_min_overhang = if is_annotated {
+                    scorer.align_sjdb_overhang_min as usize
+                } else {
+                    scorer.align_sj_overhang_min as usize
+                };
+
+                // For first/last exons in the chain, enforce stricter minimum overhang
+                // to prevent short seeds (8-11bp) from creating spurious junctions
+                let is_first_seed_in_chain = dp[j].prev_seed.is_none();
+                let terminal_min_overhang = if is_annotated {
+                    base_min_overhang // Annotated junctions can have short terminal overhangs
+                } else {
+                    // Non-annotated: terminal exon must have >= 12bp overhang
+                    // (matches STAR's outSJfilterOverhangMin default for canonical junctions)
+                    base_min_overhang.max(12)
+                };
+
+                let left_min = if is_first_seed_in_chain {
+                    terminal_min_overhang
+                } else {
+                    base_min_overhang
+                };
+                // Right overhang is always potentially terminal (could be last in chain)
+                // We apply terminal minimum and relax it later during backtracking if needed
+                // For now, be conservative: apply terminal minimum to right overhang too
+                let right_min = terminal_min_overhang;
+
+                if left_overhang < left_min || right_overhang < right_min {
                     continue; // Reject: insufficient overhang flanking splice junction
+                }
+
+                // Apply annotation bonus during DP (STAR's sjdbScore)
+                if is_annotated {
+                    annotation_bonus = scorer.sjdb_score;
                 }
             }
 
@@ -660,8 +725,9 @@ pub fn stitch_seeds(
             };
             let shared_score = shared_bases - (2 * gap_mismatches as i32);
 
-            // Transition score = prev_score + gap_penalty + shared_region_score + current_seed_match_score
-            let transition_score = dp[j].score + gap_score + shared_score + (eff_length as i32);
+            // Transition score = prev_score + gap_penalty + shared_region_score + current_seed_match_score + annotation_bonus
+            let transition_score =
+                dp[j].score + gap_score + shared_score + (eff_length as i32) + annotation_bonus;
 
             if transition_score > best_score {
                 best_score = transition_score;

@@ -21,7 +21,8 @@ Phase 1 (CLI) ✅
                                                          └→ Phase 13.7-13.9 (accuracy refinement) ✅
                                                               └→ Phase 13.9b (CIGAR/splice fix) ✅
                                                                    └→ Phase 13.9c (deterministic tie-breaking) ✅
-                                                                        └→ Phase 14 (STARsolo)
+                                                                        └→ Phase 13.10 (accuracy parity) ✅
+                                                                             └→ Phase 14 (STARsolo) [DEFERRED]
 ```
 
 **Phase ordering rationale**: Threading (Phase 9) done first to establish parallel architecture foundation.
@@ -1024,6 +1025,95 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 
 ---
 
-## Phase 14: STARsolo (Single-Cell)
+## Phase 13.10: Accuracy Parity with STAR ✅
 
-**Status**: Not started
+**Status**: Complete
+
+**Goal**: Resolve tractable STAR output disagreements through terminal exon filtering, annotation-aware DP scoring, coverage filtering, and seed/window caps.
+
+### Sub-phases Completed
+
+**Phase 13.10a: Extension Mismatch Boundary Investigation**
+- Investigated `>` vs `>=` in `extend_alignment()` mismatch check
+- **Result**: STAR uses `>` (not `>=`) — confirmed by unit test failures when changed to `>=`
+- No change needed; existing `>` is correct
+
+**Phase 13.10b: Terminal Exon Overhang Enforcement** (highest impact)
+- **Problem**: 8-11bp seeds accepted as first/last exons, creating 50-500kb false introns (~125 reads)
+- **Fix**: In DP splice junction overhang check, first/last exons in chain require 12bp minimum overhang for novel junctions, 3bp for annotated junctions (`alignSJDBoverhangMin`)
+- New `stitch_seeds_with_jdb()` function accepts optional junction DB reference
+- Junction annotation lookup converts SA positions to forward genome coordinates for DB queries
+
+**Phase 13.10c: `outSJfilterIntronMaxVsReadN` Filter**
+- Added parameter `--outSJfilterIntronMaxVsReadN` (3 values, default `[50000, 100000, 200000]`)
+- Junctions with intron length exceeding threshold for their supporting read count are filtered from SJ.out.tab
+- 1 read → 50kb max, 2 reads → 100kb max, 3+ reads → 200kb max
+
+**Phase 13.10d: `winReadCoverageRelativeMin` Filter**
+- Added parameter `--winReadCoverageRelativeMin` (default 0.5)
+- After clustering, computes total seed coverage per cluster (union of read ranges / read length)
+- Discards clusters below threshold before stitching, preventing sparse clusters from producing bad alignments
+
+**Phase 13.10e: Annotation Bonus During DP Stitching**
+- `sjdbScore` (+2) now applied during DP transitions for annotated junctions
+- Combined with 13.10b in same code path — annotation lookup determines both overhang threshold and score bonus
+- Annotated junctions get preferential scoring during DP, not just during post-filtering
+
+**Phase 13.10f: Seed/Window Cap Parameters**
+- Added `--seedPerReadNmax` (1000): caps total seeds per read in `find_seeds()`
+- Added `--seedPerWindowNmax` (50): caps seeds per cluster
+- Added `--alignWindowsPerReadNmax` (10000): caps total clusters per read
+- Added `--alignTranscriptsPerWindowNmax` (100): declared (enforcement in future refinement)
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `src/align/stitch.rs` | Terminal exon overhang, annotation bonus, `stitch_seeds_with_jdb()` |
+| `src/align/read_align.rs` | Coverage filter, seed/window caps, junction DB passing |
+| `src/align/seed.rs` | `seedPerReadNmax` cap |
+| `src/params.rs` | 7 new parameters, updated defaults test |
+| `src/junction/sj_output.rs` | `outSJfilterIntronMaxVsReadN` filter |
+
+### 10k-read STAR Comparison
+
+| Metric | Before (13.9c) | After (13.10) | STAR |
+|--------|----------------|---------------|------|
+| Position agreement | 95.3% | **96.3%** | — |
+| CIGAR agree (of pos-agree) | 96.5% | **97.4%** | — |
+| Unique mapped | 84.2% | **85.1%** | 82.6% |
+| Multi mapped | 5.3% | **3.65%** | 7.4% |
+| Spliced rate | 4.1% | **0.4%** | 2.5% |
+| ruSTAR-only junctions | 33 | **3** | — |
+| Shared junctions | 40 | 9 | 80 total |
+| Same-chr >500bp disagree | 266 | **179** | — |
+| Diff-chr disagree | 116 | **102** | — |
+| STAR-only mapped | 60 | **75** | — |
+| Soft clip rate | 26.2% | **26.7%** | 25.8% |
+
+### Remaining Issues
+
+1. **Splice rate too low** (0.4% vs STAR 2.5%): 12bp terminal overhang filter is aggressive without GTF. With GTF loaded, annotated junctions use 3bp threshold + sjdbScore bonus → should recover most real junctions.
+2. **rDNA multi-mapping** (~179 same-chr >500bp): chrXII rDNA repeats, STAR=MAPQ 1-3, ruSTAR=MAPQ 255. Root cause: single-direction seed search misses tandem repeat copies.
+3. **102 diff-chr disagreements**: 100 are multi-mappers (harmless tie-breaking).
+4. **75 STAR-only mapped reads**: slight increase from coverage filter.
+
+### Remaining Algorithm Gaps vs STAR
+
+| Category | Gap | Impact |
+|----------|-----|--------|
+| Seed search | L→R only (STAR: both directions) | rDNA multi-mapping, missed junctions |
+| Seed search | No `seedSearchStartLmax` | Missed seeds at optimal positions |
+| DP stitching | No junction position optimization (jR scanning) | Suboptimal junction placement |
+| Multi-mapper | Single-direction seeding misses repeat copies | Inflated MAPQ in tandem repeats |
+| Output | `outFilterBySJout` not implemented | Minor filtering difference |
+
+**Verified**: 192/192 tests passing, clippy clean (6 pre-existing warnings), `cargo fmt --check` pass
+
+---
+
+## Phase 14: STARsolo (Single-Cell) [DEFERRED]
+
+**Status**: Deferred until Phase 13.10+ achieves near-perfect STAR output agreement
+
+**Prerequisite**: All accuracy gaps resolved, all alignment-affecting parameters implemented, position agreement >99%

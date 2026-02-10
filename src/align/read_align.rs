@@ -1,7 +1,7 @@
 /// Read alignment driver function
 use crate::align::score::{AlignmentScorer, SpliceMotif};
 use crate::align::seed::Seed;
-use crate::align::stitch::{cluster_seeds, stitch_seeds};
+use crate::align::stitch::{cluster_seeds, stitch_seeds, stitch_seeds_with_jdb};
 use crate::align::transcript::Transcript;
 use crate::error::Error;
 use crate::index::GenomeIndex;
@@ -71,6 +71,43 @@ pub fn align_read(
         return Ok((Vec::new(), Vec::new()));
     }
 
+    // Cap total clusters (alignWindowsPerReadNmax)
+    let mut clusters = clusters;
+    clusters.truncate(params.align_windows_per_read_nmax);
+
+    // Cap seeds per cluster (seedPerWindowNmax)
+    for cluster in &mut clusters {
+        cluster.seed_indices.truncate(params.seed_per_window_nmax);
+    }
+
+    // Step 2a: Filter clusters by seed coverage (winReadCoverageRelativeMin)
+    let read_length = read_seq.len();
+    let min_coverage = params.win_read_coverage_relative_min;
+    let clusters: Vec<_> = clusters
+        .into_iter()
+        .filter(|cluster| {
+            // Compute total seed coverage for this cluster (union of read ranges)
+            let mut covered = vec![false; read_length];
+            for &seed_idx in &cluster.seed_indices {
+                let seed = &seeds[seed_idx];
+                let end = seed.read_pos + seed.length;
+                for c in covered
+                    .iter_mut()
+                    .take(end.min(read_length))
+                    .skip(seed.read_pos)
+                {
+                    *c = true;
+                }
+            }
+            let coverage = covered.iter().filter(|&&c| c).count() as f64 / read_length as f64;
+            coverage >= min_coverage
+        })
+        .collect();
+
+    if clusters.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
     // Step 2b: Detect chimeric alignments from multi-cluster seeds (Tier 2)
     let mut chimeric_alignments = Vec::new();
     if params.chim_segment_min > 0 && clusters.len() > 1 {
@@ -85,8 +122,16 @@ pub fn align_read(
     let scorer = AlignmentScorer::from_params(params);
     let mut transcripts = Vec::new();
 
+    // Use junction DB for annotation-aware scoring if available
+    let junction_db = if index.junction_db.is_empty() {
+        None
+    } else {
+        Some(&index.junction_db)
+    };
+
     for cluster in clusters.iter() {
-        let cluster_transcripts = stitch_seeds(cluster, &seeds, read_seq, index, &scorer)?;
+        let cluster_transcripts =
+            stitch_seeds_with_jdb(cluster, &seeds, read_seq, index, &scorer, junction_db)?;
         transcripts.extend(cluster_transcripts);
     }
 

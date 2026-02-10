@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13 complete. Next: accuracy refinement then Phase 14** (STARsolo).
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.9 complete (94.5% position agreement). Next: splice rate fix (13.9b) then Phase 14** (STARsolo).
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -50,14 +50,19 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 10 (BAM output - unsorted streaming)
 - Phase 11 (Two-pass mode - novel junction discovery)
 - Phase 12 (Chimeric alignment detection)
-- Phase 13 (Performance + accuracy optimization) ← **alignment extension, soft clips match STAR**
+- Phase 13 (Performance + accuracy optimization) ← **94.5% position agreement, soft clips match STAR**
+- Phase 13.9 (Position fix) ← **SA reverse-strand encoding fix, SEQ reverse-complement**
 
 **Current Status** (10k yeast reads, single-end):
-- ✅ 79% unique mapped (STAR: 82%), 26.5% soft clips (STAR: 25.8%)
-- ✅ 51% position agreement with STAR (93.6% CIGAR agreement among those)
-- ✅ 100% motif agreement on shared junctions (31/31)
-- ✅ 181 unit tests passing
-- ✅ Splice junction overhang minimum enforced (alignSJoverhangMin=5)
+- ✅ **94.5% position agreement** with STAR (was 51%, fixed in Phase 13.9)
+- ✅ 83.8% unique mapped (STAR: 82.6%), 26.5% soft clips (STAR: 25.8%)
+- ✅ 84.3% CIGAR agreement among position-matching reads
+- ✅ 100% motif agreement on shared junctions (27/27)
+- ✅ SAM SEQ properly reverse-complemented for reverse-strand reads
+- ✅ 192 unit tests passing
+- ✅ All SJ filtering enforced (overhang, intron strand, motif-specific, alignIntronMax)
+- ✅ Non-canonical false junctions eliminated (0 non-canonical in ruSTAR-only)
+- ⚠️ **Splice rate 2.3x STAR** (5.8% vs 2.5%) — top remaining accuracy issue
 
 ## Source Layout
 
@@ -142,7 +147,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 181/181 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, implicit_saturating_sub × 1, manual_contains × 2)
+**Current test status**: 192/192 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, implicit_saturating_sub × 1, manual_contains × 2)
 
 **Note**: Phase 9 integration tests fail due to pathologically repetitive test genomes (50 exact copies of 20bp). These tests need realistic genomes (deferred to Phase 13).
 
@@ -175,10 +180,13 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
   - Junction type classification (GT/AG, CT/AC, etc.)
 - Print alignment statistics (unique/multi/unmapped percentages)
 
-## Known Issues / Accuracy Gaps
+## Known Issues / Accuracy Gaps (Priority Order)
 
-- **Position agreement 51%**: Remaining disagreements are mostly multi-mapping reads mapping to different chromosomes with both MAPQ=255 (equivalent loci, different tie-breaking)
-- **629 reads STAR maps but ruSTAR doesn't**: Seed finding or scoring coverage differences
+1. ~~**Position agreement 51%**~~ ✅ FIXED in Phase 13.9 — now **94.5%**. Root cause was SA reverse-strand position encoding (not converting to forward genome coordinates for chromosome lookup).
+2. **Splice rate 2.3x STAR** (5.8% vs 2.5%): ruSTAR creates false splice junctions. Likely splice motif detection in DP uses raw SA positions instead of forward coordinates for reverse-strand reads.
+3. **337 same-chr >500bp apart**: Mostly chrXII rDNA repeats (9137bp offset) and chrII duplicated regions — multi-mapping tie-breaking.
+4. **113 diff-chr disagreements**: 97 are multi-mappers (harmless tie-breaking), only 2 both MAPQ=255.
+5. **42 STAR-only mapped reads**: Down from 629 after position fix.
 
 ## Limitations (to be addressed in future phases)
 

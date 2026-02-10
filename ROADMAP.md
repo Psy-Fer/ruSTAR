@@ -18,8 +18,9 @@ Phase 1 (CLI) ✅
                                           └→ Phase 11 (two-pass) ✅ ← Novel junction discovery
                                                └→ Phase 12 (chimeric) ✅ ← Gene fusion detection
                                                     └→ Phase 13.1-13.6 (perf+accuracy) ✅
-                                                         └→ Phase 13.7-13.9 (accuracy refinement)
-                                                              └→ Phase 14 (STARsolo)
+                                                         └→ Phase 13.7-13.9 (accuracy refinement) ✅
+                                                              └→ Phase 13.9b (splice rate fix)
+                                                                   └→ Phase 14 (STARsolo)
 ```
 
 **Phase ordering rationale**: Threading (Phase 9) done first to establish parallel architecture foundation.
@@ -878,14 +879,77 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 
 ---
 
-## Phase 13.9: Multi-Mapping Tie-Breaking (Planned)
+## Phase 13.8c: Reduce False Non-Canonical Splice Junctions ✅
 
-**Status**: Not started
+**Status**: Complete
 
-**Goal**: Align multi-mapping tie-breaking strategy with STAR.
-- Investigate STAR's strategy for choosing among equally-scoring loci
-- Most position disagreements are different-chromosome with MAPQ=255
-- May involve deterministic ordering (by genomic position?) or scoring tiebreakers
+**Goal**: Reduce ruSTAR's 2x splice rate (5.2% vs STAR's 2.5%) and eliminate hundreds of false non-canonical junctions by implementing STAR's multi-layer splice junction filtering.
+
+**Problem**: ruSTAR produced 516 ruSTAR-only junctions (349 non-canonical) because:
+1. Overhang calculation was hardcoded to `5u32` — all SJ filtering based on overhang was useless
+2. Missing `outFilterIntronStrands = RemoveInconsistentStrands` (STAR default) — alignments with conflicting junction strand motifs were accepted
+3. Missing `outSJfilter*` parameters — no motif-specific filtering thresholds in SJ.out.tab or two-pass mode
+
+**Changes**:
+- **P0**: Fixed overhang calculation in `record_transcript_junctions()` — walks CIGAR to compute `min(left_exon_len, right_exon_len)` per junction instead of hardcoded `5u32`. Added `AlignmentScorer::from_params_minimal()` for lightweight motif detection.
+- **P1**: Added `IntronStrandFilter` enum and `--outFilterIntronStrands` param (default `RemoveInconsistentStrands`). Added `SpliceMotif::implied_strand()` method. Rejects alignments where junctions imply both + and - transcript strands.
+- **P2**: Added 4 `outSJfilter*` params (`OverhangMin`, `CountUniqueMin`, `CountTotalMin`, `DistToOtherSJmin`) — 4-element Vecs indexed by motif category [noncanon=0, GT/AG=1, GC/AG=2, AT/AC=3]. Added `SpliceMotif::filter_category()` and `filter_category_from_encoded()`. Modified `write_output()` to filter junctions by motif-specific thresholds (annotated junctions bypass all filters). Added distance-to-nearest-neighbor computation for `DistToOtherSJmin`.
+- **P3**: Replaced hardcoded thresholds in `filter_novel_junctions()` with motif-specific `outSJfilter*` values (non-canonical now requires 30bp overhang + 3 unique reads vs canonical 12bp + 1 read).
+
+**Files Modified**: `src/lib.rs`, `src/params.rs`, `src/align/score.rs`, `src/align/read_align.rs`, `src/junction/sj_output.rs`, `src/junction/mod.rs`
+
+**Tests**: 192/192 passing (+11 new tests). New tests: `implied_strand`, `filter_category`, `filter_category_from_encoded`, `strand_consistency_filter`, `sj_filter_noncanonical_needs_high_overhang`, `sj_filter_annotated_bypasses_filters`, `filter_novel_junctions_noncanonical_strict`, param defaults for new params.
+
+---
+
+## Phase 13.9: Fix Position Agreement ✅
+
+**Status**: Complete
+
+**Goal**: Fix the 51% position agreement rate (4066/8298 both-mapped reads disagree).
+
+**Root Cause**: SA reverse-strand position encoding bug. The suffix array stores reverse-strand positions as offsets within the RC genome region `[0, n_genome)`, but ruSTAR was using them directly as forward-genome coordinates for chromosome identification and SAM output. ~94% of all disagreements were different-chromosome, caused by this single bug.
+
+**Fixes Applied**:
+1. **`sa_pos_to_forward()` method** added to `GenomeIndex` (`src/index/mod.rs`): converts raw SA position to forward genome coordinate via `n_genome - sa_pos - match_length` for reverse strand
+2. **`cluster_seeds()`** (`src/align/stitch.rs`): convert SA positions to forward coordinates before `position_to_chr()` for both anchor and non-anchor seeds
+3. **`stitch_seeds()`** (`src/align/stitch.rs`): convert positions for chromosome bounds checks; keep raw SA positions for internal DP genome access; convert at final transcript creation
+4. **SAM SEQ/QUAL** (`src/io/sam.rs`): reverse-complement SEQ and reverse QUAL for FLAG & 16 reads (both single-end and paired-end paths)
+5. **`complement_base()`** (`src/io/fastq.rs`): new public function for encoded base complementation
+
+**Files Modified**: `src/index/mod.rs`, `src/align/stitch.rs`, `src/io/sam.rs`, `src/io/fastq.rs`
+
+**Files Created**: `test/diagnose_disagreements.py` (diagnostic script that revealed root cause)
+
+**10k-read STAR Comparison**:
+
+| Metric | Before (13.8c) | After (13.9) | STAR |
+|--------|----------------|--------------|------|
+| Position agreement | 51.0% | **94.5%** | — |
+| Unique mapped | 79.1% | **83.8%** | 82.6% |
+| Multi mapped | — | 6.1% | 7.4% |
+| Diff-chr both MAPQ=255 | 3497 | **2** | — |
+| STAR-only mapped | 629 | **42** | — |
+| Soft clip rate | 26.5% | 26.5% | 25.8% |
+| CIGAR agree (of pos-agree) | 94.2% | 84.3% | — |
+| Spliced rate | 5.1% | 5.8% | 2.5% |
+
+**Remaining Disagreements** (492 of 8444 both-mapped):
+- 337 same-chr >500bp: mostly chrXII rDNA repeats, chrII duplicated regions
+- 113 diff-chr: 97 multi-mappers (tie-breaking), only 2 both MAPQ=255
+- 42 same-chr <500bp: CIGAR differences (soft-clip vs indel)
+
+**Verified**: 192/192 tests passing, `cargo clippy` clean (pre-existing only), `cargo fmt --check` pass
+
+---
+
+## Phase 13.9b: Reduce Splice Rate 2x STAR (Planned)
+
+**Status**: Not started — **TOP REMAINING ACCURACY ISSUE**
+
+**Goal**: Reduce alignment-level splice rate from 5.8% to match STAR's 2.5%. ruSTAR creates false splice junctions, many with large introns. The `score_gap()` → `detect_splice_motif()` path in DP receives raw SA positions for genome access, which may be incorrect for reverse-strand splice motif detection (reading wrong genome region for donor/acceptor dinucleotides).
+
+**Approach**: Investigate whether `score_gap()` in `stitch.rs` line 608 passes `prev.genome_end` (raw SA position) to `detect_splice_motif()`. For reverse-strand clusters, this position is in the RC genome region and must be converted to forward coordinates before reading donor/acceptor motif bases.
 
 ---
 

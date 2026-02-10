@@ -22,7 +22,8 @@ Phase 1 (CLI) ✅
                                                               └→ Phase 13.9b (CIGAR/splice fix) ✅
                                                                    └→ Phase 13.9c (deterministic tie-breaking) ✅
                                                                         └→ Phase 13.10 (accuracy parity) ✅
-                                                                             └→ Phase 14 (STARsolo) [DEFERRED]
+                                                                             └→ Phase 13.11 (R→L seeding) ✅
+                                                                                  └→ Phase 14 (STARsolo) [DEFERRED]
 ```
 
 **Phase ordering rationale**: Threading (Phase 9) done first to establish parallel architecture foundation.
@@ -1100,20 +1101,71 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 
 ### Remaining Algorithm Gaps vs STAR
 
-| Category | Gap | Impact |
-|----------|-----|--------|
-| Seed search | L→R only (STAR: both directions) | rDNA multi-mapping, missed junctions |
-| Seed search | No `seedSearchStartLmax` | Missed seeds at optimal positions |
-| DP stitching | No junction position optimization (jR scanning) | Suboptimal junction placement |
-| Multi-mapper | Single-direction seeding misses repeat copies | Inflated MAPQ in tandem repeats |
-| Output | `outFilterBySJout` not implemented | Minor filtering difference |
+| Category | Gap | Impact | Status |
+|----------|-----|--------|--------|
+| Seed search | L→R only (STAR: both directions) | rDNA multi-mapping, missed junctions | ✅ Fixed in 13.11 |
+| Seed search | No `seedSearchStartLmax` | Missed seeds at optimal positions | Open |
+| DP stitching | No junction position optimization (jR scanning) | Suboptimal junction placement | Open |
+| Multi-mapper | Single-direction seeding misses repeat copies | Inflated MAPQ in tandem repeats | Improved in 13.11 |
+| Output | `outFilterBySJout` not implemented | Minor filtering difference | Open |
 
 **Verified**: 192/192 tests passing, clippy clean (6 pre-existing warnings), `cargo fmt --check` pass
 
 ---
 
+## Phase 13.11: Bidirectional R→L Seed Search ✅
+
+**Status**: Complete
+
+**Goal**: Implement STAR's reverse-direction seed search to find seeds that L→R search misses, particularly in tandem repeats (rDNA) and at splice junction boundaries.
+
+**Implementation** (`src/align/seed.rs` only — all production changes in one file):
+
+1. **`Seed.search_rc: bool` field** — Marks seeds found via R→L search
+2. **`reverse_complement_read()` helper** — RC read for R→L SA search, uses existing `complement_base`
+3. **`genome_positions()` updated** — When `search_rc=true`, converts `(pos, is_rev)` → `(n_genome - pos - len, !is_rev)` with `filter_map` to handle underflows in small genomes
+4. **`find_seeds()` updated** — After L→R loop, RC read searched L→R, `read_pos` converted back (`read_len - rc_pos - seed.length`), shared `seedPerReadNmax` cap (L→R takes priority)
+5. **`stitch.rs` test update** — 2 Seed literals updated with `search_rc: false`
+
+**Bug Found**: `n_genome - pos - length` underflows for small genomes when SA positions are near genome boundary. Fixed by using `filter_map` with `pos + length <= n_genome` guard.
+
+**Unit Tests Added** (4 new, 196 total):
+- `test_reverse_complement_read` — RC correctness including N bases
+- `test_rl_seeds_found` — R→L seeds appear in find_seeds() output
+- `test_shared_seed_cap` — Combined L→R + R→L respects seedPerReadNmax
+- `test_rc_seed_genome_positions` — Converted positions are valid
+
+### 10k-read STAR Comparison
+
+| Metric | Before (13.10) | After (13.11) | STAR |
+|--------|----------------|---------------|------|
+| Position agreement | 96.3% | **96.3%** | — |
+| CIGAR agree (of pos-agree) | 97.4% | **97.8%** | — |
+| Unique mapped | 85.1% | **84.0%** | 82.6% |
+| Multi mapped | 3.65% | **4.92%** | 7.4% |
+| Spliced rate | 0.4% | **0.9%** | 2.2% |
+| Shared junctions | 9 | **30** | 72 total |
+| ruSTAR-only junctions | 3 | **2** | — |
+| STAR-only mapped | 75 | **60** | — |
+| Soft clip rate | 26.7% | **26.5%** | 26.0% |
+
+**Key Improvements**:
+- Multi-mapped +35% (365→492) — R→L seeds expose tandem repeat copies
+- Shared junctions 3.3x (9→30) — R→L seeds at junction boundaries enable spliced alignments
+- Spliced rate doubled (0.4%→0.9%) — closer to STAR's 2.2%
+- Only 2 false junctions (was 3)
+
+**Remaining Algorithm Gaps vs STAR**:
+- No `seedSearchStartLmax` — STAR starts R→L search from specific positions, not all
+- DP stitching: No junction position optimization (jR scanning)
+- rDNA: R→L improved but still misses some tandem repeat copies → inflated MAPQ
+
+**Verified**: 196/196 tests passing, clippy clean (6 pre-existing warnings), `cargo fmt --check` pass
+
+---
+
 ## Phase 14: STARsolo (Single-Cell) [DEFERRED]
 
-**Status**: Deferred until Phase 13.10+ achieves near-perfect STAR output agreement
+**Status**: Deferred until accuracy parity achieved
 
 **Prerequisite**: All accuracy gaps resolved, all alignment-affecting parameters implemented, position agreement >99%

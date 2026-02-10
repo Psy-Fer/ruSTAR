@@ -1,5 +1,6 @@
 use crate::error::Error;
 use crate::index::GenomeIndex;
+use crate::io::fastq::complement_base;
 use crate::params::Parameters;
 
 /// A seed represents an exact match between a read position and genome location(s).
@@ -17,6 +18,10 @@ pub struct Seed {
 
     /// Whether this seed is on the reverse strand of the read
     pub is_reverse: bool,
+
+    /// Whether this seed was found via R→L (reverse-complement) search.
+    /// When true, genome_positions() converts coordinates back to forward orientation.
+    pub search_rc: bool,
 
     /// Mate identifier for paired-end reads
     /// 0 = mate1, 1 = mate2, 2 = single-end (default)
@@ -44,14 +49,31 @@ impl Seed {
         params: &Parameters,
     ) -> Result<Vec<Seed>, Error> {
         let mut seeds = Vec::new();
+        let read_len = read_seq.len();
 
-        // Search forward strand
-        for read_pos in 0..read_seq.len() {
+        // Search L→R (forward direction on read)
+        for read_pos in 0..read_len {
             if let Some(seed) =
                 find_seed_at_position(read_seq, read_pos, index, min_seed_length, false, params)?
             {
                 seeds.push(seed);
                 // Cap total seeds per read (STAR: seedPerReadNmax)
+                if seeds.len() >= params.seed_per_read_nmax {
+                    return Ok(seeds);
+                }
+            }
+        }
+
+        // Search R→L: reverse-complement the read and run L→R search on it
+        let rc_read = reverse_complement_read(read_seq);
+        for rc_pos in 0..rc_read.len() {
+            if let Some(mut seed) =
+                find_seed_at_position(&rc_read, rc_pos, index, min_seed_length, false, params)?
+            {
+                // Convert RC read position back to original read coordinates
+                seed.read_pos = read_len - rc_pos - seed.length;
+                seed.search_rc = true;
+                seeds.push(seed);
                 if seeds.len() >= params.seed_per_read_nmax {
                     break;
                 }
@@ -112,15 +134,37 @@ impl Seed {
     /// Iterate over genome positions for this seed without allocating.
     ///
     /// Returns an iterator that lazily decodes SA entries.
+    /// For R→L seeds (search_rc == true), converts positions back:
+    /// (pos, is_rev) → (n_genome - pos - length, !is_rev)
+    /// Positions where the conversion would underflow are filtered out.
     pub fn genome_positions<'a>(
         &'a self,
         index: &'a GenomeIndex,
     ) -> impl Iterator<Item = (u64, bool)> + 'a {
-        (self.sa_start..self.sa_end).map(move |sa_idx| {
+        let search_rc = self.search_rc;
+        let length = self.length as u64;
+        let n_genome = index.genome.n_genome;
+        (self.sa_start..self.sa_end).filter_map(move |sa_idx| {
             let sa_entry = index.suffix_array.get(sa_idx);
-            index.suffix_array.decode(sa_entry)
+            let (pos, is_rev) = index.suffix_array.decode(sa_entry);
+            if search_rc {
+                if pos + length <= n_genome {
+                    Some((n_genome - pos - length, !is_rev))
+                } else {
+                    None // Position would span past genome boundary
+                }
+            } else {
+                Some((pos, is_rev))
+            }
         })
     }
+}
+
+/// Reverse-complement an encoded read sequence.
+///
+/// Reverses the order and complements each base (A↔T, C↔G).
+fn reverse_complement_read(read_seq: &[u8]) -> Vec<u8> {
+    read_seq.iter().rev().map(|&b| complement_base(b)).collect()
 }
 
 /// Find a seed starting at a specific position in the read.
@@ -193,6 +237,7 @@ fn find_seed_at_position(
             sa_start,
             sa_end,
             is_reverse,
+            search_rc: false,
             mate_id: 2, // Single-end default
         }))
     } else {
@@ -509,5 +554,134 @@ mod tests {
         assert!(mate1_count > 0);
         assert!(mate2_count > 0);
         assert_eq!(seeds.len(), mate1_count + mate2_count);
+    }
+
+    #[test]
+    fn test_reverse_complement_read() {
+        // ACGT → RC = ACGT (palindrome)
+        let read = encode_sequence("ACGT");
+        let rc = reverse_complement_read(&read);
+        assert_eq!(rc, encode_sequence("ACGT"));
+
+        // AACC → RC = GGTT
+        let read2 = encode_sequence("AACC");
+        let rc2 = reverse_complement_read(&read2);
+        assert_eq!(rc2, encode_sequence("GGTT"));
+
+        // Single base
+        let read3 = encode_sequence("A");
+        let rc3 = reverse_complement_read(&read3);
+        assert_eq!(rc3, encode_sequence("T"));
+
+        // N bases preserved
+        let read4 = vec![0, 4, 1]; // A, N, C
+        let rc4 = reverse_complement_read(&read4);
+        assert_eq!(rc4, vec![2, 4, 3]); // G, N, T
+    }
+
+    #[test]
+    fn test_rl_seeds_found() {
+        // Genome has ACGTACGT. The RC of that is ACGTACGT (palindrome),
+        // so L→R already finds everything. Use an asymmetric sequence instead.
+        // Genome: AACCGGTT — RC genome half has AACCGGTT too.
+        // Read: CCGG — L→R finds it at pos 2 in genome.
+        // RC of read: CCGG — R→L also finds it.
+        // So with this palindromic example, R→L seeds duplicate L→R.
+        // Instead use: Genome = AACCTTGG, Read = CCAAGGTT (= RC of AACCTTGG)
+        // The read itself won't match L→R in forward genome, but its RC (AACCTTGG) will.
+        let index = make_test_index("AACCTTGG");
+        // Read is RC of genome: CCAAGGTT
+        let read = encode_sequence("CCAAGGTT");
+
+        let args = vec!["ruSTAR", "--runMode", "alignReads"];
+        let params = Parameters::parse_from(args);
+
+        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
+
+        // Should have R→L seeds (search_rc == true)
+        let rc_seeds: Vec<_> = seeds.iter().filter(|s| s.search_rc).collect();
+        let lr_seeds: Vec<_> = seeds.iter().filter(|s| !s.search_rc).collect();
+
+        // R→L search should find seeds because RC(read) = AACCTTGG matches genome
+        assert!(
+            !rc_seeds.is_empty(),
+            "R→L search should find seeds (RC of read matches genome). All seeds: {:?}",
+            seeds
+        );
+
+        // Verify R→L seeds have valid read positions
+        for seed in &rc_seeds {
+            assert!(
+                seed.read_pos + seed.length <= read.len(),
+                "R→L seed read_pos {} + length {} exceeds read length {}",
+                seed.read_pos,
+                seed.length,
+                read.len()
+            );
+        }
+
+        // Total seeds should be more than just L→R
+        assert!(
+            seeds.len() > lr_seeds.len(),
+            "Total seeds ({}) should exceed L→R seeds ({})",
+            seeds.len(),
+            lr_seeds.len()
+        );
+    }
+
+    #[test]
+    fn test_shared_seed_cap() {
+        // Test that combined L→R + R→L respects seedPerReadNmax
+        let index = make_test_index("ACGTACGTACGTACGT");
+        let read = encode_sequence("ACGTACGT");
+
+        let args = vec![
+            "ruSTAR",
+            "--runMode",
+            "alignReads",
+            "--seedPerReadNmax",
+            "3",
+        ];
+        let params = Parameters::parse_from(args);
+
+        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
+        assert!(
+            seeds.len() <= 3,
+            "Total seeds ({}) should respect seedPerReadNmax=3",
+            seeds.len()
+        );
+    }
+
+    #[test]
+    fn test_rc_seed_genome_positions() {
+        // Genome: AACCTTGG, read RC = CCAAGGTT
+        // RC(read) = AACCTTGG matches forward genome
+        let index = make_test_index("AACCTTGG");
+        let read = encode_sequence("CCAAGGTT");
+
+        let args = vec!["ruSTAR", "--runMode", "alignReads"];
+        let params = Parameters::parse_from(args);
+
+        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
+
+        for seed in &seeds {
+            if seed.search_rc {
+                let positions: Vec<_> = seed.genome_positions(&index).collect();
+                assert!(
+                    !positions.is_empty(),
+                    "RC seed should have genome positions"
+                );
+
+                for (pos, _is_rev) in &positions {
+                    // Converted positions should be valid (within genome)
+                    assert!(
+                        *pos < index.genome.n_genome,
+                        "Converted position {} should be < n_genome {}",
+                        pos,
+                        index.genome.n_genome
+                    );
+                }
+            }
+        }
     }
 }

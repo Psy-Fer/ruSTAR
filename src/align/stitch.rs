@@ -1163,6 +1163,7 @@ mod tests {
                 sa_start: 0,
                 sa_end: 0, // Empty range
                 is_reverse: false,
+                search_rc: false,
                 mate_id: 2,
             },
             Seed {
@@ -1171,6 +1172,7 @@ mod tests {
                 sa_start: 0,
                 sa_end: 0, // Empty range
                 is_reverse: false,
+                search_rc: false,
                 mate_id: 2,
             },
         ];

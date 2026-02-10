@@ -69,6 +69,24 @@ impl GenomeIndex {
         })
     }
 
+    /// Convert a raw SA position for a reverse-strand match to forward genome coordinates.
+    ///
+    /// The SA stores reverse-strand positions as offsets within the RC genome region.
+    /// For chromosome identification and SAM output, we need the corresponding position
+    /// in the forward genome (leftmost aligned base in forward coordinates).
+    ///
+    /// For forward strand: returns the position unchanged.
+    /// For reverse strand: `forward_pos = n_genome - 1 - sa_pos - (match_length - 1)`
+    ///
+    /// The raw SA position is still needed for genome base access (add n_genome offset).
+    pub fn sa_pos_to_forward(&self, sa_pos: u64, is_reverse: bool, match_length: usize) -> u64 {
+        if is_reverse {
+            self.genome.n_genome - sa_pos - match_length as u64
+        } else {
+            sa_pos
+        }
+    }
+
     /// Write index files to directory.
     pub fn write(&self, dir: &Path, params: &Parameters) -> Result<(), Error> {
         use std::io::Write;

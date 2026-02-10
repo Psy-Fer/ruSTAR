@@ -13,6 +13,7 @@
 use crate::align::score::SpliceMotif;
 use crate::error::Error;
 use crate::genome::Genome;
+use crate::params::Parameters;
 use dashmap::DashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -115,8 +116,13 @@ impl SpliceJunctionStats {
             .record(is_unique, overhang);
     }
 
-    /// Write SJ.out.tab file
-    pub fn write_output(&self, output_path: &Path, genome: &Genome) -> Result<(), Error> {
+    /// Write SJ.out.tab file with motif-specific filtering
+    pub fn write_output(
+        &self,
+        output_path: &Path,
+        genome: &Genome,
+        params: &Parameters,
+    ) -> Result<(), Error> {
         let file = File::create(output_path).map_err(|e| Error::io(e, output_path))?;
         let mut writer = BufWriter::new(file);
 
@@ -148,19 +154,73 @@ impl SpliceJunctionStats {
                 .then(a.2.cmp(&b.2)) // end
         });
 
-        // Write each junction
-        for (chr_idx, start, end, strand, motif, annotated, unique, multi, max_overhang) in
-            junctions
+        // Apply outSJfilter* thresholds (annotated junctions bypass all filters)
+        let overhang_min = &params.out_sj_filter_overhang_min;
+        let unique_min = &params.out_sj_filter_count_unique_min;
+        let total_min = &params.out_sj_filter_count_total_min;
+        let dist_min = &params.out_sj_filter_dist_to_other_sjmin;
+
+        // Build distance-to-nearest-neighbor map for dist filter
+        // For each junction, find the distance to the nearest other junction on the same chromosome
+        let min_dist_to_neighbor: Vec<u64> = {
+            let n = junctions.len();
+            let mut dists = vec![u64::MAX; n];
+            for i in 0..n {
+                // Check previous junction on same chromosome
+                if i > 0 && junctions[i].0 == junctions[i - 1].0 {
+                    let d = junctions[i].1.saturating_sub(junctions[i - 1].2);
+                    dists[i] = dists[i].min(d);
+                    dists[i - 1] = dists[i - 1].min(d);
+                }
+                // Check next junction on same chromosome
+                if i + 1 < n && junctions[i].0 == junctions[i + 1].0 {
+                    let d = junctions[i + 1].1.saturating_sub(junctions[i].2);
+                    dists[i] = dists[i].min(d);
+                }
+            }
+            dists
+        };
+
+        // Filter and write
+        let mut written = 0u32;
+        for (idx, &(chr_idx, start, end, strand, motif, annotated, unique, multi, max_overhang)) in
+            junctions.iter().enumerate()
         {
+            // Annotated junctions bypass all outSJfilter* checks
+            if !annotated {
+                let cat = SpliceMotif::filter_category_from_encoded(motif);
+
+                // Overhang filter
+                if (max_overhang as i32) < overhang_min[cat] {
+                    continue;
+                }
+
+                // Unique count filter
+                if (unique as i32) < unique_min[cat] {
+                    continue;
+                }
+
+                // Total count filter
+                let total = unique + multi;
+                if (total as i32) < total_min[cat] {
+                    continue;
+                }
+
+                // Distance to other SJ filter
+                if dist_min[cat] > 0 && min_dist_to_neighbor[idx] < dist_min[cat] as u64 {
+                    continue;
+                }
+            }
+
             let chr_name = genome
                 .chr_name
                 .get(chr_idx)
                 .ok_or_else(|| Error::Index("Invalid chromosome index in junction".to_string()))?;
 
             // Convert from global genome coordinates to per-chromosome coordinates
-            let chr_start = genome.chr_start[chr_idx];
-            let chr_pos_start = start - chr_start;
-            let chr_pos_end = end - chr_start;
+            let chr_start_pos = genome.chr_start[chr_idx];
+            let chr_pos_start = start - chr_start_pos;
+            let chr_pos_end = end - chr_start_pos;
 
             writeln!(
                 writer,
@@ -176,14 +236,17 @@ impl SpliceJunctionStats {
                 max_overhang
             )
             .map_err(|e| Error::io(e, output_path))?;
+            written += 1;
         }
 
         writer.flush().map_err(|e| Error::io(e, output_path))?;
 
+        let filtered = self.junctions.len() as u32 - written;
         log::info!(
-            "Wrote {} junctions to {}",
-            self.junctions.len(),
-            output_path.display()
+            "Wrote {} junctions to {} ({} filtered by outSJfilter*)",
+            written,
+            output_path.display(),
+            filtered,
         );
 
         Ok(())
@@ -397,10 +460,13 @@ mod tests {
 
     #[test]
     fn test_write_output() {
+        use clap::Parser;
         use tempfile::NamedTempFile;
 
         let stats = SpliceJunctionStats::new();
-        stats.record_junction(0, 100, 200, 1, SpliceMotif::GtAg, true, 10, false);
+        // Record canonical junction with enough support to pass filters
+        stats.record_junction(0, 100, 200, 1, SpliceMotif::GtAg, true, 50, false);
+        // Record annotated junction (bypasses filters)
         stats.record_junction(0, 300, 400, 2, SpliceMotif::GcAg, false, 15, true);
 
         let genome = Genome {
@@ -412,8 +478,12 @@ mod tests {
             chr_name: vec!["chr1".to_string()],
         };
 
+        let params = crate::params::Parameters::try_parse_from(vec!["ruSTAR"]).unwrap();
+
         let output_file = NamedTempFile::new().unwrap();
-        stats.write_output(output_file.path(), &genome).unwrap();
+        stats
+            .write_output(output_file.path(), &genome, &params)
+            .unwrap();
 
         // Read and verify output
         let content = std::fs::read_to_string(output_file.path()).unwrap();
@@ -431,9 +501,9 @@ mod tests {
         assert_eq!(fields1[5], "0"); // not annotated
         assert_eq!(fields1[6], "1"); // unique count
         assert_eq!(fields1[7], "0"); // multi count
-        assert_eq!(fields1[8], "10"); // max overhang
+        assert_eq!(fields1[8], "50"); // max overhang
 
-        // Second junction
+        // Second junction (annotated, bypasses filters)
         let fields2: Vec<&str> = lines[1].split('\t').collect();
         assert_eq!(fields2[0], "chr1");
         assert_eq!(fields2[1], "300");
@@ -444,5 +514,78 @@ mod tests {
         assert_eq!(fields2[6], "0"); // unique count
         assert_eq!(fields2[7], "1"); // multi count
         assert_eq!(fields2[8], "15"); // max overhang
+    }
+
+    #[test]
+    fn test_sj_filter_noncanonical_needs_high_overhang() {
+        use clap::Parser;
+        use tempfile::NamedTempFile;
+
+        let stats = SpliceJunctionStats::new();
+        // Non-canonical junction with low overhang (10 < 30 default for non-canonical)
+        // Record enough unique reads to pass count filter
+        for _ in 0..5 {
+            stats.record_junction(0, 100, 200, 1, SpliceMotif::NonCanonical, true, 10, false);
+        }
+        // Canonical junction with sufficient overhang (20 >= 12 default)
+        stats.record_junction(0, 300, 400, 1, SpliceMotif::GtAg, true, 20, false);
+
+        let genome = Genome {
+            sequence: vec![0; 1000],
+            n_genome: 1000,
+            n_chr_real: 1,
+            chr_start: vec![0, 1000],
+            chr_length: vec![1000],
+            chr_name: vec!["chr1".to_string()],
+        };
+
+        let params = crate::params::Parameters::try_parse_from(vec!["ruSTAR"]).unwrap();
+
+        let output_file = NamedTempFile::new().unwrap();
+        stats
+            .write_output(output_file.path(), &genome, &params)
+            .unwrap();
+
+        let content = std::fs::read_to_string(output_file.path()).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Non-canonical (overhang 10 < 30) should be filtered
+        // Canonical (overhang 20 >= 12) should pass
+        assert_eq!(lines.len(), 1);
+        let fields: Vec<&str> = lines[0].split('\t').collect();
+        assert_eq!(fields[1], "300"); // Only the canonical junction remains
+    }
+
+    #[test]
+    fn test_sj_filter_annotated_bypasses_filters() {
+        use clap::Parser;
+        use tempfile::NamedTempFile;
+
+        let stats = SpliceJunctionStats::new();
+        // Annotated non-canonical junction with low overhang and low count
+        // Would normally be filtered, but annotated junctions bypass all filters
+        stats.record_junction(0, 100, 200, 1, SpliceMotif::NonCanonical, true, 2, true);
+
+        let genome = Genome {
+            sequence: vec![0; 1000],
+            n_genome: 1000,
+            n_chr_real: 1,
+            chr_start: vec![0, 1000],
+            chr_length: vec![1000],
+            chr_name: vec!["chr1".to_string()],
+        };
+
+        let params = crate::params::Parameters::try_parse_from(vec!["ruSTAR"]).unwrap();
+
+        let output_file = NamedTempFile::new().unwrap();
+        stats
+            .write_output(output_file.path(), &genome, &params)
+            .unwrap();
+
+        let content = std::fs::read_to_string(output_file.path()).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Annotated junction should pass despite low overhang and count
+        assert_eq!(lines.len(), 1);
     }
 }

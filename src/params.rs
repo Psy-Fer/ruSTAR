@@ -75,6 +75,32 @@ impl std::fmt::Display for IntronMotifFilter {
 }
 
 // ---------------------------------------------------------------------------
+// Intron strand filter enum
+// ---------------------------------------------------------------------------
+
+/// Filter mode for intron strand consistency (outFilterIntronStrands)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntronStrandFilter {
+    /// Accept all alignments regardless of strand consistency
+    None,
+    /// Remove alignments where junction motifs imply conflicting transcript strands
+    RemoveInconsistentStrands,
+}
+
+impl std::str::FromStr for IntronStrandFilter {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "None" => Ok(Self::None),
+            "RemoveInconsistentStrands" => Ok(Self::RemoveInconsistentStrands),
+            _ => Err(format!(
+                "unknown outFilterIntronStrands '{s}'; expected 'None' or 'RemoveInconsistentStrands'"
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SAM output type enums
 // ---------------------------------------------------------------------------
 
@@ -337,6 +363,33 @@ pub struct Parameters {
     #[arg(long = "outFilterIntronMotifs", default_value = "None")]
     pub out_filter_intron_motifs: IntronMotifFilter,
 
+    /// Filter alignments with inconsistent intron strand motifs
+    #[arg(
+        long = "outFilterIntronStrands",
+        default_value = "RemoveInconsistentStrands"
+    )]
+    pub out_filter_intron_strands: IntronStrandFilter,
+
+    /// SJ filter: min overhang per motif category [noncanon, GT/AG, GC/AG, AT/AC]
+    #[arg(long = "outSJfilterOverhangMin", num_args = 4,
+          default_values_t = vec![30, 12, 12, 12])]
+    pub out_sj_filter_overhang_min: Vec<i32>,
+
+    /// SJ filter: min unique-mapping reads per motif category [noncanon, GT/AG, GC/AG, AT/AC]
+    #[arg(long = "outSJfilterCountUniqueMin", num_args = 4,
+          default_values_t = vec![3, 1, 1, 1])]
+    pub out_sj_filter_count_unique_min: Vec<i32>,
+
+    /// SJ filter: min total (unique+multi) reads per motif category [noncanon, GT/AG, GC/AG, AT/AC]
+    #[arg(long = "outSJfilterCountTotalMin", num_args = 4,
+          default_values_t = vec![3, 1, 1, 1])]
+    pub out_sj_filter_count_total_min: Vec<i32>,
+
+    /// SJ filter: min distance to other SJs per motif category [noncanon, GT/AG, GC/AG, AT/AC]
+    #[arg(long = "outSJfilterDistToOtherSJmin", num_args = 4,
+          default_values_t = vec![10, 0, 5, 10])]
+    pub out_sj_filter_dist_to_other_sjmin: Vec<i32>,
+
     // ── Alignment scoring ───────────────────────────────────────────────
     /// Min intron size (smaller gaps are deletions)
     #[arg(long = "alignIntronMin", default_value_t = 21)]
@@ -576,6 +629,14 @@ mod tests {
         assert_eq!(p.chim_segment_min, 0);
         assert_eq!(p.chim_score_min, 0);
         assert_eq!(p.chim_out_type, vec!["Junctions".to_string()]);
+        assert_eq!(
+            p.out_filter_intron_strands,
+            IntronStrandFilter::RemoveInconsistentStrands
+        );
+        assert_eq!(p.out_sj_filter_overhang_min, vec![30, 12, 12, 12]);
+        assert_eq!(p.out_sj_filter_count_unique_min, vec![3, 1, 1, 1]);
+        assert_eq!(p.out_sj_filter_count_total_min, vec![3, 1, 1, 1]);
+        assert_eq!(p.out_sj_filter_dist_to_other_sjmin, vec![10, 0, 5, 10]);
     }
 
     #[test]

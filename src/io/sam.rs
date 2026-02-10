@@ -3,7 +3,7 @@ use crate::align::read_align::PairedAlignment;
 use crate::align::transcript::{CigarOp, Transcript};
 use crate::error::Error;
 use crate::genome::Genome;
-use crate::io::fastq::decode_base;
+use crate::io::fastq::{complement_base, decode_base};
 use crate::mapq::calculate_mapq;
 use crate::params::Parameters;
 use noodles::sam;
@@ -396,12 +396,27 @@ fn transcript_to_record(
     let cigar = convert_cigar(&transcript.cigar)?;
     *record.cigar_mut() = cigar;
 
-    // Sequence (decode from genome encoding)
-    let seq_bytes: Vec<u8> = read_seq.iter().map(|&b| decode_base(b)).collect();
-    *record.sequence_mut() = Sequence::from(seq_bytes);
+    // Sequence and quality scores
+    // Per SAM spec: when FLAG & 16 (reverse strand), SEQ is the reverse complement
+    // of the original read, and QUAL is reversed.
+    if transcript.is_reverse {
+        // Reverse complement the sequence
+        let seq_bytes: Vec<u8> = read_seq
+            .iter()
+            .rev()
+            .map(|&b| decode_base(complement_base(b)))
+            .collect();
+        *record.sequence_mut() = Sequence::from(seq_bytes);
 
-    // Quality scores
-    *record.quality_scores_mut() = QualityScores::from(read_qual.to_vec());
+        // Reverse the quality scores
+        let mut qual = read_qual.to_vec();
+        qual.reverse();
+        *record.quality_scores_mut() = QualityScores::from(qual);
+    } else {
+        let seq_bytes: Vec<u8> = read_seq.iter().map(|&b| decode_base(b)).collect();
+        *record.sequence_mut() = Sequence::from(seq_bytes);
+        *record.quality_scores_mut() = QualityScores::from(read_qual.to_vec());
+    }
 
     // Optional tags
     // TODO: Add SAM tags (AS, NM, NH, HI, nM, jM, jI) in Phase 6 refinement
@@ -519,12 +534,23 @@ fn build_paired_mate_record(
     // TLEN (insert size)
     *record.template_length_mut() = insert_size;
 
-    // Sequence (decode from genome encoding)
-    let seq_bytes: Vec<u8> = mate_seq.iter().map(|&b| decode_base(b)).collect();
-    *record.sequence_mut() = Sequence::from(seq_bytes);
+    // Sequence and quality scores (reverse complement for reverse strand)
+    if transcript.is_reverse {
+        let seq_bytes: Vec<u8> = mate_seq
+            .iter()
+            .rev()
+            .map(|&b| decode_base(complement_base(b)))
+            .collect();
+        *record.sequence_mut() = Sequence::from(seq_bytes);
 
-    // Quality scores
-    *record.quality_scores_mut() = QualityScores::from(mate_qual.to_vec());
+        let mut qual = mate_qual.to_vec();
+        qual.reverse();
+        *record.quality_scores_mut() = QualityScores::from(qual);
+    } else {
+        let seq_bytes: Vec<u8> = mate_seq.iter().map(|&b| decode_base(b)).collect();
+        *record.sequence_mut() = Sequence::from(seq_bytes);
+        *record.quality_scores_mut() = QualityScores::from(mate_qual.to_vec());
+    }
 
     Ok(record)
 }

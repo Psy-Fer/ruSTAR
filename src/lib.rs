@@ -214,7 +214,7 @@ fn run_single_pass(
             "Writing splice junction statistics to {}",
             sj_output_path.display()
         );
-        sj_stats.write_output(&sj_output_path, &index.genome)?;
+        sj_stats.write_output(&sj_output_path, &index.genome, params)?;
     }
 
     // 6. Print summary
@@ -243,7 +243,7 @@ fn run_two_pass(
     }
 
     info!("Writing pass 1 junctions to {}", pass1_path.display());
-    sj_stats_pass1.write_output(&pass1_path, &index.genome)?;
+    sj_stats_pass1.write_output(&pass1_path, &index.genome, params)?;
     info!(
         "Pass 1 discovered {} novel junctions",
         novel_junctions.len()
@@ -710,9 +710,38 @@ fn record_transcript_junctions(
     use crate::align::score::AlignmentScorer;
     use crate::align::transcript::CigarOp;
 
-    // Track genome position as we traverse CIGAR
+    // First pass: compute exon segment lengths (query-consuming bases between N operations)
+    // An "exon segment" is the query bases on each side of a splice junction.
+    let mut exon_lengths: Vec<u32> = Vec::new();
+    let mut current_exon_len = 0u32;
+
+    for op in &transcript.cigar {
+        match op {
+            CigarOp::Match(len) | CigarOp::Equal(len) | CigarOp::Diff(len) => {
+                current_exon_len += *len;
+            }
+            CigarOp::Ins(len) => {
+                current_exon_len += *len;
+            }
+            CigarOp::SoftClip(len) => {
+                current_exon_len += *len;
+            }
+            CigarOp::RefSkip(_) => {
+                exon_lengths.push(current_exon_len);
+                current_exon_len = 0;
+            }
+            CigarOp::Del(_) | CigarOp::HardClip(_) => {
+                // Do not consume query bases
+            }
+        }
+    }
+    exon_lengths.push(current_exon_len); // Final exon segment
+
+    // Second pass: record junctions with computed overhangs
     let mut genome_pos = transcript.genome_start;
-    let mut _read_pos = 0usize;
+    let mut junction_idx = 0usize;
+
+    let scorer = AlignmentScorer::from_params_minimal();
 
     for op in &transcript.cigar {
         match op {
@@ -723,29 +752,12 @@ fn record_transcript_junctions(
                 let intron_end = genome_pos + intron_len as u64; // 1-based, last intronic base
 
                 // Detect splice motif
-                let scorer = AlignmentScorer {
-                    score_gap: 0,
-                    score_gap_noncan: -8,
-                    score_gap_gcag: -4,
-                    score_gap_atac: -8,
-                    score_del_open: -2,
-                    score_del_base: -2,
-                    score_ins_open: -2,
-                    score_ins_base: -2,
-                    align_intron_min: 21,
-                    sjdb_score: 2,
-                    align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
-                    n_mm_max: 10,
-                    p_mm_max: 0.3,
-                    align_sj_overhang_min: 5,
-                    align_sjdb_overhang_min: 3,
-                    align_intron_max: 589_824,
-                };
                 let motif = scorer.detect_splice_motif(genome_pos, intron_len, &index.genome);
 
-                // Calculate overhang (simplified: use exon lengths)
-                // TODO: More accurate overhang calculation from read/exon boundaries
-                let overhang = 5u32; // Placeholder - actual overhang needs exon boundary calculation
+                // Compute overhang: min(left_exon_length, right_exon_length)
+                let left_exon = exon_lengths[junction_idx];
+                let right_exon = exon_lengths[junction_idx + 1];
+                let overhang = left_exon.min(right_exon);
 
                 // Check if annotated
                 let strand = if transcript.is_reverse { 2 } else { 1 };
@@ -770,20 +782,16 @@ fn record_transcript_junctions(
 
                 // Advance genome position past the intron
                 genome_pos += intron_len as u64;
+                junction_idx += 1;
             }
             CigarOp::Match(len) | CigarOp::Equal(len) | CigarOp::Diff(len) => {
                 genome_pos += *len as u64;
-                _read_pos += *len as usize;
             }
-            CigarOp::Ins(len) => {
-                _read_pos += *len as usize;
-            }
+            CigarOp::Ins(_) => {}
             CigarOp::Del(len) => {
                 genome_pos += *len as u64;
             }
-            CigarOp::SoftClip(len) | CigarOp::HardClip(len) => {
-                _read_pos += *len as usize;
-            }
+            CigarOp::SoftClip(_) | CigarOp::HardClip(_) => {}
         }
     }
 }

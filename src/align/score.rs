@@ -41,6 +41,28 @@ pub struct AlignmentScorer {
 }
 
 impl AlignmentScorer {
+    /// Create a minimal scorer for motif detection only (used in junction recording)
+    pub fn from_params_minimal() -> Self {
+        Self {
+            score_gap: 0,
+            score_gap_noncan: -8,
+            score_gap_gcag: -4,
+            score_gap_atac: -8,
+            score_del_open: -2,
+            score_del_base: -2,
+            score_ins_open: -2,
+            score_ins_base: -2,
+            align_intron_min: 21,
+            sjdb_score: 2,
+            align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
+            n_mm_max: 10,
+            p_mm_max: 0.3,
+            align_sj_overhang_min: 5,
+            align_sjdb_overhang_min: 3,
+            align_intron_max: 589_824,
+        }
+    }
+
     /// Create scorer from parameters
     pub fn from_params(params: &Parameters) -> Self {
         Self {
@@ -267,6 +289,42 @@ pub enum SpliceMotif {
     GtAt,
     /// Non-canonical
     NonCanonical,
+}
+
+impl SpliceMotif {
+    /// Get the implied transcript strand from this motif.
+    /// Forward-strand motifs (GT-AG, GC-AG, AT-AC) → Some('+')
+    /// Reverse-strand motifs (CT-AC, CT-GC, GT-AT) → Some('-')
+    /// Non-canonical → None (no strand information)
+    pub fn implied_strand(&self) -> Option<char> {
+        match self {
+            SpliceMotif::GtAg | SpliceMotif::GcAg | SpliceMotif::AtAc => Some('+'),
+            SpliceMotif::CtAc | SpliceMotif::CtGc | SpliceMotif::GtAt => Some('-'),
+            SpliceMotif::NonCanonical => None,
+        }
+    }
+
+    /// Get the motif filter category index for outSJfilter* parameters.
+    /// 0 = non-canonical, 1 = GT/AG or CT/AC, 2 = GC/AG or CT/GC, 3 = AT/AC or GT/AT
+    pub fn filter_category(&self) -> usize {
+        match self {
+            SpliceMotif::NonCanonical => 0,
+            SpliceMotif::GtAg | SpliceMotif::CtAc => 1,
+            SpliceMotif::GcAg | SpliceMotif::CtGc => 2,
+            SpliceMotif::AtAc | SpliceMotif::GtAt => 3,
+        }
+    }
+
+    /// Get the filter category from an encoded motif value (0-6 as in SJ.out.tab).
+    /// 0→0 (non-canonical), 1|2→1 (GT/AG family), 3|4→2 (GC/AG family), 5|6→3 (AT/AC family)
+    pub fn filter_category_from_encoded(encoded: u8) -> usize {
+        match encoded {
+            1 | 2 => 1,
+            3 | 4 => 2,
+            5 | 6 => 3,
+            _ => 0, // 0 or any unknown = non-canonical
+        }
+    }
 }
 
 /// Gap type between aligned regions
@@ -729,6 +787,43 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn test_implied_strand() {
+        // Forward-strand motifs
+        assert_eq!(SpliceMotif::GtAg.implied_strand(), Some('+'));
+        assert_eq!(SpliceMotif::GcAg.implied_strand(), Some('+'));
+        assert_eq!(SpliceMotif::AtAc.implied_strand(), Some('+'));
+        // Reverse-strand motifs
+        assert_eq!(SpliceMotif::CtAc.implied_strand(), Some('-'));
+        assert_eq!(SpliceMotif::CtGc.implied_strand(), Some('-'));
+        assert_eq!(SpliceMotif::GtAt.implied_strand(), Some('-'));
+        // Non-canonical
+        assert_eq!(SpliceMotif::NonCanonical.implied_strand(), None);
+    }
+
+    #[test]
+    fn test_filter_category() {
+        assert_eq!(SpliceMotif::NonCanonical.filter_category(), 0);
+        assert_eq!(SpliceMotif::GtAg.filter_category(), 1);
+        assert_eq!(SpliceMotif::CtAc.filter_category(), 1);
+        assert_eq!(SpliceMotif::GcAg.filter_category(), 2);
+        assert_eq!(SpliceMotif::CtGc.filter_category(), 2);
+        assert_eq!(SpliceMotif::AtAc.filter_category(), 3);
+        assert_eq!(SpliceMotif::GtAt.filter_category(), 3);
+    }
+
+    #[test]
+    fn test_filter_category_from_encoded() {
+        assert_eq!(SpliceMotif::filter_category_from_encoded(0), 0); // non-canonical
+        assert_eq!(SpliceMotif::filter_category_from_encoded(1), 1); // GT/AG
+        assert_eq!(SpliceMotif::filter_category_from_encoded(2), 1); // CT/AC
+        assert_eq!(SpliceMotif::filter_category_from_encoded(3), 2); // GC/AG
+        assert_eq!(SpliceMotif::filter_category_from_encoded(4), 2); // CT/GC
+        assert_eq!(SpliceMotif::filter_category_from_encoded(5), 3); // AT/AC
+        assert_eq!(SpliceMotif::filter_category_from_encoded(6), 3); // GT/AT
+        assert_eq!(SpliceMotif::filter_category_from_encoded(7), 0); // unknown → non-canonical
     }
 
     #[test]

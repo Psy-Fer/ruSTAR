@@ -287,6 +287,17 @@ pub fn decode_base(encoded: u8) -> u8 {
     }
 }
 
+/// Complement an encoded base (A=0↔T=3, C=1↔G=2, N=4→N=4).
+pub fn complement_base(encoded: u8) -> u8 {
+    match encoded {
+        0 => 3,       // A -> T
+        1 => 2,       // C -> G
+        2 => 1,       // G -> C
+        3 => 0,       // T -> A
+        _ => encoded, // N -> N
+    }
+}
+
 /// Apply read clipping from 5' and 3' ends
 ///
 /// # Arguments

@@ -192,7 +192,20 @@ def main():
     both_mapped_agree_strand = 0
     both_mapped_agree_cigar = 0
 
+    # Categorized position disagreements
+    disagree_diff_chr = 0
+    disagree_diff_strand_same_chr = 0
+    disagree_same_chr_1bp = 0       # 1 bp off
+    disagree_same_chr_2_5bp = 0     # 2-5 bp off
+    disagree_same_chr_6_50bp = 0    # 6-50 bp off
+    disagree_same_chr_51_500bp = 0  # 51-500 bp off
+    disagree_same_chr_500plus = 0   # >500 bp off
+
     disagree_examples = []
+    # Collect examples per category for deeper analysis
+    disagree_diff_chr_examples = []
+    disagree_same_chr_close_examples = []     # 1-50bp
+    disagree_same_chr_far_examples = []       # 51+bp
 
     for qname in sorted(all_reads):
         r_records = rustar_reads.get(qname, [])
@@ -209,7 +222,8 @@ def main():
             s_pri = get_primary(s_records)
             if r_pri and s_pri:
                 same_chr = r_pri["rname"] == s_pri["rname"]
-                same_pos = abs(r_pri["pos"] - s_pri["pos"]) <= 5
+                pos_diff = abs(r_pri["pos"] - s_pri["pos"])
+                same_pos = pos_diff <= 5
                 same_strand = (r_pri["flag"] & 16) == (s_pri["flag"] & 16)
                 same_cigar = r_pri["cigar"] == s_pri["cigar"]
 
@@ -223,22 +237,58 @@ def main():
                         both_mapped_agree_exact += 1
                 else:
                     both_mapped_disagree_pos += 1
+
+                    # Build example record
+                    ex = {
+                        "qname": qname,
+                        "rustar_chr": r_pri["rname"],
+                        "rustar_pos": r_pri["pos"],
+                        "rustar_strand": "-" if (r_pri["flag"] & 16) else "+",
+                        "rustar_cigar": r_pri["cigar"],
+                        "rustar_mapq": r_pri["mapq"],
+                        "rustar_class": classify_read(r_records),
+                        "star_chr": s_pri["rname"],
+                        "star_pos": s_pri["pos"],
+                        "star_strand": "-" if (s_pri["flag"] & 16) else "+",
+                        "star_cigar": s_pri["cigar"],
+                        "star_mapq": s_pri["mapq"],
+                        "star_class": classify_read(s_records),
+                    }
+
                     if len(disagree_examples) < 30:
-                        disagree_examples.append({
-                            "qname": qname,
-                            "rustar_chr": r_pri["rname"],
-                            "rustar_pos": r_pri["pos"],
-                            "rustar_strand": "-" if (r_pri["flag"] & 16) else "+",
-                            "rustar_cigar": r_pri["cigar"],
-                            "rustar_mapq": r_pri["mapq"],
-                            "star_chr": s_pri["rname"],
-                            "star_pos": s_pri["pos"],
-                            "star_strand": "-" if (s_pri["flag"] & 16) else "+",
-                            "star_cigar": s_pri["cigar"],
-                            "star_mapq": s_pri["mapq"],
-                        })
+                        disagree_examples.append(ex)
+
+                    # Categorize
+                    if not same_chr:
+                        disagree_diff_chr += 1
+                        if len(disagree_diff_chr_examples) < 10:
+                            disagree_diff_chr_examples.append(ex)
+                    elif not same_strand:
+                        disagree_diff_strand_same_chr += 1
+                    else:
+                        # Same chr, same strand, different position
+                        if pos_diff == 1:
+                            disagree_same_chr_1bp += 1
+                        elif pos_diff <= 5:
+                            disagree_same_chr_2_5bp += 1
+                        elif pos_diff <= 50:
+                            disagree_same_chr_6_50bp += 1
+                            if len(disagree_same_chr_close_examples) < 10:
+                                ex["pos_diff"] = pos_diff
+                                disagree_same_chr_close_examples.append(ex)
+                        elif pos_diff <= 500:
+                            disagree_same_chr_51_500bp += 1
+                            if len(disagree_same_chr_far_examples) < 10:
+                                ex["pos_diff"] = pos_diff
+                                disagree_same_chr_far_examples.append(ex)
+                        else:
+                            disagree_same_chr_500plus += 1
+                            if len(disagree_same_chr_far_examples) < 10:
+                                ex["pos_diff"] = pos_diff
+                                disagree_same_chr_far_examples.append(ex)
             else:
                 both_mapped_disagree_pos += 1
+                disagree_diff_chr += 1  # Can't compare, count as different
         elif r_mapped and not s_mapped:
             rustar_only_mapped += 1
         elif not r_mapped and s_mapped:
@@ -260,6 +310,74 @@ def main():
     print(f"{'Both unmapped':<48} {both_unmapped:>8} {100.0 * both_unmapped / len(all_reads):>7.1f}%")
     print("-" * 68)
     print(f"{'Total reads':<48} {len(all_reads):>8}")
+
+    # ============================================================
+    # 2b. CATEGORIZED POSITION DISAGREEMENTS
+    # ============================================================
+    print("\n" + "=" * 80)
+    print("2b. POSITION DISAGREEMENT BREAKDOWN")
+    print("=" * 80)
+
+    disagree_same_chr_close = disagree_same_chr_1bp + disagree_same_chr_2_5bp + disagree_same_chr_6_50bp
+    disagree_same_chr_far = disagree_same_chr_51_500bp + disagree_same_chr_500plus
+
+    print(f"\nOf {both_mapped_disagree_pos} position disagreements:")
+    print(f"\n{'Category':<48} {'Count':>8} {'% of disagree':>14}")
+    print("-" * 72)
+    print(f"{'Different chromosome':<48} {disagree_diff_chr:>8} {100.0 * disagree_diff_chr / max(both_mapped_disagree_pos, 1):>13.1f}%")
+    print(f"{'Same chr, different strand':<48} {disagree_diff_strand_same_chr:>8} {100.0 * disagree_diff_strand_same_chr / max(both_mapped_disagree_pos, 1):>13.1f}%")
+    print(f"{'Same chr+strand, off by 1bp':<48} {disagree_same_chr_1bp:>8} {100.0 * disagree_same_chr_1bp / max(both_mapped_disagree_pos, 1):>13.1f}%")
+    print(f"{'Same chr+strand, off by 2-5bp':<48} {disagree_same_chr_2_5bp:>8} {100.0 * disagree_same_chr_2_5bp / max(both_mapped_disagree_pos, 1):>13.1f}%")
+    print(f"{'Same chr+strand, off by 6-50bp':<48} {disagree_same_chr_6_50bp:>8} {100.0 * disagree_same_chr_6_50bp / max(both_mapped_disagree_pos, 1):>13.1f}%")
+    print(f"{'Same chr+strand, off by 51-500bp':<48} {disagree_same_chr_51_500bp:>8} {100.0 * disagree_same_chr_51_500bp / max(both_mapped_disagree_pos, 1):>13.1f}%")
+    print(f"{'Same chr+strand, off by >500bp':<48} {disagree_same_chr_500plus:>8} {100.0 * disagree_same_chr_500plus / max(both_mapped_disagree_pos, 1):>13.1f}%")
+    print("-" * 72)
+
+    # MAPQ breakdown for different-chromosome disagreements
+    if disagree_diff_chr_examples:
+        diff_chr_both_unique = sum(1 for ex in disagree_diff_chr_examples
+                                   if ex["rustar_mapq"] == 255 and ex["star_mapq"] == 255)
+        # Count across ALL diff-chr, not just examples
+        mapq_counter = Counter()
+        for qname in sorted(all_reads):
+            r_records = rustar_reads.get(qname, [])
+            s_records = star_reads.get(qname, [])
+            r_class = classify_read(r_records) if r_records else "missing"
+            s_class = classify_read(s_records) if s_records else "missing"
+            if r_class in ("unique", "multi") and s_class in ("unique", "multi"):
+                r_pri = get_primary(r_records)
+                s_pri = get_primary(s_records)
+                if r_pri and s_pri and r_pri["rname"] != s_pri["rname"]:
+                    r_mapq_cat = "unique" if r_pri["mapq"] == 255 else "multi"
+                    s_mapq_cat = "unique" if s_pri["mapq"] == 255 else "multi"
+                    mapq_counter[f"ruSTAR={r_mapq_cat}, STAR={s_mapq_cat}"] += 1
+
+        print(f"\nDifferent-chromosome MAPQ breakdown ({disagree_diff_chr} reads):")
+        for key, count in mapq_counter.most_common():
+            print(f"  {key:<40} {count:>6} ({100.0 * count / max(disagree_diff_chr, 1):.1f}%)")
+
+        # Are these reads that have multiple equally-good alignment loci?
+        # Check if the ruSTAR-chosen locus appears in STAR's multi-alignments or vice versa
+        print(f"\nDifferent-chromosome examples (first 10):")
+        for ex in disagree_diff_chr_examples[:10]:
+            print(f"  {ex['qname'][:30]:<32} ruSTAR={ex['rustar_chr']}:{ex['rustar_pos']}({ex['rustar_strand']}) MAPQ={ex['rustar_mapq']} CIGAR={ex['rustar_cigar']}")
+            print(f"  {'':>32} STAR  ={ex['star_chr']}:{ex['star_pos']}({ex['star_strand']}) MAPQ={ex['star_mapq']} CIGAR={ex['star_cigar']}")
+
+    # Same-chr close disagreement examples
+    if disagree_same_chr_close_examples:
+        print(f"\nSame-chr close disagreement examples (6-50bp, first 10):")
+        for ex in disagree_same_chr_close_examples[:10]:
+            print(f"  {ex['qname'][:30]:<32} diff={ex['pos_diff']}bp")
+            print(f"  {'':>32} ruSTAR={ex['rustar_chr']}:{ex['rustar_pos']}({ex['rustar_strand']}) CIGAR={ex['rustar_cigar']}")
+            print(f"  {'':>32} STAR  ={ex['star_chr']}:{ex['star_pos']}({ex['star_strand']}) CIGAR={ex['star_cigar']}")
+
+    # Same-chr far disagreement examples
+    if disagree_same_chr_far_examples:
+        print(f"\nSame-chr far disagreement examples (51+bp, first 10):")
+        for ex in disagree_same_chr_far_examples[:10]:
+            print(f"  {ex['qname'][:30]:<32} diff={ex['pos_diff']}bp")
+            print(f"  {'':>32} ruSTAR={ex['rustar_chr']}:{ex['rustar_pos']}({ex['rustar_strand']}) CIGAR={ex['rustar_cigar']}")
+            print(f"  {'':>32} STAR  ={ex['star_chr']}:{ex['star_pos']}({ex['star_strand']}) CIGAR={ex['star_cigar']}")
 
     if total_both_mapped > 0:
         concordance = 100.0 * both_mapped_agree_pos / total_both_mapped

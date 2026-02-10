@@ -146,11 +146,9 @@ pub fn filter_novel_junctions(
     sj_stats: &SpliceJunctionStats,
     params: &Parameters,
 ) -> Vec<(NovelJunctionKey, JunctionInfo)> {
+    use crate::align::score::SpliceMotif;
     use std::sync::atomic::Ordering;
 
-    let min_overhang = params.align_sj_overhang_min;
-    let min_unique = 1; // Configurable if needed in future
-    let min_multi = 2; // Configurable if needed in future
     let max_intron = if params.align_intron_max == 0 {
         589_824u64 // STAR default: 2^winBinNbits * winAnchorDistNbins = 65536 * 9
     } else {
@@ -172,11 +170,18 @@ pub fn filter_novel_junctions(
             let multi = counts.multi_count.load(Ordering::Relaxed);
             let max_overhang = counts.max_overhang.load(Ordering::Relaxed);
 
-            // Coverage threshold: at least 1 unique OR 2 multi
-            let has_coverage = unique >= min_unique || multi >= min_multi;
+            // Use motif-specific thresholds from outSJfilter* params
+            let cat = SpliceMotif::filter_category_from_encoded(key.motif);
 
-            // Overhang threshold
+            // Overhang threshold (motif-specific)
+            let min_overhang = params.out_sj_filter_overhang_min[cat] as u32;
             let has_overhang = max_overhang >= min_overhang;
+
+            // Coverage threshold (motif-specific)
+            let min_unique = params.out_sj_filter_count_unique_min[cat] as u32;
+            let min_total = params.out_sj_filter_count_total_min[cat] as u32;
+            let total = unique + multi;
+            let has_coverage = unique >= min_unique && total >= min_total;
 
             // Intron length threshold
             let intron_len = key.intron_end.saturating_sub(key.intron_start) + 1;
@@ -330,25 +335,51 @@ mod tests {
 
         let sj_stats = SpliceJunctionStats::new();
 
-        // Add a high-quality novel junction (should pass filter)
-        sj_stats.record_junction(0, 100, 200, 1, SpliceMotif::GtAg, true, 10, false);
-        sj_stats.record_junction(0, 100, 200, 1, SpliceMotif::GtAg, true, 10, false);
+        // Add a high-quality novel canonical junction (should pass filter)
+        // Needs overhang >= 12 (default outSJfilterOverhangMin for GT/AG)
+        // Needs unique >= 1 (default outSJfilterCountUniqueMin for GT/AG)
+        sj_stats.record_junction(0, 100, 200, 1, SpliceMotif::GtAg, true, 20, false);
 
-        // Add a low-overhang novel junction (should fail filter)
+        // Add a low-overhang novel junction (should fail filter: overhang 2 < 12)
         sj_stats.record_junction(0, 300, 400, 1, SpliceMotif::GtAg, true, 2, false);
 
-        // Add an annotated junction (should be excluded)
-        sj_stats.record_junction(0, 500, 600, 1, SpliceMotif::GtAg, true, 10, true);
+        // Add an annotated junction (should be excluded from novel list)
+        sj_stats.record_junction(0, 500, 600, 1, SpliceMotif::GtAg, true, 20, true);
 
         // Create minimal params for testing
         let params = Parameters::try_parse_from(vec!["ruSTAR"]).unwrap();
 
         let novel_junctions = filter_novel_junctions(&sj_stats, &params);
 
-        // Should only get the high-quality novel junction (default align_sj_overhang_min is 5)
+        // Should only get the high-quality novel junction
         assert_eq!(novel_junctions.len(), 1);
         assert_eq!(novel_junctions[0].0.intron_start, 100);
         assert_eq!(novel_junctions[0].0.intron_end, 200);
         assert!(!novel_junctions[0].1.annotated);
+    }
+
+    #[test]
+    fn test_filter_novel_junctions_noncanonical_strict() {
+        use crate::align::score::SpliceMotif;
+
+        let sj_stats = SpliceJunctionStats::new();
+
+        // Non-canonical junction with moderate overhang (20 < 30 default for non-canonical)
+        // Record 5 unique reads (>= 3 count threshold)
+        for _ in 0..5 {
+            sj_stats.record_junction(0, 100, 200, 1, SpliceMotif::NonCanonical, true, 20, false);
+        }
+
+        // Non-canonical junction with enough overhang (35 >= 30)
+        for _ in 0..5 {
+            sj_stats.record_junction(0, 300, 400, 1, SpliceMotif::NonCanonical, true, 35, false);
+        }
+
+        let params = Parameters::try_parse_from(vec!["ruSTAR"]).unwrap();
+        let novel_junctions = filter_novel_junctions(&sj_stats, &params);
+
+        // Only the 35-overhang junction should pass (30bp minimum for non-canonical)
+        assert_eq!(novel_junctions.len(), 1);
+        assert_eq!(novel_junctions[0].0.intron_start, 300);
     }
 }

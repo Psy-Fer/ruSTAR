@@ -5,7 +5,7 @@ use crate::align::stitch::{cluster_seeds, stitch_seeds};
 use crate::align::transcript::Transcript;
 use crate::error::Error;
 use crate::index::GenomeIndex;
-use crate::params::{IntronMotifFilter, Parameters};
+use crate::params::{IntronMotifFilter, IntronStrandFilter, Parameters};
 
 /// Paired-end alignment result
 #[derive(Debug, Clone)]
@@ -180,6 +180,24 @@ pub fn align_read(
                         .or_insert(0) += 1;
                     return false;
                 }
+            }
+        }
+
+        // Intron strand consistency filtering (outFilterIntronStrands)
+        if params.out_filter_intron_strands == IntronStrandFilter::RemoveInconsistentStrands {
+            let mut has_plus = false;
+            let mut has_minus = false;
+            for motif in &t.junction_motifs {
+                match motif.implied_strand() {
+                    Some('+') => has_plus = true,
+                    Some('-') => has_minus = true,
+                    None => {}
+                    _ => {}
+                }
+            }
+            if has_plus && has_minus {
+                *filter_reasons.entry("inconsistent_strand").or_insert(0) += 1;
+                return false;
             }
         }
 
@@ -768,6 +786,88 @@ mod tests {
 
         let tlen = calculate_insert_size(&t1, &t2);
         assert_eq!(tlen, 300); // Positive because mate1 is leftmost
+    }
+
+    #[test]
+    fn test_strand_consistency_filter() {
+        use crate::align::transcript::{CigarOp, Exon, Transcript};
+        use crate::params::IntronStrandFilter;
+
+        // Create a transcript with conflicting strand motifs
+        let t_inconsistent = Transcript {
+            chr_idx: 0,
+            genome_start: 1000,
+            genome_end: 1300,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 1000,
+                genome_end: 1300,
+                read_start: 0,
+                read_end: 100,
+            }],
+            cigar: vec![CigarOp::Match(100)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 2,
+            junction_motifs: vec![SpliceMotif::GtAg, SpliceMotif::CtAc], // +strand and -strand
+            read_seq: vec![0; 100],
+        };
+
+        // Create a transcript with consistent strand motifs
+        let t_consistent = Transcript {
+            chr_idx: 0,
+            genome_start: 1000,
+            genome_end: 1300,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 1000,
+                genome_end: 1300,
+                read_start: 0,
+                read_end: 100,
+            }],
+            cigar: vec![CigarOp::Match(100)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 2,
+            junction_motifs: vec![SpliceMotif::GtAg, SpliceMotif::GcAg], // both + strand
+            read_seq: vec![0; 100],
+        };
+
+        // Verify implied_strand detects the conflict
+        let mut has_plus = false;
+        let mut has_minus = false;
+        for motif in &t_inconsistent.junction_motifs {
+            match motif.implied_strand() {
+                Some('+') => has_plus = true,
+                Some('-') => has_minus = true,
+                _ => {}
+            }
+        }
+        assert!(has_plus && has_minus); // Inconsistent
+
+        // Verify consistent transcript has no conflict
+        has_plus = false;
+        has_minus = false;
+        for motif in &t_consistent.junction_motifs {
+            match motif.implied_strand() {
+                Some('+') => has_plus = true,
+                Some('-') => has_minus = true,
+                _ => {}
+            }
+        }
+        assert!(has_plus && !has_minus); // Consistent (all +)
+
+        // Verify the filter enum
+        assert_eq!(
+            IntronStrandFilter::RemoveInconsistentStrands,
+            IntronStrandFilter::RemoveInconsistentStrands
+        );
+        assert_ne!(
+            IntronStrandFilter::None,
+            IntronStrandFilter::RemoveInconsistentStrands
+        );
     }
 
     #[test]

@@ -344,7 +344,10 @@ pub fn cluster_seeds(
         let max_positions = seed_none_loci_per_window.min(n_anchor_loci);
 
         // For each genomic position of the anchor (limited, using iterator)
-        for (anchor_pos, anchor_strand) in anchor.genome_positions(index).take(max_positions) {
+        for (anchor_sa_pos, anchor_strand) in anchor.genome_positions(index).take(max_positions) {
+            // Convert SA position to forward genome coordinates for chromosome lookup
+            let anchor_pos = index.sa_pos_to_forward(anchor_sa_pos, anchor_strand, anchor.length);
+
             // Find chromosome
             let chr_info = match index.genome.position_to_chr(anchor_pos) {
                 Some(info) => info,
@@ -367,10 +370,13 @@ pub fn cluster_seeds(
                 let n_seed_loci = seed.sa_end - seed.sa_start;
                 let max_seed_positions = seed_none_loci_per_window.min(n_seed_loci);
                 let mut found = false;
-                for (pos, strand) in seed.genome_positions(index).take(max_seed_positions) {
+                for (sa_pos, strand) in seed.genome_positions(index).take(max_seed_positions) {
                     if strand != anchor_strand {
                         continue;
                     }
+
+                    // Convert to forward genome coordinates
+                    let pos = index.sa_pos_to_forward(sa_pos, strand, seed.length);
 
                     let seed_chr = match index.genome.position_to_chr(pos) {
                         Some(info) => info.0,
@@ -436,6 +442,8 @@ struct DpState {
 struct ExpandedSeed {
     read_pos: usize,
     read_end: usize,
+    /// Raw SA position (used for genome base access and internal DP calculations).
+    /// For reverse strand, genome access is at sa_pos + n_genome.
     genome_pos: u64,
     genome_end: u64,
     length: usize,
@@ -470,20 +478,6 @@ pub fn stitch_seeds(
                 continue;
             }
 
-            let chr = match index.genome.position_to_chr(pos) {
-                Some(info) => info.0,
-                None => continue,
-            };
-
-            if chr != cluster.chr_idx {
-                continue;
-            }
-
-            // Check if within cluster bounds (allow some slack)
-            if pos < cluster.genome_start || pos > cluster.genome_end + 1000000 {
-                continue;
-            }
-
             // Re-verify match length at this specific genome position.
             // Binary search only guarantees `sa_nbases` matching bases at `sa_start`;
             // other positions in the SA range may match fewer bases.
@@ -494,6 +488,27 @@ pub fn stitch_seeds(
                 continue; // Too short after verification
             }
 
+            // Convert to forward genome coordinates for chromosome check
+            let forward_pos = index.sa_pos_to_forward(pos, strand, actual_length);
+
+            let chr = match index.genome.position_to_chr(forward_pos) {
+                Some(info) => info.0,
+                None => continue,
+            };
+
+            if chr != cluster.chr_idx {
+                continue;
+            }
+
+            // Check if within cluster bounds (allow some slack)
+            // Cluster bounds are in forward coordinates, so compare with forward_pos
+            if forward_pos < cluster.genome_start.saturating_sub(1000000)
+                || forward_pos > cluster.genome_end + 1000000
+            {
+                continue;
+            }
+
+            // Store raw SA position for genome access in DP
             expanded_seeds.push(ExpandedSeed {
                 read_pos: seed.read_pos,
                 read_end: seed.read_pos + actual_length,
@@ -879,60 +894,84 @@ pub fn stitch_seeds(
         final_cigar.push(CigarOp::SoftClip(remaining_right_clip as u32));
     }
 
-    // Adjust genome start position for left extension
+    // Adjust genome start position for left extension (raw SA coordinates)
     let adjusted_genome_start = chain_start_seed.genome_pos - left_extend.extend_len as u64;
 
     // Adjust score for extensions
     let adjusted_score = best_state.score + left_extend.max_score + right_extend.max_score;
 
-    // Build exons from CIGAR
     use crate::align::transcript::Exon;
+
+    // Count mismatches in the final alignment
+    // count_mismatches uses raw SA position + n_genome offset for reverse strand
+    let n_mismatch = count_mismatches(
+        read_seq,
+        &final_cigar,
+        adjusted_genome_start, // Raw SA position for genome access
+        0,                     // Read starts at position 0 (CIGAR includes soft clips)
+        index,
+        cluster.is_reverse, // Pass reverse-strand flag for correct sequence comparison
+    );
+
+    // Compute total reference-consuming length from CIGAR
+    let mut ref_len = 0u64;
+    for op in &final_cigar {
+        match op {
+            CigarOp::Match(len)
+            | CigarOp::Equal(len)
+            | CigarOp::Diff(len)
+            | CigarOp::Del(len)
+            | CigarOp::RefSkip(len) => {
+                ref_len += *len as u64;
+            }
+            _ => {}
+        }
+    }
+
+    // Convert raw SA position to forward genome coordinates for the transcript
+    let forward_genome_start =
+        index.sa_pos_to_forward(adjusted_genome_start, cluster.is_reverse, ref_len as usize);
+    let forward_genome_end = forward_genome_start + ref_len;
+
+    // Build exons from CIGAR using forward genome coordinates
     let mut exons = Vec::new();
-    let mut read_pos = 0usize; // Start from 0, will be adjusted by soft clips
-    let mut genome_pos = adjusted_genome_start;
+    let mut read_pos_e = 0usize;
+    let mut genome_pos_e = forward_genome_start;
 
     for op in &final_cigar {
         match op {
             CigarOp::Match(len) | CigarOp::Equal(len) | CigarOp::Diff(len) => {
-                // Create or extend current exon
                 let len = *len as usize;
                 exons.push(Exon {
-                    genome_start: genome_pos,
-                    genome_end: genome_pos + len as u64,
-                    read_start: read_pos,
-                    read_end: read_pos + len,
+                    genome_start: genome_pos_e,
+                    genome_end: genome_pos_e + len as u64,
+                    read_start: read_pos_e,
+                    read_end: read_pos_e + len,
                 });
-                read_pos += len;
-                genome_pos += len as u64;
+                read_pos_e += len;
+                genome_pos_e += len as u64;
             }
             CigarOp::Ins(len) => {
-                // Insertion: advances read but not genome
-                read_pos += *len as usize;
+                read_pos_e += *len as usize;
             }
             CigarOp::Del(len) => {
-                // Deletion: advances genome but not read
-                genome_pos += *len as u64;
+                genome_pos_e += *len as u64;
             }
             CigarOp::RefSkip(len) => {
-                // Intron: advances genome but not read (starts new exon)
-                genome_pos += *len as u64;
+                genome_pos_e += *len as u64;
             }
             CigarOp::SoftClip(len) => {
-                // Soft clip: advances read but not genome
-                read_pos += *len as usize;
+                read_pos_e += *len as usize;
             }
-            CigarOp::HardClip(_) => {
-                // Hard clip: doesn't advance either
-            }
+            CigarOp::HardClip(_) => {}
         }
     }
 
-    // Merge consecutive exons (from consecutive Match operations)
+    // Merge consecutive exons
     let mut merged_exons: Vec<Exon> = Vec::new();
     for exon in exons {
         if let Some(last_exon) = merged_exons.last_mut() {
             if last_exon.genome_end == exon.genome_start && last_exon.read_end == exon.read_start {
-                // Merge with previous exon
                 last_exon.genome_end = exon.genome_end;
                 last_exon.read_end = exon.read_end;
                 continue;
@@ -941,34 +980,17 @@ pub fn stitch_seeds(
         merged_exons.push(exon);
     }
 
-    // Get the actual genome start position from exons
-    let actual_genome_start = merged_exons
-        .first()
-        .map(|e| e.genome_start)
-        .unwrap_or(adjusted_genome_start);
-
-    // Count mismatches in the final alignment
-    let n_mismatch = count_mismatches(
-        read_seq,
-        &final_cigar,
-        actual_genome_start, // Use actual alignment start, not first seed position!
-        0,                   // Read starts at position 0 (CIGAR includes soft clips)
-        index,
-        cluster.is_reverse, // Pass reverse-strand flag for correct sequence comparison
-    );
-
     // Build transcript
-    let final_seed = &expanded_seeds[best_final_idx];
     let transcript = Transcript {
         chr_idx: cluster.chr_idx,
         genome_start: merged_exons
             .first()
             .map(|e| e.genome_start)
-            .unwrap_or(cluster.genome_start),
+            .unwrap_or(forward_genome_start),
         genome_end: merged_exons
             .last()
             .map(|e| e.genome_end)
-            .unwrap_or(final_seed.genome_end),
+            .unwrap_or(forward_genome_end),
         is_reverse: cluster.is_reverse,
         exons: merged_exons,
         cigar: final_cigar, // Use CIGAR with extensions + soft clips

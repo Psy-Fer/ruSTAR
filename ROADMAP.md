@@ -27,7 +27,8 @@ Phase 1 (CLI) ✅
                                                                                        └→ Phase 13.13 (splice rate fix) ✅
                                                                                             └→ Phase 13.14 (outFilterBySJout) ✅
                                                                                                  └→ Phase 15.1 (NH/HI/AS/NM tags) ✅
-                                                                                                      └→ Phase 15.2+ (XS, jM/jI/MD, PE fixes) ← Next
+                                                                                                      └→ Phase 15.2 (XS/SECONDARY/multNmax) ✅
+                                                                                                           └→ Phase 15.3+ (jM/jI/MD, PE fixes) ← Next
                                                                                                       └→ Phase 16 (accuracy parity)
                                                                                                            └→ Phase 17 (features + polish)
                                                                                                                 └→ Phase 14 (STARsolo) [DEFERRED]
@@ -1356,16 +1357,45 @@ BySJout mode (`--outFilterType BySJout`):
 
 **Files**: `src/io/sam.rs`
 
-### Phase 15.2: XS Tag + Secondary Alignment Output
+### Phase 15.2: XS Tag + Secondary Alignment Flag + outSAMmultNmax ✅ COMPLETE (2026-02-10)
 
-**Problem**: XS tag required by StringTie/Cufflinks. `--outSAMstrandField intronMotif` parsed but unused. Multi-mappers only output primary alignment, missing SECONDARY flag.
+**Problem**: Multi-mappers missing SECONDARY flag (FLAG 0x100) — tools like samtools/Picard misinterpret records. XS tag required by StringTie/Cufflinks for strand info. No way to limit secondary alignment output.
 
-**Fix**:
-- For spliced reads, derive strand from junction motifs via `implied_strand()`. Add XS:A:+/- tag.
-- Add `--outSAMmultNmax` parameter. Set `FLAGS |= SECONDARY` for hit_index > 1. Respect limit.
+**Implementation** (`src/io/sam.rs`, `src/params.rs`):
+1. **SECONDARY flag** — `transcript_to_record()` and `build_paired_mate_record()` set `FLAGS |= SECONDARY` when `hit_index > 1`. STAR behavior: primary=FLAG 0/16, secondary=FLAG 256/272.
+2. **XS tag** — `derive_xs_strand()` helper derives strand from junction motifs via `implied_strand()`. Emits `XS:A:+` or `XS:A:-` for spliced reads with consistent strand. No XS for unspliced, non-canonical-only, or conflicting motifs. Controlled by `emit_xs` parameter set from `--outSAMstrandField intronMotif`.
+3. **outSAMmultNmax** — New `--outSAMmultNmax` parameter (default -1 = all). Caps output records in `write_alignment()`, `build_alignment_records()`, `build_paired_records()`. NH reflects capped count; MAPQ still computed from true n_alignments.
+
+**Test Results**: 215/215 tests passing (+7 new):
+- `test_secondary_flag` — 3 transcripts: record 0 NOT secondary, records 1-2 ARE secondary
+- `test_xs_tag_spliced` — GT/AG → XS:A:+
+- `test_xs_tag_unspliced` — no junctions → no XS
+- `test_xs_tag_reverse_strand` — CT/AC → XS:A:-
+- `test_xs_tag_conflicting_motifs` — GT/AG + CT/AC → no XS
+- `test_xs_not_emitted_when_disabled` — emit_xs=false → no XS
+- `test_out_sam_mult_nmax` — 5 transcripts with limit 3 → 3 records, NH=3
+
+**STAR Comparison** (10k yeast reads, 8869 common reads):
+| Metric | ruSTAR | STAR |
+|--------|--------|------|
+| Total records | 9774 | 9723 |
+| Secondary records | 876 | 797 |
+| FLAG values | 0, 16, 256, 272 | 0, 16, 256, 272 |
+| Primary FLAG agree | 99.8% (8847/8869) | — |
+| NH agree | 96.2% (8530/8869) | — |
+| Records-per-read agree | 96.2% (8530/8869) | — |
+| Secondary FLAG correctness | 100% (543/543) | — |
+| XS tags (default) | 0 | 0 |
+| XS tags (intronMotif) | 221 (109+, 112-) | — |
+
+**Key Observations**:
+- FLAG pattern matches STAR exactly: primary=0/16, secondary=256/272
+- 339 reads (3.8%) have different NH due to different seeding/multi-mapping counts
+- 22 primary FLAG disagreements (0.2%) — strand flips on multi-mapper ties
+- XS correctly absent in default mode; 221 spliced reads get XS:A:+/- with intronMotif
+- outSAMmultNmax=1 correctly outputs 8898 primary-only records with NH:i:1
 
 **Files**: `src/io/sam.rs`, `src/params.rs`
-**Depends on**: 15.1
 
 ### Phase 15.3: jM, jI, MD Tags
 

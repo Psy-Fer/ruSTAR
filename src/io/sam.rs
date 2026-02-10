@@ -86,9 +86,15 @@ impl SamWriter {
         }
 
         let n_alignments = transcripts.len();
+        let max_output = if params.out_sam_mult_nmax < 0 {
+            n_alignments
+        } else {
+            (params.out_sam_mult_nmax as usize).min(n_alignments)
+        };
         let mapq = calculate_mapq(n_alignments, params.out_sam_mapq_unique);
+        let emit_xs = params.out_sam_strand_field == "intronMotif";
 
-        for (hit_index, transcript) in transcripts.iter().enumerate() {
+        for (hit_index, transcript) in transcripts.iter().take(max_output).enumerate() {
             let record = transcript_to_record(
                 transcript,
                 read_name,
@@ -96,8 +102,9 @@ impl SamWriter {
                 read_qual,
                 genome,
                 mapq,
-                n_alignments,
+                max_output,    // NH = number of reported alignments
                 hit_index + 1, // 1-based
+                emit_xs,
             )?;
 
             self.writer.write_alignment_record(&self.header, &record)?;
@@ -186,10 +193,16 @@ impl SamWriter {
         }
 
         let n_alignments = transcripts.len();
+        let max_output = if params.out_sam_mult_nmax < 0 {
+            n_alignments
+        } else {
+            (params.out_sam_mult_nmax as usize).min(n_alignments)
+        };
         let mapq = calculate_mapq(n_alignments, params.out_sam_mapq_unique);
+        let emit_xs = params.out_sam_strand_field == "intronMotif";
 
-        let mut records = Vec::with_capacity(n_alignments);
-        for (hit_index, transcript) in transcripts.iter().enumerate() {
+        let mut records = Vec::with_capacity(max_output);
+        for (hit_index, transcript) in transcripts.iter().take(max_output).enumerate() {
             let record = transcript_to_record(
                 transcript,
                 read_name,
@@ -197,8 +210,9 @@ impl SamWriter {
                 read_qual,
                 genome,
                 mapq,
-                n_alignments,
+                max_output,    // NH = number of reported alignments
                 hit_index + 1, // 1-based
+                emit_xs,
             )?;
             records.push(record);
         }
@@ -238,11 +252,17 @@ impl SamWriter {
         }
 
         let n_alignments = paired_alignments.len();
+        let max_output = if params.out_sam_mult_nmax < 0 {
+            n_alignments
+        } else {
+            (params.out_sam_mult_nmax as usize).min(n_alignments)
+        };
         let mapq = calculate_mapq(n_alignments, params.out_sam_mapq_unique);
+        let emit_xs = params.out_sam_strand_field == "intronMotif";
 
-        let mut records = Vec::with_capacity(n_alignments * 2);
+        let mut records = Vec::with_capacity(max_output * 2);
 
-        for (pair_idx, paired_aln) in paired_alignments.iter().enumerate() {
+        for (pair_idx, paired_aln) in paired_alignments.iter().take(max_output).enumerate() {
             let hit_index = pair_idx + 1; // 1-based
 
             // Create record for mate1
@@ -256,8 +276,9 @@ impl SamWriter {
                 true, // is_first_mate
                 paired_aln.is_proper_pair,
                 paired_aln.insert_size,
-                n_alignments,
+                max_output, // NH = number of reported alignments
                 hit_index,
+                emit_xs,
             )?;
             records.push(rec1);
 
@@ -272,8 +293,9 @@ impl SamWriter {
                 false, // is_first_mate
                 paired_aln.is_proper_pair,
                 -paired_aln.insert_size, // Negative for mate2
-                n_alignments,
+                max_output,              // NH = number of reported alignments
                 hit_index,
+                emit_xs,
             )?;
             records.push(rec2);
         }
@@ -365,6 +387,7 @@ fn transcript_to_record(
     mapq: u8,
     n_alignments: usize,
     hit_index: usize,
+    emit_xs: bool,
 ) -> Result<RecordBuf, Error> {
     let mut record = RecordBuf::default();
 
@@ -375,6 +398,9 @@ fn transcript_to_record(
     let mut flags = sam::alignment::record::Flags::empty();
     if transcript.is_reverse {
         flags |= sam::alignment::record::Flags::REVERSE_COMPLEMENTED;
+    }
+    if hit_index > 1 {
+        flags |= sam::alignment::record::Flags::SECONDARY;
     }
     *record.flags_mut() = flags;
 
@@ -436,6 +462,13 @@ fn transcript_to_record(
         Value::from(compute_edit_distance(transcript)),
     ); // NM
 
+    // XS tag: strand derived from splice junction motifs
+    if emit_xs {
+        if let Some(xs_strand) = derive_xs_strand(transcript) {
+            data.insert(Tag::new(b'X', b'S'), Value::Character(xs_strand as u8));
+        }
+    }
+
     Ok(record)
 }
 
@@ -450,6 +483,23 @@ fn compute_edit_distance(transcript: &Transcript) -> i32 {
         })
         .sum();
     (transcript.n_mismatch + indel_bases) as i32
+}
+
+/// Derive XS strand tag from transcript junction motifs.
+/// Returns Some('+') or Some('-') if all junctions agree on strand.
+/// Returns None if no junctions, all non-canonical, or conflicting strands.
+fn derive_xs_strand(transcript: &Transcript) -> Option<char> {
+    let mut strand: Option<char> = None;
+    for motif in &transcript.junction_motifs {
+        if let Some(s) = motif.implied_strand() {
+            match strand {
+                None => strand = Some(s),
+                Some(prev) if prev != s => return None,
+                _ => {}
+            }
+        }
+    }
+    strand
 }
 
 /// Convert ruSTAR CigarOp to noodles Cigar
@@ -492,6 +542,7 @@ fn build_paired_mate_record(
     insert_size: i32,
     n_alignments: usize,
     hit_index: usize,
+    emit_xs: bool,
 ) -> Result<RecordBuf, Error> {
     let mut record = RecordBuf::default();
 
@@ -518,6 +569,10 @@ fn build_paired_mate_record(
         flags |= sam::alignment::record::Flags::FIRST_SEGMENT; // 0x40
     } else {
         flags |= sam::alignment::record::Flags::LAST_SEGMENT; // 0x80
+    }
+
+    if hit_index > 1 {
+        flags |= sam::alignment::record::Flags::SECONDARY; // 0x100
     }
 
     *record.flags_mut() = flags;
@@ -591,12 +646,20 @@ fn build_paired_mate_record(
         Value::from(compute_edit_distance(transcript)),
     ); // NM
 
+    // XS tag: strand derived from splice junction motifs
+    if emit_xs {
+        if let Some(xs_strand) = derive_xs_strand(transcript) {
+            data.insert(Tag::new(b'X', b'S'), Value::Character(xs_strand as u8));
+        }
+    }
+
     Ok(record)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::align::score::SpliceMotif;
     use crate::genome::Genome;
     use clap::Parser;
     use tempfile::NamedTempFile;
@@ -696,6 +759,7 @@ mod tests {
             255,
             1,
             1,
+            false, // emit_xs
         );
         assert!(record.is_ok());
 
@@ -706,6 +770,8 @@ mod tests {
         );
         assert_eq!(record.reference_sequence_id(), Some(0));
         assert_eq!(record.alignment_start().map(|p| usize::from(p)), Some(11)); // 1-based
+        // hit_index=1, so NOT secondary
+        assert!(!record.flags().is_secondary());
     }
 
     #[test]
@@ -789,8 +855,9 @@ mod tests {
             true, // is_first_mate
             true, // is_proper_pair
             300,
-            1, // n_alignments
-            1, // hit_index
+            1,     // n_alignments
+            1,     // hit_index
+            false, // emit_xs
         )
         .unwrap();
 
@@ -798,6 +865,7 @@ mod tests {
         assert!(rec1.flags().is_properly_segmented());
         assert!(rec1.flags().is_first_segment());
         assert!(!rec1.flags().is_last_segment());
+        assert!(!rec1.flags().is_secondary()); // hit_index=1 → not secondary
         assert_eq!(rec1.template_length(), 300);
 
         // Test second mate
@@ -811,8 +879,9 @@ mod tests {
             false, // is_first_mate
             true,  // is_proper_pair
             -300,
-            1, // n_alignments
-            1, // hit_index
+            1,     // n_alignments
+            1,     // hit_index
+            false, // emit_xs
         )
         .unwrap();
 
@@ -820,6 +889,7 @@ mod tests {
         assert!(rec2.flags().is_properly_segmented());
         assert!(!rec2.flags().is_first_segment());
         assert!(rec2.flags().is_last_segment());
+        assert!(!rec2.flags().is_secondary()); // hit_index=1 → not secondary
         assert_eq!(rec2.template_length(), -300);
     }
 
@@ -862,8 +932,9 @@ mod tests {
             true,
             true,
             250,
-            1, // n_alignments
-            1, // hit_index
+            1,     // n_alignments
+            1,     // hit_index
+            false, // emit_xs
         )
         .unwrap();
 
@@ -910,10 +981,14 @@ mod tests {
             &read_qual,
             &genome,
             255,
-            3, // n_alignments
-            2, // hit_index
+            3,     // n_alignments
+            2,     // hit_index
+            false, // emit_xs
         )
         .unwrap();
+
+        // hit_index=2 → secondary
+        assert!(record.flags().is_secondary());
 
         let data = record.data();
         assert_eq!(
@@ -1055,6 +1130,7 @@ mod tests {
             255,
             1, // unique mapper
             1,
+            false, // emit_xs
         )
         .unwrap();
 
@@ -1068,5 +1144,388 @@ mod tests {
         assert_eq!(data.get(&Tag::ALIGNMENT_SCORE), Some(&Value::from(100_i32)));
         // NM = 2 mismatches, no indels
         assert_eq!(data.get(&Tag::EDIT_DISTANCE), Some(&Value::from(2_i32)));
+        // XS not emitted when emit_xs=false
+        assert_eq!(data.get(&Tag::new(b'X', b'S')), None);
+    }
+
+    #[test]
+    fn test_secondary_flag() {
+        let genome = make_test_genome();
+        let params = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "test.fq"]);
+
+        let transcripts = vec![
+            Transcript {
+                chr_idx: 0,
+                genome_start: 0,
+                genome_end: 50,
+                is_reverse: false,
+                exons: vec![],
+                cigar: vec![CigarOp::Match(50)],
+                score: 100,
+                n_mismatch: 0,
+                n_gap: 0,
+                n_junction: 0,
+                junction_motifs: vec![],
+                read_seq: vec![0; 4],
+            },
+            Transcript {
+                chr_idx: 0,
+                genome_start: 2,
+                genome_end: 52,
+                is_reverse: false,
+                exons: vec![],
+                cigar: vec![CigarOp::Match(50)],
+                score: 98,
+                n_mismatch: 1,
+                n_gap: 0,
+                n_junction: 0,
+                junction_motifs: vec![],
+                read_seq: vec![0; 4],
+            },
+            Transcript {
+                chr_idx: 0,
+                genome_start: 4,
+                genome_end: 54,
+                is_reverse: true,
+                exons: vec![],
+                cigar: vec![CigarOp::Match(50)],
+                score: 96,
+                n_mismatch: 2,
+                n_gap: 0,
+                n_junction: 0,
+                junction_motifs: vec![],
+                read_seq: vec![0; 4],
+            },
+        ];
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let records = SamWriter::build_alignment_records(
+            "read1",
+            &read_seq,
+            &read_qual,
+            &transcripts,
+            &genome,
+            &params,
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 3);
+
+        // Record 0 (HI=1): NOT secondary
+        assert!(!records[0].flags().is_secondary());
+        // Record 1 (HI=2): IS secondary
+        assert!(records[1].flags().is_secondary());
+        // Record 2 (HI=3): IS secondary + reverse complemented
+        assert!(records[2].flags().is_secondary());
+        assert!(records[2].flags().is_reverse_complemented());
+    }
+
+    #[test]
+    fn test_xs_tag_spliced() {
+        let genome = make_test_genome();
+
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 200,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![
+                CigarOp::Match(25),
+                CigarOp::RefSkip(100),
+                CigarOp::Match(25),
+            ],
+            score: 50,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 1,
+            junction_motifs: vec![SpliceMotif::GtAg],
+            read_seq: vec![0; 4],
+        };
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let record = transcript_to_record(
+            &transcript,
+            "read1",
+            &read_seq,
+            &read_qual,
+            &genome,
+            255,
+            1,
+            1,
+            true, // emit_xs
+        )
+        .unwrap();
+
+        let data = record.data();
+        assert_eq!(
+            data.get(&Tag::new(b'X', b'S')),
+            Some(&Value::Character(b'+')),
+            "XS should be '+' for GT/AG motif"
+        );
+    }
+
+    #[test]
+    fn test_xs_tag_unspliced() {
+        let genome = make_test_genome();
+
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 50,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![CigarOp::Match(50)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            read_seq: vec![0; 4],
+        };
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let record = transcript_to_record(
+            &transcript,
+            "read1",
+            &read_seq,
+            &read_qual,
+            &genome,
+            255,
+            1,
+            1,
+            true, // emit_xs
+        )
+        .unwrap();
+
+        let data = record.data();
+        assert_eq!(
+            data.get(&Tag::new(b'X', b'S')),
+            None,
+            "XS should NOT be present for unspliced reads"
+        );
+    }
+
+    #[test]
+    fn test_xs_tag_reverse_strand() {
+        let genome = make_test_genome();
+
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 200,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![
+                CigarOp::Match(25),
+                CigarOp::RefSkip(100),
+                CigarOp::Match(25),
+            ],
+            score: 50,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 1,
+            junction_motifs: vec![SpliceMotif::CtAc],
+            read_seq: vec![0; 4],
+        };
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let record = transcript_to_record(
+            &transcript,
+            "read1",
+            &read_seq,
+            &read_qual,
+            &genome,
+            255,
+            1,
+            1,
+            true, // emit_xs
+        )
+        .unwrap();
+
+        let data = record.data();
+        assert_eq!(
+            data.get(&Tag::new(b'X', b'S')),
+            Some(&Value::Character(b'-')),
+            "XS should be '-' for CT/AC motif"
+        );
+    }
+
+    #[test]
+    fn test_xs_tag_conflicting_motifs() {
+        let genome = make_test_genome();
+
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 300,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![
+                CigarOp::Match(25),
+                CigarOp::RefSkip(100),
+                CigarOp::Match(25),
+                CigarOp::RefSkip(100),
+                CigarOp::Match(25),
+            ],
+            score: 50,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 2,
+            junction_motifs: vec![SpliceMotif::GtAg, SpliceMotif::CtAc], // +strand and -strand
+            read_seq: vec![0; 4],
+        };
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let record = transcript_to_record(
+            &transcript,
+            "read1",
+            &read_seq,
+            &read_qual,
+            &genome,
+            255,
+            1,
+            1,
+            true, // emit_xs
+        )
+        .unwrap();
+
+        let data = record.data();
+        assert_eq!(
+            data.get(&Tag::new(b'X', b'S')),
+            None,
+            "XS should NOT be present when junction motifs conflict on strand"
+        );
+    }
+
+    #[test]
+    fn test_xs_not_emitted_when_disabled() {
+        let genome = make_test_genome();
+
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 200,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![
+                CigarOp::Match(25),
+                CigarOp::RefSkip(100),
+                CigarOp::Match(25),
+            ],
+            score: 50,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 1,
+            junction_motifs: vec![SpliceMotif::GtAg],
+            read_seq: vec![0; 4],
+        };
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let record = transcript_to_record(
+            &transcript,
+            "read1",
+            &read_seq,
+            &read_qual,
+            &genome,
+            255,
+            1,
+            1,
+            false, // emit_xs disabled
+        )
+        .unwrap();
+
+        let data = record.data();
+        assert_eq!(
+            data.get(&Tag::new(b'X', b'S')),
+            None,
+            "XS should NOT be present when emit_xs is false"
+        );
+    }
+
+    #[test]
+    fn test_out_sam_mult_nmax() {
+        let genome = make_test_genome();
+        let params = Parameters::parse_from(vec![
+            "ruSTAR",
+            "--readFilesIn",
+            "test.fq",
+            "--outSAMmultNmax",
+            "3",
+        ]);
+
+        let transcripts: Vec<Transcript> = (0..5)
+            .map(|i| Transcript {
+                chr_idx: 0,
+                genome_start: i as u64,
+                genome_end: (i + 50) as u64,
+                is_reverse: false,
+                exons: vec![],
+                cigar: vec![CigarOp::Match(50)],
+                score: 100 - i,
+                n_mismatch: 0,
+                n_gap: 0,
+                n_junction: 0,
+                junction_motifs: vec![],
+                read_seq: vec![0; 4],
+            })
+            .collect();
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let records = SamWriter::build_alignment_records(
+            "read1",
+            &read_seq,
+            &read_qual,
+            &transcripts,
+            &genome,
+            &params,
+        )
+        .unwrap();
+
+        // Only 3 records output despite 5 transcripts
+        assert_eq!(records.len(), 3);
+
+        // NH should be 3 (number of reported alignments)
+        for rec in &records {
+            let data = rec.data();
+            assert_eq!(
+                data.get(&Tag::ALIGNMENT_HIT_COUNT),
+                Some(&Value::from(3_i32)),
+                "NH should be 3 (capped by outSAMmultNmax)"
+            );
+        }
+
+        // HI should be 1, 2, 3
+        assert_eq!(
+            records[0].data().get(&Tag::HIT_INDEX),
+            Some(&Value::from(1_i32))
+        );
+        assert_eq!(
+            records[1].data().get(&Tag::HIT_INDEX),
+            Some(&Value::from(2_i32))
+        );
+        assert_eq!(
+            records[2].data().get(&Tag::HIT_INDEX),
+            Some(&Value::from(3_i32))
+        );
+
+        // First is primary, rest are secondary
+        assert!(!records[0].flags().is_secondary());
+        assert!(records[1].flags().is_secondary());
+        assert!(records[2].flags().is_secondary());
     }
 }

@@ -323,6 +323,10 @@ pub struct Parameters {
     #[arg(long = "outSAMmapqUnique", default_value_t = 255)]
     pub out_sam_mapq_unique: u8,
 
+    /// Max number of multiple alignments per read in SAM output (-1 = all)
+    #[arg(long = "outSAMmultNmax", default_value_t = -1, allow_hyphen_values = true)]
+    pub out_sam_mult_nmax: i32,
+
     /// Output filter type: Normal or BySJout
     #[arg(long = "outFilterType", default_value = "Normal")]
     pub out_filter_type: OutFilterType,
@@ -625,6 +629,7 @@ mod tests {
         assert_eq!(p.out_sam_attributes, vec!["Standard".to_string()]);
         assert_eq!(p.out_sam_unmapped, OutSamUnmapped::None);
         assert_eq!(p.out_sam_mapq_unique, 255);
+        assert_eq!(p.out_sam_mult_nmax, -1);
         assert_eq!(p.out_filter_type, OutFilterType::Normal);
         assert_eq!(p.out_filter_multimap_nmax, 10);
         assert_eq!(p.out_filter_mismatch_nmax, 10);

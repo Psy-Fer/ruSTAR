@@ -24,7 +24,8 @@ Phase 1 (CLI) ✅
                                                                         └→ Phase 13.10 (accuracy parity) ✅
                                                                              └→ Phase 13.11 (R→L seeding) ✅
                                                                                   └→ Phase 13.12 (SJ motif/strand fix) ✅
-                                                                                       └→ Phase 14 (STARsolo) [DEFERRED]
+                                                                                       └→ Phase 13.13 (splice rate fix) ✅
+                                                                                            └→ Phase 14 (STARsolo) [DEFERRED]
 ```
 
 **Phase ordering rationale**: Threading (Phase 9) done first to establish parallel architecture foundation.
@@ -1204,6 +1205,54 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 | ruSTAR-only junctions | 2 | **2** | — |
 
 **Key Result**: Motif agreement on shared junctions improved from 80% to **100%**. Duplicate junction entries (same coordinates, different strand/motif) eliminated.
+
+**Verified**: 199/199 tests passing, clippy clean (6 pre-existing warnings), `cargo fmt --check` pass
+
+---
+
+## Phase 13.13: Relax Terminal Exon Overhang Filter ✅
+
+**Status**: Complete
+
+**Goal**: Improve splice rate (0.9% → STAR's 2.2%) by removing the 12bp terminal exon overhang floor added in Phase 13.10b, which was too aggressive for novel junctions during DP stitching.
+
+**Root Cause**: Phase 13.10b added `base_min_overhang.max(12)` for novel junctions in DP, but STAR only applies 12bp filter at SJ.out.tab write time (`outSJfilterOverhangMin`), not during DP. STAR uses `alignSJoverhangMin` (5bp) during DP.
+
+**Fix** (`src/align/stitch.rs` — ~20 lines → 3 lines):
+- Removed terminal exon overhang logic: first/last seed chain detection, 12bp floor, `is_first_seed_in_chain`, `terminal_min_overhang`, `left_min`, `right_min`
+- Simplified to: `if left_overhang < base_min_overhang || right_overhang < base_min_overhang { continue; }`
+- `base_min_overhang` correctly computed at 5bp (novel) or 3bp (annotated)
+
+**Why safe**: Existing guards still prevent bad junctions:
+1. `outSJfilterOverhangMin` [30,12,12,12] filters SJ.out.tab output (sj_output.rs)
+2. Two-pass filtering requires 12bp overhang before entering pass 2 junction DB
+3. `alignIntronMax` (589,824bp) — huge gaps scored as deletions
+4. `scoreGenomicLengthLog2scale` (-0.25) — penalizes long-spanning alignments
+5. `alignSJstitchMismatchNmax` — rejects junctions with mismatches at non-GT/AG
+6. `winReadCoverageRelativeMin` (0.5) — discards sparse clusters
+
+### 10k-read STAR Comparison
+
+| Metric | Before (13.12) | After (13.13) | STAR |
+|--------|----------------|---------------|------|
+| Position agreement | 96.3% | **95.7%** | — |
+| CIGAR agree (of pos-agree) | 97.8% | **97.3%** | — |
+| Unique mapped | 84.0% | **82.9%** | 82.6% |
+| Multi mapped | 4.92% | **6.12%** | 7.4% |
+| Spliced rate | 0.9% | **3.4%** | 2.2% |
+| Shared junctions | 30 | **50** | 72 total |
+| ruSTAR-only junctions | 2 | **6** | — |
+| STAR-only junctions | 42 | **22** | — |
+| Motif agreement | 100% (30/30) | **100% (50/50)** | — |
+| STAR-only mapped | 60 | **57** | — |
+
+**Key Improvements**:
+- Splice rate 3.8x (0.9% → 3.4%) — now exceeds STAR's 2.2%
+- Shared junctions +67% (30 → 50)
+- Unique/multi ratios now near-identical to STAR
+- Small position/CIGAR regression (~0.6%) from reads now splicing vs soft-clipping
+
+**Trade-off**: Over-splicing (3.4% vs 2.2%) and 6 false junctions (was 2). May need `outFilterBySJout` in future phase.
 
 **Verified**: 199/199 tests passing, clippy clean (6 pre-existing warnings), `cargo fmt --check` pass
 

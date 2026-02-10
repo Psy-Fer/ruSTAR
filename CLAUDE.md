@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.12 complete (96.3% position agreement, 97.8% CIGAR agreement, 100% motif agreement, 2 false junctions). Next: splice rate improvement.**
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.13 complete (95.7% position agreement, 97.3% CIGAR agreement, 100% motif agreement, 3.4% splice rate). Next: reduce over-splicing and recover position agreement.**
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -57,21 +57,23 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 13.10 (Accuracy parity) ← **Terminal exon filter, annotation bonus, coverage filter, seed caps**
 - Phase 13.11 (R→L seeding) ← **Bidirectional seed search, +127 multi-mapped, 3.3x more shared junctions**
 - Phase 13.12 (SJ motif/strand fix) ← **100% motif agreement on shared junctions, motif-derived strand**
+- Phase 13.13 (Splice rate fix) ← **Relaxed terminal exon overhang, splice rate 0.9% → 3.4%, shared junctions 30 → 50**
 
 **Current Status** (10k yeast reads, single-end):
-- ✅ **96.3% position agreement** with STAR (was 51% → 94.5% → 95.3% → 96.3%)
-- ✅ **97.8% CIGAR agreement** among position-matching reads (was 84.3% → 96.5% → 97.4% → 97.8%)
-- ✅ 84.0% unique mapped (STAR: 82.6%), 4.92% multi-mapped (STAR: 7.4%)
-- ✅ 26.5% soft clips (STAR: 26.0%)
-- ✅ **100% motif agreement** on shared junctions (30/30)
-- ✅ 30 shared junctions (was 9, STAR has 72 total)
+- ✅ **95.7% position agreement** with STAR (was 51% → 94.5% → 95.3% → 96.3% → 95.7%)
+- ✅ **97.3% CIGAR agreement** among position-matching reads (was 84.3% → 96.5% → 97.4% → 97.8% → 97.3%)
+- ✅ 82.9% unique mapped (STAR: 82.6%), 6.12% multi-mapped (STAR: 7.4%)
+- ✅ 26.1% soft clips (STAR: 26.0%)
+- ✅ **100% motif agreement** on shared junctions (50/50)
+- ✅ **50 shared junctions** (was 9 → 30 → 50, STAR has 72 total)
 - ✅ SAM SEQ properly reverse-complemented for reverse-strand reads
 - ✅ 199 unit tests passing
 - ✅ Deterministic output (identical SAM across runs)
 - ✅ Bidirectional seed search (L→R + R→L)
-- ✅ **Only 2 false junctions** (was 33 → 3 → 2)
 - ✅ Annotation-aware DP scoring (sjdbScore bonus during stitching)
-- ⚠️ **Splice rate 0.9%** (STAR: 2.2%) — doubled by R→L seeding but gap remains
+- ✅ **Splice rate 3.4%** (STAR: 2.2%) — was 0.9%, now exceeds STAR
+- ⚠️ **6 ruSTAR-only junctions** (was 2) — slight increase from relaxed filter
+- ⚠️ Small position/CIGAR regression (~0.6%) from reads now splicing vs soft-clipping
 
 ## Source Layout
 
@@ -191,16 +193,17 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 
 ## Known Issues / Accuracy Gaps (Priority Order)
 
-1. ~~**Position agreement 51%**~~ ✅ FIXED in Phase 13.9 — now **96.3%**.
-2. ~~**CIGAR agreement 84.3%**~~ ✅ FIXED in Phase 13.9b — now **97.8%**. Root cause was CIGAR not reversed for reverse-strand reads.
+1. ~~**Position agreement 51%**~~ ✅ FIXED in Phase 13.9 — now **95.7%**.
+2. ~~**CIGAR agreement 84.3%**~~ ✅ FIXED in Phase 13.9b — now **97.3%**.
 3. ~~**Splice motif detection**~~ ✅ FIXED in Phase 13.9b — `score_gap_with_strand()` converts RC donor position to forward genome coordinates.
-4. ~~**33 false junctions**~~ ✅ FIXED in Phase 13.10 — now **2 ruSTAR-only junctions** (94% reduction).
-5. ~~**Single-direction seeding**~~ ✅ FIXED in Phase 13.11 — bidirectional L→R + R→L search. Multi-mapped 3.65% → 4.92% (STAR: 7.4%). Shared junctions 9 → 30.
-6. **Splice rate still low** (0.9% vs STAR 2.2%): Doubled by R→L seeding but gap remains. GTF annotations would help further.
-7. **188 same-chr >500bp apart**: Mostly chrXII rDNA repeats — STAR=MAPQ 1-3, ruSTAR=MAPQ 255. R→L seeding improved but didn't fully resolve.
-8. **103 diff-chr disagreements**: 101 are multi-mappers (harmless tie-breaking), 2 have MAPQ mismatches.
-9. **60 STAR-only mapped reads**: Stable.
-10. ~~**SJ motif strand disagreement**~~ ✅ FIXED in Phase 13.12 — strand now derived from splice motif (`implied_strand()`), not read alignment strand. `encode_motif()` simplified to direct mapping.
+4. ~~**33 false junctions**~~ ✅ FIXED in Phase 13.10 — now **6 ruSTAR-only junctions**.
+5. ~~**Single-direction seeding**~~ ✅ FIXED in Phase 13.11 — bidirectional L→R + R→L search. Multi-mapped 6.12% (STAR: 7.4%). Shared junctions 50.
+6. ~~**Splice rate still low**~~ ✅ FIXED in Phase 13.13 — relaxed terminal exon overhang. Splice rate 0.9% → **3.4%** (STAR: 2.2%). Shared junctions 30 → **50**.
+7. **Over-splicing** (3.4% vs STAR 2.2%): ruSTAR now splices more than STAR. May need `outFilterBySJout` or partial overhang restoration.
+8. **249 same-chr >500bp apart**: Mostly chrXII rDNA repeats — STAR=MAPQ 1-3, ruSTAR=MAPQ 255. Some new cases from relaxed splice filter.
+9. **105 diff-chr disagreements**: 98 are multi-mappers (harmless tie-breaking).
+10. **57 STAR-only mapped reads**: Stable.
+11. ~~**SJ motif strand disagreement**~~ ✅ FIXED in Phase 13.12 — strand now derived from splice motif (`implied_strand()`), not read alignment strand.
 
 ## Limitations (to be addressed in future phases)
 

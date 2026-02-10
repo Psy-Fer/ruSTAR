@@ -685,29 +685,10 @@ pub fn stitch_seeds_with_jdb(
                     scorer.align_sj_overhang_min as usize
                 };
 
-                // For first/last exons in the chain, enforce stricter minimum overhang
-                // to prevent short seeds (8-11bp) from creating spurious junctions
-                let is_first_seed_in_chain = dp[j].prev_seed.is_none();
-                let terminal_min_overhang = if is_annotated {
-                    base_min_overhang // Annotated junctions can have short terminal overhangs
-                } else {
-                    // Non-annotated: terminal exon must have >= 12bp overhang
-                    // (matches STAR's outSJfilterOverhangMin default for canonical junctions)
-                    base_min_overhang.max(12)
-                };
-
-                let left_min = if is_first_seed_in_chain {
-                    terminal_min_overhang
-                } else {
-                    base_min_overhang
-                };
-                // Right overhang is always potentially terminal (could be last in chain)
-                // We apply terminal minimum and relax it later during backtracking if needed
-                // For now, be conservative: apply terminal minimum to right overhang too
-                let right_min = terminal_min_overhang;
-
-                if left_overhang < left_min || right_overhang < right_min {
-                    continue; // Reject: insufficient overhang flanking splice junction
+                // Use alignSJoverhangMin (5bp) or alignSJDBoverhangMin (3bp) during DP,
+                // matching STAR. Stricter outSJfilterOverhangMin applied at SJ.out.tab write time.
+                if left_overhang < base_min_overhang || right_overhang < base_min_overhang {
+                    continue;
                 }
 
                 // Apply annotation bonus during DP (STAR's sjdbScore)

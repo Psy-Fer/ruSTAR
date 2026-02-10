@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.9b complete (95.3% position agreement, 96.5% CIGAR agreement). Next: Phase 14** (STARsolo).
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.9c complete (95.3% position agreement, 96.5% CIGAR agreement, deterministic output). Next: Phase 14** (STARsolo).
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -53,6 +53,7 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 13 (Performance + accuracy optimization) ← **94.5% position agreement, soft clips match STAR**
 - Phase 13.9 (Position fix) ← **SA reverse-strand encoding fix, SEQ reverse-complement**
 - Phase 13.9b (CIGAR/splice fix) ← **CIGAR reversal, motif coord fix, genomic length penalty**
+- Phase 13.9c (Deterministic tie-breaking) ← **Reproducible multi-mapper ordering**
 
 **Current Status** (10k yeast reads, single-end):
 - ✅ **95.3% position agreement** with STAR (was 51% → 94.5% → 95.3%)
@@ -61,6 +62,7 @@ before adding complex features. Threading affects the entire execution model and
 - ✅ 87.5% motif agreement on shared junctions (35/40)
 - ✅ SAM SEQ properly reverse-complemented for reverse-strand reads
 - ✅ 192 unit tests passing
+- ✅ Deterministic output (identical SAM across runs)
 - ✅ All SJ filtering enforced (overhang, intron strand, motif-specific, alignIntronMax)
 - ✅ Genomic length penalty (`scoreGenomicLengthLog2scale`) penalizes long-spanning alignments
 - ⚠️ **Splice rate 1.6x STAR** (4.1% vs 2.5%) — remaining false junctions from missing seed positions

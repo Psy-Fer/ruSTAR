@@ -20,7 +20,8 @@ Phase 1 (CLI) ✅
                                                     └→ Phase 13.1-13.6 (perf+accuracy) ✅
                                                          └→ Phase 13.7-13.9 (accuracy refinement) ✅
                                                               └→ Phase 13.9b (CIGAR/splice fix) ✅
-                                                                   └→ Phase 14 (STARsolo)
+                                                                   └→ Phase 13.9c (deterministic tie-breaking) ✅
+                                                                        └→ Phase 14 (STARsolo)
 ```
 
 **Phase ordering rationale**: Threading (Phase 9) done first to establish parallel architecture foundation.
@@ -996,6 +997,28 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 - 5/40 shared junctions: ruSTAR=CT/AC vs STAR=GT/AG (strand assignment in SJ.out.tab)
 - 266 same-chr >500bp apart: rDNA repeats and duplicated regions
 - 116 diff-chr: 99 multi-mappers (tie-breaking)
+
+**Verified**: 192/192 tests passing, `cargo clippy` clean (pre-existing only), `cargo fmt --check` pass
+
+---
+
+## Phase 13.9c: Deterministic Multi-Mapper Tie-Breaking ✅
+
+**Status**: Complete
+
+**Goal**: Ensure deterministic ordering of equal-score multi-mapped alignments for reproducible output across runs.
+
+**Problem**: When multiple alignments have identical scores, `transcripts.sort_by(|a, b| b.score.cmp(&a.score))` provides no deterministic ordering for equal-score transcripts. The "primary" alignment depends on internal cluster processing order, making output non-reproducible.
+
+**Fixes Applied**:
+1. **Single-end sort** (`src/align/read_align.rs:250`): Added secondary tie-breaking keys: smallest chr_idx → smallest genome_start → forward strand first
+2. **Paired-end sort** (`src/align/read_align.rs:392`): Same deterministic tie-breaking for paired alignments
+
+**Files Modified**: `src/align/read_align.rs` (~8 lines changed total)
+
+**10k-read STAR Comparison**: No change in aggregate metrics (position agreement 95.3%, CIGAR agreement 96.5%). The 116 diff-chr disagreements remain — STAR uses a different internal ordering (SA-enumeration-based) rather than the simple chr/pos/strand sort. These are all multi-mapper ambiguity (99/116 are both MAPQ < 255).
+
+**Key Result**: Output is now **deterministic** — running ruSTAR twice on the same input produces identical SAM files (verified with diff).
 
 **Verified**: 192/192 tests passing, `cargo clippy` clean (pre-existing only), `cargo fmt --check` pass
 

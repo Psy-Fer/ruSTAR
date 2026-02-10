@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.13 complete (95.7% position agreement, 97.3% CIGAR agreement, 100% motif agreement, 3.4% splice rate). Next: reduce over-splicing and recover position agreement.**
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 complete. Normal mode: 95.7% position agreement, 97.3% CIGAR agreement, 3.4% splice rate. BySJout mode: 96.7% position, 98.3% CIGAR, 1.1% splice rate.**
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -58,22 +58,32 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 13.11 (R→L seeding) ← **Bidirectional seed search, +127 multi-mapped, 3.3x more shared junctions**
 - Phase 13.12 (SJ motif/strand fix) ← **100% motif agreement on shared junctions, motif-derived strand**
 - Phase 13.13 (Splice rate fix) ← **Relaxed terminal exon overhang, splice rate 0.9% → 3.4%, shared junctions 30 → 50**
+- Phase 13.14 (outFilterBySJout) ← **Implemented outFilterType BySJout, +1% position/CIGAR agreement**
 
 **Current Status** (10k yeast reads, single-end):
+
+Normal mode (default):
 - ✅ **95.7% position agreement** with STAR (was 51% → 94.5% → 95.3% → 96.3% → 95.7%)
-- ✅ **97.3% CIGAR agreement** among position-matching reads (was 84.3% → 96.5% → 97.4% → 97.8% → 97.3%)
+- ✅ **97.3% CIGAR agreement** among position-matching reads
 - ✅ 82.9% unique mapped (STAR: 82.6%), 6.12% multi-mapped (STAR: 7.4%)
 - ✅ 26.1% soft clips (STAR: 26.0%)
+- ✅ **Splice rate 3.4%** (STAR: 2.2%) — exceeds STAR (over-splicing)
+
+BySJout mode (`--outFilterType BySJout`):
+- ✅ **96.7% position agreement** (+1.0% vs Normal)
+- ✅ **98.3% CIGAR agreement** (+1.0% vs Normal)
+- ✅ 207 reads filtered with non-surviving junctions
+- ⚠️ **Splice rate 1.1%** — too aggressive without GTF (STAR: 2.2%)
+
+Both modes:
 - ✅ **100% motif agreement** on shared junctions (50/50)
-- ✅ **50 shared junctions** (was 9 → 30 → 50, STAR has 72 total)
+- ✅ **50 shared junctions** (STAR has 72 total)
 - ✅ SAM SEQ properly reverse-complemented for reverse-strand reads
-- ✅ 199 unit tests passing
+- ✅ 205 unit tests passing
 - ✅ Deterministic output (identical SAM across runs)
 - ✅ Bidirectional seed search (L→R + R→L)
 - ✅ Annotation-aware DP scoring (sjdbScore bonus during stitching)
-- ✅ **Splice rate 3.4%** (STAR: 2.2%) — was 0.9%, now exceeds STAR
-- ⚠️ **6 ruSTAR-only junctions** (was 2) — slight increase from relaxed filter
-- ⚠️ Small position/CIGAR regression (~0.6%) from reads now splicing vs soft-clipping
+- ⚠️ **6 ruSTAR-only junctions** — slight increase from relaxed filter
 
 ## Source Layout
 
@@ -158,7 +168,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 199/199 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, implicit_saturating_sub × 1, manual_contains × 2)
+**Current test status**: 205/205 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, implicit_saturating_sub × 1, manual_contains × 2)
 
 **Note**: Phase 9 integration tests fail due to pathologically repetitive test genomes (50 exact copies of 20bp). These tests need realistic genomes (deferred to Phase 13).
 
@@ -189,6 +199,10 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
   - Soft-clip based detection (>20% clipped reads)
   - Outputs Chimeric.out.junction file (14-column STAR-compatible format)
   - Junction type classification (GT/AG, CT/AC, etc.)
+- Post-alignment read filtering (`--outFilterType BySJout`):
+  - Buffers reads, computes surviving junctions via `outSJfilter*` thresholds
+  - Filters reads whose primary alignment has non-surviving junctions
+  - Improves position/CIGAR agreement by ~1% (removes false spliced alignments)
 - Print alignment statistics (unique/multi/unmapped percentages)
 
 ## Known Issues / Accuracy Gaps (Priority Order)
@@ -199,11 +213,12 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 4. ~~**33 false junctions**~~ ✅ FIXED in Phase 13.10 — now **6 ruSTAR-only junctions**.
 5. ~~**Single-direction seeding**~~ ✅ FIXED in Phase 13.11 — bidirectional L→R + R→L search. Multi-mapped 6.12% (STAR: 7.4%). Shared junctions 50.
 6. ~~**Splice rate still low**~~ ✅ FIXED in Phase 13.13 — relaxed terminal exon overhang. Splice rate 0.9% → **3.4%** (STAR: 2.2%). Shared junctions 30 → **50**.
-7. **Over-splicing** (3.4% vs STAR 2.2%): ruSTAR now splices more than STAR. May need `outFilterBySJout` or partial overhang restoration.
-8. **249 same-chr >500bp apart**: Mostly chrXII rDNA repeats — STAR=MAPQ 1-3, ruSTAR=MAPQ 255. Some new cases from relaxed splice filter.
-9. **105 diff-chr disagreements**: 98 are multi-mappers (harmless tie-breaking).
-10. **57 STAR-only mapped reads**: Stable.
-11. ~~**SJ motif strand disagreement**~~ ✅ FIXED in Phase 13.12 — strand now derived from splice motif (`implied_strand()`), not read alignment strand.
+7. ~~**outFilterBySJout not implemented**~~ ✅ FIXED in Phase 13.14 — BySJout mode: 96.7% pos, 98.3% CIGAR, 207 reads filtered.
+8. **Over-splicing in Normal mode** (3.4% vs STAR 2.2%): BySJout reduces to 1.1% (too aggressive without GTF). Optimal: use BySJout with GTF annotations.
+9. **rDNA multi-mapping** (~157 same-chr >500bp in BySJout): chrXII rDNA repeats — STAR=MAPQ 1-3, ruSTAR=MAPQ 255.
+10. **98 diff-chr disagreements**: Multi-mappers (harmless tie-breaking).
+11. **57 STAR-only mapped reads** (Normal) / 259 (BySJout): Stable in Normal; BySJout increase from filtering.
+12. ~~**SJ motif strand disagreement**~~ ✅ FIXED in Phase 13.12 — strand now derived from splice motif (`implied_strand()`), not read alignment strand.
 
 ## Limitations (to be addressed in future phases)
 

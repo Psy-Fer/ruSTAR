@@ -25,7 +25,8 @@ Phase 1 (CLI) ✅
                                                                              └→ Phase 13.11 (R→L seeding) ✅
                                                                                   └→ Phase 13.12 (SJ motif/strand fix) ✅
                                                                                        └→ Phase 13.13 (splice rate fix) ✅
-                                                                                            └→ Phase 14 (STARsolo) [DEFERRED]
+                                                                                            └→ Phase 13.14 (outFilterBySJout) ✅
+                                                                                                 └→ Phase 14 (STARsolo) [DEFERRED]
 ```
 
 **Phase ordering rationale**: Threading (Phase 9) done first to establish parallel architecture foundation.
@@ -1255,6 +1256,62 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 **Trade-off**: Over-splicing (3.4% vs 2.2%) and 6 false junctions (was 2). May need `outFilterBySJout` in future phase.
 
 **Verified**: 199/199 tests passing, clippy clean (6 pre-existing warnings), `cargo fmt --check` pass
+
+---
+
+## Phase 13.14: Implement `outFilterBySJout` ✅
+
+**Status**: Complete
+
+**Goal**: Implement STAR's `outFilterType BySJout` mode — after all reads are aligned, compute which junctions survive `outSJfilter*` thresholds, then filter reads whose primary alignment has any junction not in the surviving set.
+
+**Implementation** (4 files, +468/-78 lines):
+
+1. **`src/junction/sj_output.rs`** — Added `compute_surviving_junctions()` method
+   - Factors out filtering logic from `write_output()` into reusable method returning `HashSet<SjKey>`
+   - Refactored `write_output()` to use `compute_surviving_junctions()` internally
+   - Made `encode_motif()` `pub(crate)` for use by `lib.rs`
+   - 3 new tests
+
+2. **`src/junction/mod.rs`** — Re-exported `SjKey` and `encode_motif` as `pub(crate)`
+
+3. **`src/lib.rs`** — BySJout buffering and filtering
+   - `extract_junction_keys()` — walks CIGAR for RefSkip ops, builds SjKey per junction
+   - `primary_junction_keys` field added to `AlignmentBatchResults`
+   - `align_reads_single_end()` and `align_reads_paired_end()` modified:
+     - Normal mode: unchanged behavior
+     - BySJout mode: buffers all results → computes surviving junctions → filters reads → writes survivors
+   - 0 new tests (covered by existing pipeline tests)
+
+4. **`src/stats.rs`** — Added `undo_mapped_record_bysj()` method
+   - Atomically moves a mapped read (unique or multi) to unmapped using CAS loops
+   - 3 new tests
+
+**Test Results**: 205/205 tests passing (was 199, +6 new)
+
+### 10k-read STAR Comparison
+
+Normal mode (**unchanged** from 13.13):
+| Metric | ruSTAR | STAR |
+|--------|--------|------|
+| Position agreement | 95.7% | — |
+| CIGAR agree | 97.3% | — |
+| Splice rate | 3.4% | 2.2% |
+
+BySJout mode (`--outFilterType BySJout`):
+| Metric | BySJout | Normal | STAR |
+|--------|---------|--------|------|
+| Position agreement | **96.7%** | 95.7% | — |
+| CIGAR agreement | **98.3%** | 97.3% | — |
+| Splice rate | **1.1%** | 3.4% | 2.2% |
+| Reads filtered | **207** | 0 | — |
+| STAR-only mapped | 259 | 57 | — |
+
+**Key Insight**: BySJout works correctly but is too aggressive without GTF annotations — all junctions are novel so subject to strict `outSJfilter*` thresholds. With GTF, annotated junctions bypass filters so more spliced reads survive. This is faithful STAR behavior.
+
+**Memory Note**: BySJout buffers all SAM records in memory (~5MB for 10k reads). For 100M+ reads, disk-based buffering would be needed (future optimization).
+
+**Verified**: 205/205 tests passing, clippy clean (6 pre-existing warnings), `cargo fmt --check` pass
 
 ---
 

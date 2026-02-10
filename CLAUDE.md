@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.9 complete (94.5% position agreement). Next: splice rate fix (13.9b) then Phase 14** (STARsolo).
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.9b complete (95.3% position agreement, 96.5% CIGAR agreement). Next: Phase 14** (STARsolo).
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -52,17 +52,18 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 12 (Chimeric alignment detection)
 - Phase 13 (Performance + accuracy optimization) ← **94.5% position agreement, soft clips match STAR**
 - Phase 13.9 (Position fix) ← **SA reverse-strand encoding fix, SEQ reverse-complement**
+- Phase 13.9b (CIGAR/splice fix) ← **CIGAR reversal, motif coord fix, genomic length penalty**
 
 **Current Status** (10k yeast reads, single-end):
-- ✅ **94.5% position agreement** with STAR (was 51%, fixed in Phase 13.9)
-- ✅ 83.8% unique mapped (STAR: 82.6%), 26.5% soft clips (STAR: 25.8%)
-- ✅ 84.3% CIGAR agreement among position-matching reads
-- ✅ 100% motif agreement on shared junctions (27/27)
+- ✅ **95.3% position agreement** with STAR (was 51% → 94.5% → 95.3%)
+- ✅ **96.5% CIGAR agreement** among position-matching reads (was 84.3%)
+- ✅ 84.2% unique mapped (STAR: 82.6%), 26.2% soft clips (STAR: 25.8%)
+- ✅ 87.5% motif agreement on shared junctions (35/40)
 - ✅ SAM SEQ properly reverse-complemented for reverse-strand reads
 - ✅ 192 unit tests passing
 - ✅ All SJ filtering enforced (overhang, intron strand, motif-specific, alignIntronMax)
-- ✅ Non-canonical false junctions eliminated (0 non-canonical in ruSTAR-only)
-- ⚠️ **Splice rate 2.3x STAR** (5.8% vs 2.5%) — top remaining accuracy issue
+- ✅ Genomic length penalty (`scoreGenomicLengthLog2scale`) penalizes long-spanning alignments
+- ⚠️ **Splice rate 1.6x STAR** (4.1% vs 2.5%) — remaining false junctions from missing seed positions
 
 ## Source Layout
 
@@ -70,7 +71,7 @@ before adding complex features. Threading affects the entire execution model and
 src/
   main.rs          -- Thin entry: parse CLI (clap), init logging, call lib::run()
   lib.rs           -- run() dispatches on RunMode (AlignReads | GenomeGenerate)
-  params.rs        -- ~40 STAR CLI params via clap derive, --camelCase long names
+  params.rs        -- ~41 STAR CLI params via clap derive, --camelCase long names
   error.rs         -- Error enum with thiserror (Parameter, Io, Fasta, Index, Alignment, Gtf)
   mapq.rs          -- ✅ MAPQ calculation (unique=255, multi=-10*log10(1-1/n))
   stats.rs         -- ✅ Alignment statistics tracking and reporting
@@ -182,11 +183,14 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 
 ## Known Issues / Accuracy Gaps (Priority Order)
 
-1. ~~**Position agreement 51%**~~ ✅ FIXED in Phase 13.9 — now **94.5%**. Root cause was SA reverse-strand position encoding (not converting to forward genome coordinates for chromosome lookup).
-2. **Splice rate 2.3x STAR** (5.8% vs 2.5%): ruSTAR creates false splice junctions. Likely splice motif detection in DP uses raw SA positions instead of forward coordinates for reverse-strand reads.
-3. **337 same-chr >500bp apart**: Mostly chrXII rDNA repeats (9137bp offset) and chrII duplicated regions — multi-mapping tie-breaking.
-4. **113 diff-chr disagreements**: 97 are multi-mappers (harmless tie-breaking), only 2 both MAPQ=255.
-5. **42 STAR-only mapped reads**: Down from 629 after position fix.
+1. ~~**Position agreement 51%**~~ ✅ FIXED in Phase 13.9 — now **95.3%**.
+2. ~~**CIGAR agreement 84.3%**~~ ✅ FIXED in Phase 13.9b — now **96.5%**. Root cause was CIGAR not reversed for reverse-strand reads.
+3. ~~**Splice motif detection**~~ ✅ FIXED in Phase 13.9b — `score_gap_with_strand()` converts RC donor position to forward genome coordinates.
+4. **Splice rate 1.6x STAR** (4.1% vs 2.5%): Remaining 33 false junctions have huge introns — caused by missing seed positions at the correct unspliced locus.
+5. **SJ motif strand disagreement** (5/40): ruSTAR=CT/AC vs STAR=GT/AG on same junctions — likely strand assignment issue in SJ.out.tab writer.
+6. **266 same-chr >500bp apart**: Mostly chrXII rDNA repeats and duplicated regions — multi-mapping tie-breaking.
+7. **116 diff-chr disagreements**: 99 are multi-mappers (harmless tie-breaking), only 5 both MAPQ=255.
+8. **60 STAR-only mapped reads**: Down from 629 after position fix.
 
 ## Limitations (to be addressed in future phases)
 

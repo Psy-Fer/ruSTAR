@@ -19,7 +19,7 @@ Phase 1 (CLI) ✅
                                                └→ Phase 12 (chimeric) ✅ ← Gene fusion detection
                                                     └→ Phase 13.1-13.6 (perf+accuracy) ✅
                                                          └→ Phase 13.7-13.9 (accuracy refinement) ✅
-                                                              └→ Phase 13.9b (splice rate fix)
+                                                              └→ Phase 13.9b (CIGAR/splice fix) ✅
                                                                    └→ Phase 14 (STARsolo)
 ```
 
@@ -943,13 +943,61 @@ BAM is the standard format for downstream analysis tools and significantly reduc
 
 ---
 
-## Phase 13.9b: Reduce Splice Rate 2x STAR (Planned)
+## Phase 13.9b: CIGAR Reversal + Splice Motif Fix + Genomic Length Penalty ✅
 
-**Status**: Not started — **TOP REMAINING ACCURACY ISSUE**
+**Status**: Complete
 
-**Goal**: Reduce alignment-level splice rate from 5.8% to match STAR's 2.5%. ruSTAR creates false splice junctions, many with large introns. The `score_gap()` → `detect_splice_motif()` path in DP receives raw SA positions for genome access, which may be incorrect for reverse-strand splice motif detection (reading wrong genome region for donor/acceptor dinucleotides).
+**Goal**: Fix CIGAR agreement (84.3% → 96.5%) and reduce splice rate (5.8% → 4.1%) through three fixes targeting reverse-strand alignment issues and missing scoring logic.
 
-**Approach**: Investigate whether `score_gap()` in `stitch.rs` line 608 passes `prev.genome_end` (raw SA position) to `detect_splice_motif()`. For reverse-strand clusters, this position is in the RC genome region and must be converted to forward coordinates before reading donor/acceptor motif bases.
+**Root Causes Identified**:
+1. **CIGAR not reversed for reverse strand** (70.6% of CIGAR disagreements): DP builds CIGARs in RC genome order; SAM requires forward genome order
+2. **Splice motif detection at wrong coordinates** (13.9% of disagreements): `score_gap()` received raw SA positions for motif detection; for reverse strand these point to unrelated forward-genome locations
+3. **Missing `scoreGenomicLengthLog2scale` penalty**: STAR penalizes long-spanning alignments with `ceil(log2(span) * -0.25 - 0.5)`, preventing huge false introns from outscoring compact alignments
+
+**Fixes Applied**:
+
+1. **CIGAR reversal** (`src/align/stitch.rs`):
+   - Added `final_cigar.reverse()` for reverse-strand clusters after `count_mismatches()` (which needs RC genome order) but before `ref_len` computation
+   - Fixed 956 reads with exactly-reversed CIGARs (e.g., `124M26S` → `26S124M`)
+
+2. **Strand-aware splice motif detection** (`src/align/score.rs`):
+   - New `score_gap_with_strand()` method accepts `is_reverse` and `n_genome` parameters
+   - Converts RC donor position to forward: `forward_donor = n_genome - rc_donor - intron_len`
+   - `detect_splice_motif()` unchanged — always reads forward genome (handles both GT-AG and CT-AC patterns)
+   - Original `score_gap()` preserved as wrapper for backward compatibility (tests)
+
+3. **Genomic length penalty** (`src/params.rs`, `src/align/score.rs`, `src/align/stitch.rs`):
+   - Added `--scoreGenomicLengthLog2scale` parameter (STAR default: -0.25)
+   - `genomic_length_penalty()` method: `ceil(log2(genomic_span) * scale - 0.5)`
+   - Applied to transcript score after DP stitching, floored at 0
+   - For 121kb intron: penalty ≈ -4 points; for 150bp match: penalty ≈ -2 points
+
+**Files Modified**:
+- `src/align/stitch.rs` — CIGAR reversal, `score_gap_with_strand()` call site, genomic length penalty application
+- `src/align/score.rs` — `score_gap_with_strand()`, `genomic_length_penalty()`, `score_genomic_length_log2_scale` field
+- `src/params.rs` — `scoreGenomicLengthLog2scale` parameter
+
+**10k-read STAR Comparison**:
+
+| Metric | Before (13.9) | After (13.9b) | STAR |
+|--------|---------------|---------------|------|
+| Position agreement | 94.5% | **95.3%** | — |
+| CIGAR agree (of pos-agree) | 84.3% | **96.5%** | — |
+| Unique mapped | 83.8% | **84.2%** | 82.6% |
+| Multi mapped | 6.1% | **5.3%** | 7.4% |
+| Spliced rate | 5.8% | **4.1%** | 2.5% |
+| ruSTAR-only junctions | 40 | **33** | — |
+| Shared junctions | 40 | 40 | 80 total |
+| Position disagreements | 492 | **416** | — |
+| Soft clip rate | 26.5% | **26.2%** | 25.8% |
+
+**Remaining Issues**:
+- 33 ruSTAR-only junctions: huge introns (10k-500k), all canonical motifs found by coincidence; caused by missing seed positions at the correct unspliced locus
+- 5/40 shared junctions: ruSTAR=CT/AC vs STAR=GT/AG (strand assignment in SJ.out.tab)
+- 266 same-chr >500bp apart: rDNA repeats and duplicated regions
+- 116 diff-chr: 99 multi-mappers (tie-breaking)
+
+**Verified**: 192/192 tests passing, `cargo clippy` clean (pre-existing only), `cargo fmt --check` pass
 
 ---
 

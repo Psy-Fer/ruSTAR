@@ -246,8 +246,16 @@ pub fn align_read(
             && a.is_reverse == b.is_reverse
     });
 
-    // Step 5b: Re-sort by score (descending) for final output
-    transcripts.sort_by(|a, b| b.score.cmp(&a.score));
+    // Step 5b: Re-sort by score (descending) with deterministic tie-breaking
+    // When scores are equal, prefer: smallest chr index → smallest position → forward strand
+    // This matches STAR's tie-breaking behavior for multi-mappers
+    transcripts.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.chr_idx.cmp(&b.chr_idx))
+            .then_with(|| a.genome_start.cmp(&b.genome_start))
+            .then_with(|| a.is_reverse.cmp(&b.is_reverse))
+    });
 
     // Step 5b: Filter to keep only alignments within score range of the best
     // This is CRITICAL for unique vs multi-mapped classification
@@ -389,7 +397,16 @@ pub fn align_paired_read(
 
     // Step 4: Filter and sort
     filter_paired_transcripts(&mut paired_alignments, params);
-    paired_alignments.sort_by(|a, b| b.transcript.score.cmp(&a.transcript.score));
+    // Deterministic tie-breaking for equal-score pairs:
+    // smallest chr index → smallest position → forward strand first
+    paired_alignments.sort_by(|a, b| {
+        b.transcript
+            .score
+            .cmp(&a.transcript.score)
+            .then_with(|| a.transcript.chr_idx.cmp(&b.transcript.chr_idx))
+            .then_with(|| a.transcript.genome_start.cmp(&b.transcript.genome_start))
+            .then_with(|| a.transcript.is_reverse.cmp(&b.transcript.is_reverse))
+    });
 
     Ok(paired_alignments)
 }

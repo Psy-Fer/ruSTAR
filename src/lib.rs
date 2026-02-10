@@ -316,6 +316,60 @@ fn run_pass1(
 struct AlignmentBatchResults {
     sam_records: crate::io::sam::BufferedSamRecords,
     chimeric_alns: Vec<crate::chimeric::ChimericAlignment>,
+    /// Junction keys from the primary (best) alignment for BySJout filtering.
+    /// Empty if unmapped or no junctions.
+    primary_junction_keys: Vec<crate::junction::SjKey>,
+}
+
+/// Extract SjKey junction identifiers from a transcript's CIGAR.
+/// Used to check if a read's junctions survive outSJfilter* for BySJout mode.
+fn extract_junction_keys(
+    transcript: &crate::align::transcript::Transcript,
+    index: &crate::index::GenomeIndex,
+) -> Vec<crate::junction::SjKey> {
+    use crate::align::score::AlignmentScorer;
+    use crate::align::transcript::CigarOp;
+
+    let scorer = AlignmentScorer::from_params_minimal();
+    let mut keys = Vec::new();
+    let mut genome_pos = transcript.genome_start;
+
+    for op in &transcript.cigar {
+        match op {
+            CigarOp::RefSkip(len) => {
+                let intron_len = *len;
+                let intron_start = genome_pos + 1;
+                let intron_end = genome_pos + intron_len as u64;
+
+                let motif = scorer.detect_splice_motif(genome_pos, intron_len, &index.genome);
+                let strand = match motif.implied_strand() {
+                    Some('+') => 1u8,
+                    Some('-') => 2u8,
+                    _ => 0u8,
+                };
+                let encoded_motif = crate::junction::encode_motif(motif);
+
+                keys.push(crate::junction::SjKey {
+                    chr_idx: transcript.chr_idx,
+                    intron_start,
+                    intron_end,
+                    strand,
+                    motif: encoded_motif,
+                });
+
+                genome_pos += intron_len as u64;
+            }
+            CigarOp::Match(len) | CigarOp::Equal(len) | CigarOp::Diff(len) => {
+                genome_pos += *len as u64;
+            }
+            CigarOp::Del(len) => {
+                genome_pos += *len as u64;
+            }
+            CigarOp::Ins(_) | CigarOp::SoftClip(_) | CigarOp::HardClip(_) => {}
+        }
+    }
+
+    keys
 }
 
 /// Align single-end reads
@@ -329,6 +383,7 @@ fn align_reads_single_end<W: AlignmentWriter>(
     use crate::align::read_align::align_read;
     use crate::io::fastq::{FastqReader, clip_read};
     use crate::io::sam::{BufferedSamRecords, SamWriter};
+    use crate::params::OutFilterType;
     use rayon::prelude::*;
     use std::sync::Arc;
 
@@ -364,6 +419,14 @@ fn align_reads_single_end<W: AlignmentWriter>(
     let clip3p = params.clip3p_nbases as usize;
     let max_multimaps = params.out_filter_multimap_nmax as usize;
     let output_unmapped = params.out_sam_unmapped != params::OutSamUnmapped::None;
+    let by_sjout = params.out_filter_type == OutFilterType::BySJout;
+
+    // Buffer for BySJout mode: accumulate all results before filtering
+    let mut bysj_buffer: Vec<AlignmentBatchResults> = Vec::new();
+
+    if by_sjout {
+        info!("outFilterType=BySJout: buffering reads for post-alignment junction filtering");
+    }
 
     info!("Aligning reads...");
     loop {
@@ -414,6 +477,7 @@ fn align_reads_single_end<W: AlignmentWriter>(
                     return Ok(AlignmentBatchResults {
                         sam_records: buffer,
                         chimeric_alns,
+                        primary_junction_keys: Vec::new(),
                     });
                 }
 
@@ -434,6 +498,14 @@ fn align_reads_single_end<W: AlignmentWriter>(
                 for transcript in &transcripts {
                     record_transcript_junctions(transcript, &index, &sj_stats, is_unique);
                 }
+
+                // Extract junction keys from primary alignment for BySJout filtering
+                let primary_junction_keys =
+                    if by_sjout && !transcripts.is_empty() && transcripts[0].n_junction > 0 {
+                        extract_junction_keys(&transcripts[0], &index)
+                    } else {
+                        Vec::new()
+                    };
 
                 // Build SAM records (no I/O, just construction)
                 if transcripts.is_empty() {
@@ -465,25 +537,33 @@ fn align_reads_single_end<W: AlignmentWriter>(
                 Ok(AlignmentBatchResults {
                     sam_records: buffer,
                     chimeric_alns,
+                    primary_junction_keys,
                 })
             })
             .collect();
 
-        // Sequential writing (merge buffers in chunk order)
-        for result in batch_results {
-            let batch = result?;
+        if by_sjout {
+            // Buffer all results for post-alignment filtering
+            for result in batch_results {
+                bysj_buffer.push(result?);
+            }
+        } else {
+            // Normal mode: sequential writing (merge buffers in chunk order)
+            for result in batch_results {
+                let batch = result?;
 
-            // Write SAM/BAM records
-            writer.write_batch(&batch.sam_records.records)?;
+                // Write SAM/BAM records
+                writer.write_batch(&batch.sam_records.records)?;
 
-            // Write chimeric alignments
-            if let Some(ref mut chim_writer) = chimeric_writer {
-                for chim_aln in &batch.chimeric_alns {
-                    chim_writer.write_alignment(
-                        chim_aln,
-                        &index.genome.chr_name,
-                        &chim_aln.read_name,
-                    )?;
+                // Write chimeric alignments
+                if let Some(ref mut chim_writer) = chimeric_writer {
+                    for chim_aln in &batch.chimeric_alns {
+                        chim_writer.write_alignment(
+                            chim_aln,
+                            &index.genome.chr_name,
+                            &chim_aln.read_name,
+                        )?;
+                    }
                 }
             }
         }
@@ -498,6 +578,53 @@ fn align_reads_single_end<W: AlignmentWriter>(
         if read_count >= max_reads {
             break;
         }
+    }
+
+    // BySJout post-alignment filtering
+    if by_sjout {
+        let surviving_junctions = sj_stats.compute_surviving_junctions(params);
+        info!(
+            "BySJout filtering: {} surviving junctions from {} total",
+            surviving_junctions.len(),
+            sj_stats.len()
+        );
+
+        let mut filtered_count = 0u64;
+        for batch in &bysj_buffer {
+            if !batch.primary_junction_keys.is_empty() {
+                // Read has junctions — check if ALL survive
+                let all_survive = batch
+                    .primary_junction_keys
+                    .iter()
+                    .all(|key| surviving_junctions.contains(key));
+
+                if !all_survive {
+                    // Filter this read: skip writing, adjust stats
+                    filtered_count += 1;
+                    stats.undo_mapped_record_bysj();
+                    continue;
+                }
+            }
+
+            // No junctions or all junctions survive — write normally
+            writer.write_batch(&batch.sam_records.records)?;
+
+            // Write chimeric alignments
+            if let Some(ref mut chim_writer) = chimeric_writer {
+                for chim_aln in &batch.chimeric_alns {
+                    chim_writer.write_alignment(
+                        chim_aln,
+                        &index.genome.chr_name,
+                        &chim_aln.read_name,
+                    )?;
+                }
+            }
+        }
+
+        info!(
+            "BySJout: filtered {} reads with non-surviving junctions",
+            filtered_count
+        );
     }
 
     // Flush chimeric output if enabled
@@ -520,6 +647,7 @@ fn align_reads_paired_end<W: AlignmentWriter>(
     use crate::align::read_align::align_paired_read;
     use crate::io::fastq::{PairedFastqReader, clip_read};
     use crate::io::sam::{BufferedSamRecords, SamWriter};
+    use crate::params::OutFilterType;
     use rayon::prelude::*;
     use std::sync::Arc;
 
@@ -562,6 +690,14 @@ fn align_reads_paired_end<W: AlignmentWriter>(
     let clip3p = params.clip3p_nbases as usize;
     let max_multimaps = params.out_filter_multimap_nmax as usize;
     let output_unmapped = params.out_sam_unmapped != params::OutSamUnmapped::None;
+    let by_sjout = params.out_filter_type == OutFilterType::BySJout;
+
+    // Buffer for BySJout mode
+    let mut bysj_buffer: Vec<AlignmentBatchResults> = Vec::new();
+
+    if by_sjout {
+        info!("outFilterType=BySJout: buffering pairs for post-alignment junction filtering");
+    }
 
     info!("Aligning paired-end reads...");
     loop {
@@ -581,7 +717,7 @@ fn align_reads_paired_end<W: AlignmentWriter>(
         let batch_to_process = &batch[..pairs_to_process];
 
         // Parallel alignment processing
-        let sam_buffers: Vec<Result<BufferedSamRecords, error::Error>> = batch_to_process
+        let batch_results: Vec<Result<AlignmentBatchResults, error::Error>> = batch_to_process
             .par_iter()
             .map(|paired_read| {
                 #[allow(clippy::needless_borrow)]
@@ -622,7 +758,11 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                             buffer.push(record);
                         }
                     }
-                    return Ok(buffer);
+                    return Ok(AlignmentBatchResults {
+                        sam_records: buffer,
+                        chimeric_alns: Vec::new(),
+                        primary_junction_keys: Vec::new(),
+                    });
                 }
 
                 // Align paired read (CPU-intensive)
@@ -636,6 +776,16 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                 for pair in &paired_alns {
                     record_transcript_junctions(&pair.transcript, &index, &sj_stats, is_unique);
                 }
+
+                // Extract junction keys from primary alignment for BySJout
+                let primary_junction_keys = if by_sjout
+                    && !paired_alns.is_empty()
+                    && paired_alns[0].transcript.n_junction > 0
+                {
+                    extract_junction_keys(&paired_alns[0].transcript, &index)
+                } else {
+                    Vec::new()
+                };
 
                 // Build SAM records (2 per pair)
                 if paired_alns.is_empty() {
@@ -670,14 +820,25 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                 }
                 // else: too many loci, skip output
 
-                Ok(buffer)
+                Ok(AlignmentBatchResults {
+                    sam_records: buffer,
+                    chimeric_alns: Vec::new(),
+                    primary_junction_keys,
+                })
             })
             .collect();
 
-        // Sequential SAM writing
-        for buffer_result in sam_buffers {
-            let buffer = buffer_result?;
-            writer.write_batch(&buffer.records)?;
+        if by_sjout {
+            // Buffer all results for post-alignment filtering
+            for result in batch_results {
+                bysj_buffer.push(result?);
+            }
+        } else {
+            // Normal mode: sequential SAM writing
+            for result in batch_results {
+                let batch = result?;
+                writer.write_batch(&batch.sam_records.records)?;
+            }
         }
 
         read_count += pairs_to_process as u64;
@@ -690,6 +851,39 @@ fn align_reads_paired_end<W: AlignmentWriter>(
         if read_count >= max_reads {
             break;
         }
+    }
+
+    // BySJout post-alignment filtering
+    if by_sjout {
+        let surviving_junctions = sj_stats.compute_surviving_junctions(params);
+        info!(
+            "BySJout filtering: {} surviving junctions from {} total",
+            surviving_junctions.len(),
+            sj_stats.len()
+        );
+
+        let mut filtered_count = 0u64;
+        for batch in &bysj_buffer {
+            if !batch.primary_junction_keys.is_empty() {
+                let all_survive = batch
+                    .primary_junction_keys
+                    .iter()
+                    .all(|key| surviving_junctions.contains(key));
+
+                if !all_survive {
+                    filtered_count += 1;
+                    stats.undo_mapped_record_bysj();
+                    continue;
+                }
+            }
+
+            writer.write_batch(&batch.sam_records.records)?;
+        }
+
+        info!(
+            "BySJout: filtered {} pairs with non-surviving junctions",
+            filtered_count
+        );
     }
 
     // Flush chimeric output if enabled (currently no chimeric alignments from paired-end)

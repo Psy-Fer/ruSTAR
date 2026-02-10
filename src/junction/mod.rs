@@ -9,6 +9,7 @@ mod gtf;
 mod sj_output;
 
 pub use sj_output::SpliceJunctionStats;
+pub(crate) use sj_output::{SjKey, encode_motif};
 
 use crate::params::Parameters;
 

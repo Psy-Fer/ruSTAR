@@ -15,6 +15,7 @@ use crate::error::Error;
 use crate::genome::Genome;
 use crate::params::Parameters;
 use dashmap::DashMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -116,29 +117,18 @@ impl SpliceJunctionStats {
             .record(is_unique, overhang);
     }
 
-    /// Write SJ.out.tab file with motif-specific filtering
-    pub fn write_output(
-        &self,
-        output_path: &Path,
-        genome: &Genome,
-        params: &Parameters,
-    ) -> Result<(), Error> {
-        let file = File::create(output_path).map_err(|e| Error::io(e, output_path))?;
-        let mut writer = BufWriter::new(file);
-
+    /// Compute the set of junctions that pass all outSJfilter* thresholds.
+    /// Used by outFilterType BySJout to filter read alignments.
+    pub(crate) fn compute_surviving_junctions(&self, params: &Parameters) -> HashSet<SjKey> {
         // Collect all junctions
         let mut junctions: Vec<_> = self
             .junctions
             .iter()
             .map(|entry| {
-                let key = entry.key();
+                let key = entry.key().clone();
                 let counts = entry.value();
                 (
-                    key.chr_idx,
-                    key.intron_start,
-                    key.intron_end,
-                    key.strand,
-                    key.motif,
+                    key,
                     counts.annotated,
                     counts.unique_count.load(Ordering::Relaxed),
                     counts.multi_count.load(Ordering::Relaxed),
@@ -147,73 +137,64 @@ impl SpliceJunctionStats {
             })
             .collect();
 
-        // Sort by chromosome, start, end
+        // Sort by chromosome, start, end (for distance calculation)
         junctions.sort_by(|a, b| {
-            a.0.cmp(&b.0) // chr_idx
-                .then(a.1.cmp(&b.1)) // start
-                .then(a.2.cmp(&b.2)) // end
+            a.0.chr_idx
+                .cmp(&b.0.chr_idx)
+                .then(a.0.intron_start.cmp(&b.0.intron_start))
+                .then(a.0.intron_end.cmp(&b.0.intron_end))
         });
 
-        // Apply outSJfilter* thresholds (annotated junctions bypass all filters)
         let overhang_min = &params.out_sj_filter_overhang_min;
         let unique_min = &params.out_sj_filter_count_unique_min;
         let total_min = &params.out_sj_filter_count_total_min;
         let dist_min = &params.out_sj_filter_dist_to_other_sjmin;
 
-        // Build distance-to-nearest-neighbor map for dist filter
-        // For each junction, find the distance to the nearest other junction on the same chromosome
+        // Build distance-to-nearest-neighbor map
         let min_dist_to_neighbor: Vec<u64> = {
             let n = junctions.len();
             let mut dists = vec![u64::MAX; n];
             for i in 0..n {
-                // Check previous junction on same chromosome
-                if i > 0 && junctions[i].0 == junctions[i - 1].0 {
-                    let d = junctions[i].1.saturating_sub(junctions[i - 1].2);
+                if i > 0 && junctions[i].0.chr_idx == junctions[i - 1].0.chr_idx {
+                    let d = junctions[i]
+                        .0
+                        .intron_start
+                        .saturating_sub(junctions[i - 1].0.intron_end);
                     dists[i] = dists[i].min(d);
                     dists[i - 1] = dists[i - 1].min(d);
                 }
-                // Check next junction on same chromosome
-                if i + 1 < n && junctions[i].0 == junctions[i + 1].0 {
-                    let d = junctions[i + 1].1.saturating_sub(junctions[i].2);
+                if i + 1 < n && junctions[i].0.chr_idx == junctions[i + 1].0.chr_idx {
+                    let d = junctions[i + 1]
+                        .0
+                        .intron_start
+                        .saturating_sub(junctions[i].0.intron_end);
                     dists[i] = dists[i].min(d);
                 }
             }
             dists
         };
 
-        // Filter and write
-        let mut written = 0u32;
-        for (idx, &(chr_idx, start, end, strand, motif, annotated, unique, multi, max_overhang)) in
-            junctions.iter().enumerate()
-        {
+        let mut surviving = HashSet::new();
+
+        for (idx, (key, annotated, unique, multi, max_overhang)) in junctions.iter().enumerate() {
             // Annotated junctions bypass all outSJfilter* checks
             if !annotated {
-                let cat = SpliceMotif::filter_category_from_encoded(motif);
+                let cat = SpliceMotif::filter_category_from_encoded(key.motif);
 
-                // Overhang filter
-                if (max_overhang as i32) < overhang_min[cat] {
+                if (*max_overhang as i32) < overhang_min[cat] {
                     continue;
                 }
-
-                // Unique count filter
-                if (unique as i32) < unique_min[cat] {
+                if (*unique as i32) < unique_min[cat] {
                     continue;
                 }
-
-                // Total count filter
                 let total = unique + multi;
                 if (total as i32) < total_min[cat] {
                     continue;
                 }
-
-                // Distance to other SJ filter
                 if dist_min[cat] > 0 && min_dist_to_neighbor[idx] < dist_min[cat] as u64 {
                     continue;
                 }
-
-                // Intron length vs read count filter (outSJfilterIntronMaxVsReadN)
-                let intron_len = end.saturating_sub(start);
-                let total = unique + multi;
+                let intron_len = key.intron_end.saturating_sub(key.intron_start);
                 let intron_max_thresholds = &params.out_sj_filter_intron_max_vs_read_n;
                 let max_intron_for_reads = if total >= 3 {
                     intron_max_thresholds.get(2).copied().unwrap_or(200000)
@@ -227,15 +208,59 @@ impl SpliceJunctionStats {
                 }
             }
 
+            surviving.insert(key.clone());
+        }
+
+        surviving
+    }
+
+    /// Write SJ.out.tab file with motif-specific filtering
+    pub fn write_output(
+        &self,
+        output_path: &Path,
+        genome: &Genome,
+        params: &Parameters,
+    ) -> Result<(), Error> {
+        let file = File::create(output_path).map_err(|e| Error::io(e, output_path))?;
+        let mut writer = BufWriter::new(file);
+
+        let surviving = self.compute_surviving_junctions(params);
+
+        // Collect and sort surviving junctions for deterministic output
+        let mut output_junctions: Vec<_> = self
+            .junctions
+            .iter()
+            .filter(|entry| surviving.contains(entry.key()))
+            .map(|entry| {
+                let key = entry.key().clone();
+                let counts = entry.value();
+                (
+                    key,
+                    counts.annotated,
+                    counts.unique_count.load(Ordering::Relaxed),
+                    counts.multi_count.load(Ordering::Relaxed),
+                    counts.max_overhang.load(Ordering::Relaxed),
+                )
+            })
+            .collect();
+
+        output_junctions.sort_by(|a, b| {
+            a.0.chr_idx
+                .cmp(&b.0.chr_idx)
+                .then(a.0.intron_start.cmp(&b.0.intron_start))
+                .then(a.0.intron_end.cmp(&b.0.intron_end))
+        });
+
+        let mut written = 0u32;
+        for (key, annotated, unique, multi, max_overhang) in &output_junctions {
             let chr_name = genome
                 .chr_name
-                .get(chr_idx)
+                .get(key.chr_idx)
                 .ok_or_else(|| Error::Index("Invalid chromosome index in junction".to_string()))?;
 
-            // Convert from global genome coordinates to per-chromosome coordinates
-            let chr_start_pos = genome.chr_start[chr_idx];
-            let chr_pos_start = start - chr_start_pos;
-            let chr_pos_end = end - chr_start_pos;
+            let chr_start_pos = genome.chr_start[key.chr_idx];
+            let chr_pos_start = key.intron_start - chr_start_pos;
+            let chr_pos_end = key.intron_end - chr_start_pos;
 
             writeln!(
                 writer,
@@ -243,9 +268,9 @@ impl SpliceJunctionStats {
                 chr_name,
                 chr_pos_start,
                 chr_pos_end,
-                strand,
-                motif,
-                if annotated { 1 } else { 0 },
+                key.strand,
+                key.motif,
+                if *annotated { 1 } else { 0 },
                 unique,
                 multi,
                 max_overhang
@@ -330,7 +355,7 @@ impl SjCounts {
 /// 4 = CT/GC
 /// 5 = AT/AC
 /// 6 = GT/AT
-fn encode_motif(motif: SpliceMotif) -> u8 {
+pub(crate) fn encode_motif(motif: SpliceMotif) -> u8 {
     match motif {
         SpliceMotif::GtAg => 1,
         SpliceMotif::CtAc => 2,
@@ -605,5 +630,91 @@ mod tests {
 
         // Annotated junction should pass despite low overhang and count
         assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn test_compute_surviving_junctions_basic() {
+        use clap::Parser;
+
+        let stats = SpliceJunctionStats::new();
+
+        // High-quality canonical junction (should survive)
+        stats.record_junction(0, 100, 200, 1, SpliceMotif::GtAg, true, 50, false);
+
+        // Low-overhang non-canonical junction (should be filtered: 10 < 30)
+        for _ in 0..5 {
+            stats.record_junction(0, 300, 400, 1, SpliceMotif::NonCanonical, true, 10, false);
+        }
+
+        // Low-count canonical junction (unique=0 < 1)
+        stats.record_junction(0, 500, 600, 1, SpliceMotif::GtAg, false, 20, false);
+
+        let params = crate::params::Parameters::try_parse_from(vec!["ruSTAR"]).unwrap();
+        let surviving = stats.compute_surviving_junctions(&params);
+
+        // Only the first junction should survive
+        assert_eq!(surviving.len(), 1);
+        assert!(surviving.contains(&SjKey {
+            chr_idx: 0,
+            intron_start: 100,
+            intron_end: 200,
+            strand: 1,
+            motif: 1,
+        }));
+    }
+
+    #[test]
+    fn test_compute_surviving_junctions_annotated_bypass() {
+        use clap::Parser;
+
+        let stats = SpliceJunctionStats::new();
+
+        // Annotated junction with terrible stats (should still survive)
+        stats.record_junction(0, 100, 200, 1, SpliceMotif::NonCanonical, false, 1, true);
+
+        let params = crate::params::Parameters::try_parse_from(vec!["ruSTAR"]).unwrap();
+        let surviving = stats.compute_surviving_junctions(&params);
+
+        assert_eq!(surviving.len(), 1);
+    }
+
+    #[test]
+    fn test_compute_surviving_matches_write_output() {
+        use clap::Parser;
+        use tempfile::NamedTempFile;
+
+        let stats = SpliceJunctionStats::new();
+
+        // Mix of surviving and filtered junctions
+        stats.record_junction(0, 100, 200, 1, SpliceMotif::GtAg, true, 50, false);
+        stats.record_junction(0, 300, 400, 2, SpliceMotif::GcAg, false, 15, true);
+        for _ in 0..5 {
+            stats.record_junction(0, 500, 600, 0, SpliceMotif::NonCanonical, true, 5, false);
+        }
+
+        let genome = Genome {
+            sequence: vec![0; 1000],
+            n_genome: 1000,
+            n_chr_real: 1,
+            chr_start: vec![0, 1000],
+            chr_length: vec![1000],
+            chr_name: vec!["chr1".to_string()],
+        };
+
+        let params = crate::params::Parameters::try_parse_from(vec!["ruSTAR"]).unwrap();
+
+        // compute_surviving_junctions should return same set as what write_output writes
+        let surviving = stats.compute_surviving_junctions(&params);
+
+        let output_file = NamedTempFile::new().unwrap();
+        stats
+            .write_output(output_file.path(), &genome, &params)
+            .unwrap();
+
+        let content = std::fs::read_to_string(output_file.path()).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Both should agree on count
+        assert_eq!(surviving.len(), lines.len());
     }
 }

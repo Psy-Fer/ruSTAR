@@ -60,6 +60,13 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 13.13 (Splice rate fix) ← **Relaxed terminal exon overhang, splice rate 0.9% → 3.4%, shared junctions 30 → 50**
 - Phase 13.14 (outFilterBySJout) ← **Implemented outFilterType BySJout, +1% position/CIGAR agreement**
 
+**In Progress**:
+- Phase 15 (SAM tags + output correctness) ← NH/HI/AS/NM/XS/jM/jI/MD tags, secondary alignments, PE fixes
+
+**Planned**:
+- Phase 16 (Accuracy + algorithm parity) ← jR scanning, rDNA MAPQ, seed params, PE joint DP
+- Phase 17 (Features + polish) ← Log.final.out, sorted BAM, PE chimeric, quantMode, stdout output
+
 **Current Status** (10k yeast reads, single-end):
 
 Normal mode (default):
@@ -222,11 +229,21 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 
 ## Limitations (to be addressed in future phases)
 
-- No SAM optional tags (AS, NM, NH, HI) - noodles lifetime complexity
-- No coordinate-sorted BAM output (unsorted only; use `samtools sort`)
+- **SAM optional tags** (AS, NM, NH, HI, XS, jM, jI, MD) — **Phase 15 (in progress)**
+- **Secondary alignment output** (FLAG 0x100, --outSAMmultNmax) — Phase 15.2
+- **Paired-end FLAG/PNEXT bugs** (mate strand flag, mate position) — Phase 15.4
+- **--outSAMattributes** parsed but not enforced — Phase 15.5
+- **No coordinate-sorted BAM output** (unsorted only; use `samtools sort`) — Phase 17.2
+- **No Log.final.out** statistics file (MultiQC/RNA-SeQC) — Phase 17.1
+- **Over-splicing** (3.4% vs STAR 2.2%) — needs jR scanning (Phase 16.3)
+- **rDNA MAPQ inflation** (~157 reads, MAPQ 255 vs STAR 1-3) — Phase 16.5
+- **No --outReadsUnmapped Fastx** — Phase 17.4
+- **No --outStd SAM/BAM** (stdout output) — Phase 17.6
+- **No --quantMode GeneCounts** — Phase 17.8
 - Chimeric alignment detection:
   - ✅ Single-end chimeric detection (inter-chr, strand breaks, large gaps, soft-clips)
   - ✅ Chimeric.out.junction output file
-  - ❌ Paired-end chimeric detection not yet implemented
-  - ❌ Tier 3 (re-mapping soft-clipped regions) not yet implemented
+  - ❌ Paired-end chimeric detection not yet implemented — Phase 17.3
+  - ❌ Tier 3 (re-mapping soft-clipped regions) not yet implemented — Phase 17.10
+  - ❌ --chimOutType WithinBAM not yet implemented — Phase 17.11
 - No STARsolo single-cell features (Phase 14, deferred until accuracy parity achieved)

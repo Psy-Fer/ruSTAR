@@ -26,7 +26,10 @@ Phase 1 (CLI) ✅
                                                                                   └→ Phase 13.12 (SJ motif/strand fix) ✅
                                                                                        └→ Phase 13.13 (splice rate fix) ✅
                                                                                             └→ Phase 13.14 (outFilterBySJout) ✅
-                                                                                                 └→ Phase 14 (STARsolo) [DEFERRED]
+                                                                                                 └→ Phase 15 (SAM tags + output) ← In Progress
+                                                                                                      └→ Phase 16 (accuracy parity)
+                                                                                                           └→ Phase 17 (features + polish)
+                                                                                                                └→ Phase 14 (STARsolo) [DEFERRED]
 ```
 
 **Phase ordering rationale**: Threading (Phase 9) done first to establish parallel architecture foundation.
@@ -1312,6 +1315,144 @@ BySJout mode (`--outFilterType BySJout`):
 **Memory Note**: BySJout buffers all SAM records in memory (~5MB for 10k reads). For 100M+ reads, disk-based buffering would be needed (future optimization).
 
 **Verified**: 205/205 tests passing, clippy clean (6 pre-existing warnings), `cargo fmt --check` pass
+
+---
+
+## Phase 15: SAM Tags + Output Correctness
+
+**Status**: In Progress
+
+**Goal**: Add all SAM optional tags required by downstream tools (featureCounts, RSEM, StringTie, GATK, Picard, samtools markdup). Fix paired-end output bugs. Implement `--outSAMattributes` enforcement.
+
+### Phase 15.1: NH, HI, AS, NM Tags (Foundation) — In Progress
+
+**Problem**: All downstream tools require one or more of NH/HI/AS/NM. Without them, ruSTAR output is unusable in standard pipelines.
+
+**Current state**: `src/io/sam.rs:422` TODO. `transcript_to_record()` accepts `_n_alignments` and `_hit_index` but ignores them.
+
+**Fix**: Use noodles `record_buf::data` API to add tags:
+- NH:i = n_alignments (number of reported alignments)
+- HI:i = hit_index (1-based index of this alignment)
+- AS:i = transcript.score (alignment score)
+- NM:i = edit distance (mismatches + D/I bases from CIGAR)
+
+**Files**: `src/io/sam.rs`
+
+### Phase 15.2: XS Tag + Secondary Alignment Output
+
+**Problem**: XS tag required by StringTie/Cufflinks. `--outSAMstrandField intronMotif` parsed but unused. Multi-mappers only output primary alignment, missing SECONDARY flag.
+
+**Fix**:
+- For spliced reads, derive strand from junction motifs via `implied_strand()`. Add XS:A:+/- tag.
+- Add `--outSAMmultNmax` parameter. Set `FLAGS |= SECONDARY` for hit_index > 1. Respect limit.
+
+**Files**: `src/io/sam.rs`, `src/params.rs`
+**Depends on**: 15.1
+
+### Phase 15.3: jM, jI, MD Tags
+
+**Problem**: jM/jI are STAR-specific junction tags used by QC pipelines. MD is required by GATK and variant calling.
+
+**Fix**:
+- Walk CIGAR for RefSkip ops, encode motifs as integers → jM (array of i8), jI (array of i32 pairs)
+- New `build_md_string()` function: walk CIGAR, count consecutive matches, emit mismatch bases
+
+**Files**: `src/io/sam.rs`, possibly `src/align/stitch.rs`
+**Depends on**: 15.1
+
+### Phase 15.4: Paired-End FLAG/PNEXT Fixes
+
+**Problem**: Two bugs in `src/io/sam.rs`:
+- Line 484-486: Mate reverse flag (0x20) always assumes opposite strand (should use actual mate strand)
+- Line 527: PNEXT set to same transcript's start (should be mate's position)
+
+**Fix**: Pass both mate transcripts into record builder. Set 0x20 from actual mate strand, PNEXT from actual mate position.
+
+**Files**: `src/io/sam.rs`
+
+### Phase 15.5: --outSAMattributes Enforcement
+
+**Problem**: Parameter parsed but no tags generated until 15.1-15.3, then need to control which tags are emitted.
+
+**Fix**: Parse attribute list into a set. Check the set before emitting each tag.
+
+**Files**: `src/io/sam.rs`, `src/params.rs`
+**Depends on**: 15.3
+
+### Phase 15.6: nM Tag (Paired Mismatch Count)
+
+**Fix**: Sum mismatches from both mates.
+
+**Files**: `src/io/sam.rs`
+**Depends on**: 15.1
+
+---
+
+## Phase 16: Accuracy + Algorithm Parity
+
+**Status**: Not Started
+
+**Goal**: Close remaining accuracy gaps vs STAR. Fix over-splicing, rDNA MAPQ, missing seed parameters, and DP junction optimization.
+
+### Phase 16.1: max_cluster_dist from winBinNbits
+
+**Problem**: `src/align/read_align.rs:59` hardcodes 100kb. STAR default is `2^winBinNbits * winAnchorDistNbins` = 589,824bp.
+
+**Fix**: Add `--winBinNbits` (16) and `--winAnchorDistNbins` (9) params. Compute max_cluster_dist from them.
+
+### Phase 16.2: RemoveNoncanonicalUnannotated Filter
+
+**Problem**: `src/align/read_align.rs:217` TODO — falls through to `RemoveNoncanonical`, incorrectly rejecting annotated non-canonical junctions.
+
+**Fix**: Pass junction DB into filter check. Only reject unannotated non-canonical junctions.
+
+### Phase 16.3: Junction Position Optimization (jR Scanning)
+
+**Problem**: Splice rate 3.4% vs STAR 2.2%. 6 false junctions. STAR shifts junction boundaries by ±scoreStitchSJshift bases to prefer canonical motifs.
+
+**Fix**: After detecting a splice junction in DP, try shifting boundary ± `scoreStitchSJshift` bases. Keep the shift that produces the best motif score.
+
+### Phase 16.4: seedSearchStartLmax + seedSearchLmax
+
+**Problem**: Neither parsed. `seedSearchStartLmax` (50) controls R-to-L search start position.
+
+**Fix**: Add parameters. In `find_seeds()`, start R-to-L loop from `read_len - seedSearchStartLmax`.
+
+### Phase 16.5: SAindex Hint Usage (rDNA MAPQ Fix)
+
+**Problem**: ~157 chrXII rDNA reads get MAPQ=255 (ruSTAR) vs MAPQ 1-3 (STAR). SA binary search ignores hint_pos.
+
+**Fix**: Use hint_pos to set initial binary search bounds, finding more repeat copies.
+
+### Phase 16.6: Paired-End Joint DP Stitching
+
+**Problem**: Mates aligned independently then combined. Misses rescue opportunities.
+
+**Fix**: Consider seeds from both mates in DP with fragment length gap penalty.
+
+---
+
+## Phase 17: Features + Polish
+
+**Status**: Not Started
+
+**Goal**: Production-ready features and quality-of-life improvements.
+
+| Sub-phase | Description |
+|-----------|-------------|
+| 17.1 | Log.final.out statistics file (MultiQC/RNA-SeQC compatibility) |
+| 17.2 | Coordinate-sorted BAM output (`--outSAMtype BAM SortedByCoordinate`) |
+| 17.3 | Paired-end chimeric detection |
+| 17.4 | `--outReadsUnmapped Fastx` |
+| 17.5 | Fix clippy warnings (config structs for too_many_arguments) |
+| 17.6 | `--outStd SAM/BAM` (stdout output for piping) |
+| 17.7 | GTF tag parameters (`sjdbGTFchrPrefix`, `sjdbGTFtagExonParentTranscript/Gene`) |
+| 17.8 | `--quantMode GeneCounts` |
+| 17.9 | `--outBAMcompression` / `--limitBAMsortRAM` |
+| 17.10 | Chimeric Tier 3 (re-map soft-clipped regions) |
+| 17.11 | `--chimOutType WithinBAM` (supplementary FLAG 0x800) |
+| 17.12 | BySJout memory optimization (disk buffering for 100M+ reads) |
+| 17.13 | Phase 9 integration test fixes (realistic test genomes) |
 
 ---
 

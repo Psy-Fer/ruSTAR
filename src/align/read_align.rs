@@ -10,8 +10,10 @@ use crate::params::{IntronMotifFilter, IntronStrandFilter, Parameters};
 /// Paired-end alignment result
 #[derive(Debug, Clone)]
 pub struct PairedAlignment {
-    /// Unified transcript covering both mates
-    pub transcript: Transcript,
+    /// Transcript for mate1
+    pub mate1_transcript: Transcript,
+    /// Transcript for mate2
+    pub mate2_transcript: Transcript,
     /// Read positions for mate1 in transcript (start, end)
     pub mate1_region: (usize, usize),
     /// Read positions for mate2 in transcript (start, end)
@@ -445,12 +447,20 @@ pub fn align_paired_read(
     // Deterministic tie-breaking for equal-score pairs:
     // smallest chr index → smallest position → forward strand first
     paired_alignments.sort_by(|a, b| {
-        b.transcript
+        b.mate1_transcript
             .score
-            .cmp(&a.transcript.score)
-            .then_with(|| a.transcript.chr_idx.cmp(&b.transcript.chr_idx))
-            .then_with(|| a.transcript.genome_start.cmp(&b.transcript.genome_start))
-            .then_with(|| a.transcript.is_reverse.cmp(&b.transcript.is_reverse))
+            .cmp(&a.mate1_transcript.score)
+            .then_with(|| a.mate1_transcript.chr_idx.cmp(&b.mate1_transcript.chr_idx))
+            .then_with(|| {
+                a.mate1_transcript
+                    .genome_start
+                    .cmp(&b.mate1_transcript.genome_start)
+            })
+            .then_with(|| {
+                a.mate1_transcript
+                    .is_reverse
+                    .cmp(&b.mate1_transcript.is_reverse)
+            })
     });
 
     Ok(paired_alignments)
@@ -478,7 +488,8 @@ fn combine_mate_transcripts(
     let insert_size = calculate_insert_size(mate1_trans, mate2_trans);
 
     Ok(PairedAlignment {
-        transcript: mate1_trans.clone(),
+        mate1_transcript: mate1_trans.clone(),
+        mate2_transcript: mate2_trans.clone(),
         mate1_region,
         mate2_region,
         is_proper_pair,
@@ -527,7 +538,7 @@ fn calculate_insert_size(mate1_trans: &Transcript, mate2_trans: &Transcript) -> 
 /// Filter paired transcripts by quality thresholds
 fn filter_paired_transcripts(paired_alns: &mut Vec<PairedAlignment>, params: &Parameters) {
     paired_alns.retain(|pa| {
-        let t = &pa.transcript;
+        let t = &pa.mate1_transcript;
         let read_length =
             (pa.mate1_region.1 - pa.mate1_region.0 + pa.mate2_region.1 - pa.mate2_region.0) as f64;
 

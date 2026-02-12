@@ -269,12 +269,13 @@ impl SamWriter {
         for (pair_idx, paired_aln) in paired_alignments.iter().take(max_output).enumerate() {
             let hit_index = pair_idx + 1; // 1-based
 
-            // Create record for mate1
+            // Create record for mate1 (this=mate1, mate=mate2)
             let rec1 = build_paired_mate_record(
                 read_name,
                 mate1_seq,
                 mate1_qual,
-                &paired_aln.transcript,
+                &paired_aln.mate1_transcript,
+                &paired_aln.mate2_transcript,
                 genome,
                 mapq,
                 true, // is_first_mate
@@ -286,12 +287,13 @@ impl SamWriter {
             )?;
             records.push(rec1);
 
-            // Create record for mate2
+            // Create record for mate2 (this=mate2, mate=mate1)
             let rec2 = build_paired_mate_record(
                 read_name,
                 mate2_seq,
                 mate2_qual,
-                &paired_aln.transcript,
+                &paired_aln.mate2_transcript,
+                &paired_aln.mate1_transcript,
                 genome,
                 mapq,
                 false, // is_first_mate
@@ -674,6 +676,7 @@ fn build_paired_mate_record(
     mate_seq: &[u8],
     mate_qual: &[u8],
     transcript: &Transcript,
+    mate_transcript: &Transcript,
     genome: &Genome,
     mapq: u8,
     is_first_mate: bool,
@@ -699,8 +702,8 @@ fn build_paired_mate_record(
         flags |= sam::alignment::record::Flags::REVERSE_COMPLEMENTED; // 0x10
     }
 
-    // Mate on opposite strand for proper pairs (simplified assumption)
-    if !transcript.is_reverse {
+    // Mate reverse flag from the actual mate's alignment strand
+    if mate_transcript.is_reverse {
         flags |= sam::alignment::record::Flags::MATE_REVERSE_COMPLEMENTED; // 0x20
     }
 
@@ -742,12 +745,12 @@ fn build_paired_mate_record(
     let cigar = convert_cigar(&transcript.cigar)?;
     *record.cigar_mut() = cigar;
 
-    // RNEXT (mate reference sequence = same as this mate for proper pairs)
-    *record.mate_reference_sequence_id_mut() = Some(transcript.chr_idx);
+    // RNEXT (mate reference sequence from the mate's actual alignment)
+    *record.mate_reference_sequence_id_mut() = Some(mate_transcript.chr_idx);
 
-    // PNEXT (mate position = approximate, use transcript start for now)
-    // In full implementation, we'd track actual mate position
-    let mate_pos = (transcript.genome_start + 1) as usize;
+    // PNEXT (mate position from the mate's actual alignment, per-chromosome coords)
+    let mate_chr_start = genome.chr_start[mate_transcript.chr_idx];
+    let mate_pos = (mate_transcript.genome_start - mate_chr_start + 1) as usize;
     *record.mate_alignment_start_mut() = Some(
         mate_pos
             .try_into()
@@ -973,18 +976,18 @@ mod tests {
 
         let genome = make_test_genome();
 
-        let transcript = Transcript {
+        let mate1_transcript = Transcript {
             chr_idx: 0,
-            genome_start: 10,
-            genome_end: 60,
+            genome_start: 0,
+            genome_end: 4,
             is_reverse: false,
             exons: vec![Exon {
-                genome_start: 10,
-                genome_end: 60,
+                genome_start: 0,
+                genome_end: 4,
                 read_start: 0,
-                read_end: 50,
+                read_end: 4,
             }],
-            cigar: vec![CigarOp::Match(50)],
+            cigar: vec![CigarOp::Match(4)],
             score: 100,
             n_mismatch: 0,
             n_gap: 0,
@@ -994,15 +997,37 @@ mod tests {
             read_seq: vec![0, 1, 2, 3],
         };
 
+        let mate2_transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 4,
+            genome_end: 7,
+            is_reverse: true,
+            exons: vec![Exon {
+                genome_start: 4,
+                genome_end: 7,
+                read_start: 0,
+                read_end: 3,
+            }],
+            cigar: vec![CigarOp::Match(3)],
+            score: 90,
+            n_mismatch: 1,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 2],
+        };
+
         let mate_seq = vec![0, 1, 2, 3];
         let mate_qual = vec![30, 30, 30, 30];
 
-        // Test first mate
+        // Test first mate (forward), mate2 is reverse → 0x20 should be set
         let rec1 = build_paired_mate_record(
             "read1",
             &mate_seq,
             &mate_qual,
-            &transcript,
+            &mate1_transcript,
+            &mate2_transcript,
             &genome,
             255,
             true, // is_first_mate
@@ -1018,15 +1043,18 @@ mod tests {
         assert!(rec1.flags().is_properly_segmented());
         assert!(rec1.flags().is_first_segment());
         assert!(!rec1.flags().is_last_segment());
-        assert!(!rec1.flags().is_secondary()); // hit_index=1 → not secondary
+        assert!(!rec1.flags().is_reverse_complemented()); // mate1 is forward
+        assert!(rec1.flags().is_mate_reverse_complemented()); // mate2 is reverse
+        assert!(!rec1.flags().is_secondary());
         assert_eq!(rec1.template_length(), 300);
 
-        // Test second mate
+        // Test second mate (reverse), mate1 is forward → 0x20 should NOT be set
         let rec2 = build_paired_mate_record(
             "read1",
             &mate_seq,
             &mate_qual,
-            &transcript,
+            &mate2_transcript,
+            &mate1_transcript,
             &genome,
             255,
             false, // is_first_mate
@@ -1042,7 +1070,9 @@ mod tests {
         assert!(rec2.flags().is_properly_segmented());
         assert!(!rec2.flags().is_first_segment());
         assert!(rec2.flags().is_last_segment());
-        assert!(!rec2.flags().is_secondary()); // hit_index=1 → not secondary
+        assert!(rec2.flags().is_reverse_complemented()); // mate2 is reverse
+        assert!(!rec2.flags().is_mate_reverse_complemented()); // mate1 is forward
+        assert!(!rec2.flags().is_secondary());
         assert_eq!(rec2.template_length(), -300);
     }
 
@@ -1052,35 +1082,59 @@ mod tests {
 
         let genome = make_test_genome();
 
-        let transcript = Transcript {
+        // Mate1 at position 0 (chr_start=0, so per-chr pos = 1)
+        let this_transcript = Transcript {
             chr_idx: 0,
-            genome_start: 100,
-            genome_end: 200,
+            genome_start: 0,
+            genome_end: 4,
             is_reverse: false,
             exons: vec![Exon {
-                genome_start: 100,
-                genome_end: 200,
+                genome_start: 0,
+                genome_end: 4,
                 read_start: 0,
-                read_end: 100,
+                read_end: 4,
             }],
-            cigar: vec![CigarOp::Match(100)],
+            cigar: vec![CigarOp::Match(4)],
             score: 200,
             n_mismatch: 0,
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
             junction_annotated: vec![],
-            read_seq: vec![0; 100],
+            read_seq: vec![0; 4],
         };
 
-        let mate_seq = vec![0; 100];
-        let mate_qual = vec![30; 100];
+        // Mate2 at position 4 (chr_start=0, so per-chr pos = 5)
+        let mate_transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 4,
+            genome_end: 7,
+            is_reverse: true,
+            exons: vec![Exon {
+                genome_start: 4,
+                genome_end: 7,
+                read_start: 0,
+                read_end: 3,
+            }],
+            cigar: vec![CigarOp::Match(3)],
+            score: 150,
+            n_mismatch: 1,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0; 3],
+        };
+
+        let mate_seq = vec![0; 4];
+        let mate_qual = vec![30; 4];
 
         let rec = build_paired_mate_record(
             "read1",
             &mate_seq,
             &mate_qual,
-            &transcript,
+            &this_transcript,
+            &mate_transcript,
             &genome,
             60,
             true,
@@ -1092,17 +1146,27 @@ mod tests {
         )
         .unwrap();
 
-        // Check RNEXT points to same chromosome
+        // RNEXT = mate's chr_idx
         assert_eq!(rec.mate_reference_sequence_id(), Some(0));
 
-        // Check PNEXT is set (1-based position)
-        assert_eq!(
-            rec.mate_alignment_start().map(|p| usize::from(p)),
-            Some(101)
-        );
+        // PNEXT = mate's per-chr position (genome_start=4, chr_start=0 → pos=5)
+        assert_eq!(rec.mate_alignment_start().map(|p| usize::from(p)), Some(5));
 
         // Check TLEN
         assert_eq!(rec.template_length(), 250);
+
+        // Tags should reflect THIS transcript (mate1), not the mate
+        let data = rec.data();
+        assert_eq!(
+            data.get(&Tag::ALIGNMENT_SCORE),
+            Some(&Value::from(200_i32)),
+            "AS should be from this transcript (200), not mate (150)"
+        );
+        assert_eq!(
+            data.get(&Tag::EDIT_DISTANCE),
+            Some(&Value::from(0_i32)),
+            "NM should be from this transcript (0), not mate (1)"
+        );
     }
 
     #[test]
@@ -2036,5 +2100,308 @@ mod tests {
             data.get(&Tag::new(b'M', b'D')),
             Some(&Value::String(BString::from("4")))
         );
+    }
+
+    #[test]
+    fn test_build_paired_mate_record_cross_strand() {
+        use crate::align::transcript::Exon;
+
+        let genome = make_test_genome();
+
+        // Mate1: forward, chr 0, pos 0
+        let mate1_trans = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 4,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 0,
+                genome_end: 4,
+                read_start: 0,
+                read_end: 4,
+            }],
+            cigar: vec![CigarOp::Match(4)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 2, 3],
+        };
+
+        // Mate2: reverse, chr 0, pos 4
+        let mate2_trans = Transcript {
+            chr_idx: 0,
+            genome_start: 4,
+            genome_end: 7,
+            is_reverse: true,
+            exons: vec![Exon {
+                genome_start: 4,
+                genome_end: 7,
+                read_start: 0,
+                read_end: 3,
+            }],
+            cigar: vec![CigarOp::Match(3)],
+            score: 90,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 2],
+        };
+
+        let seq = vec![0, 1, 2, 3];
+        let qual = vec![30, 30, 30, 30];
+
+        // Mate1 record: mate is reverse → 0x20 set, PNEXT=5
+        let rec1 = build_paired_mate_record(
+            "read1",
+            &seq,
+            &qual,
+            &mate1_trans,
+            &mate2_trans,
+            &genome,
+            255,
+            true,
+            true,
+            7,
+            1,
+            1,
+            false,
+        )
+        .unwrap();
+
+        assert!(rec1.flags().is_mate_reverse_complemented());
+        assert!(!rec1.flags().is_reverse_complemented());
+        assert_eq!(rec1.mate_alignment_start().map(|p| usize::from(p)), Some(5)); // genome_start=4, chr_start=0 → 5
+
+        // Mate2 record: mate is forward → 0x20 NOT set, PNEXT=1
+        let rec2 = build_paired_mate_record(
+            "read1",
+            &seq,
+            &qual,
+            &mate2_trans,
+            &mate1_trans,
+            &genome,
+            255,
+            false,
+            true,
+            -7,
+            1,
+            1,
+            false,
+        )
+        .unwrap();
+
+        assert!(!rec2.flags().is_mate_reverse_complemented());
+        assert!(rec2.flags().is_reverse_complemented());
+        assert_eq!(rec2.mate_alignment_start().map(|p| usize::from(p)), Some(1)); // genome_start=0, chr_start=0 → 1
+    }
+
+    #[test]
+    fn test_build_paired_mate_record_per_mate_tags() {
+        use crate::align::transcript::Exon;
+
+        let genome = make_test_genome();
+
+        // Mate1: score=100, 0 mismatches, no junctions
+        let mate1_trans = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 4,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 0,
+                genome_end: 4,
+                read_start: 0,
+                read_end: 4,
+            }],
+            cigar: vec![CigarOp::Match(4)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 2, 3],
+        };
+
+        // Mate2: score=80, 2 mismatches, 1 deletion
+        let mate2_trans = Transcript {
+            chr_idx: 0,
+            genome_start: 4,
+            genome_end: 7,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 4,
+                genome_end: 7,
+                read_start: 0,
+                read_end: 3,
+            }],
+            cigar: vec![CigarOp::Match(2), CigarOp::Del(1), CigarOp::Match(1)],
+            score: 80,
+            n_mismatch: 2,
+            n_gap: 1,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 2],
+        };
+
+        let seq1 = vec![0, 1, 2, 3];
+        let qual1 = vec![30, 30, 30, 30];
+        let seq2 = vec![0, 1, 2];
+        let qual2 = vec![30, 30, 30];
+
+        // Mate1 record should have mate1's tags
+        let rec1 = build_paired_mate_record(
+            "read1",
+            &seq1,
+            &qual1,
+            &mate1_trans,
+            &mate2_trans,
+            &genome,
+            255,
+            true,
+            true,
+            7,
+            1,
+            1,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            rec1.data().get(&Tag::ALIGNMENT_SCORE),
+            Some(&Value::from(100_i32)),
+            "Mate1 AS should be 100"
+        );
+        assert_eq!(
+            rec1.data().get(&Tag::EDIT_DISTANCE),
+            Some(&Value::from(0_i32)),
+            "Mate1 NM should be 0"
+        );
+
+        // Mate2 record should have mate2's tags
+        let rec2 = build_paired_mate_record(
+            "read1",
+            &seq2,
+            &qual2,
+            &mate2_trans,
+            &mate1_trans,
+            &genome,
+            255,
+            false,
+            true,
+            -7,
+            1,
+            1,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            rec2.data().get(&Tag::ALIGNMENT_SCORE),
+            Some(&Value::from(80_i32)),
+            "Mate2 AS should be 80"
+        );
+        // NM = 2 mismatches + 1 deleted base = 3
+        assert_eq!(
+            rec2.data().get(&Tag::EDIT_DISTANCE),
+            Some(&Value::from(3_i32)),
+            "Mate2 NM should be 3 (2 mismatches + 1 del)"
+        );
+    }
+
+    #[test]
+    fn test_build_paired_mate_record_both_forward() {
+        use crate::align::transcript::Exon;
+
+        let genome = make_test_genome();
+
+        // Both mates forward
+        let mate1_trans = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 4,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 0,
+                genome_end: 4,
+                read_start: 0,
+                read_end: 4,
+            }],
+            cigar: vec![CigarOp::Match(4)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 2, 3],
+        };
+
+        let mate2_trans = Transcript {
+            chr_idx: 0,
+            genome_start: 4,
+            genome_end: 7,
+            is_reverse: false, // Also forward
+            exons: vec![Exon {
+                genome_start: 4,
+                genome_end: 7,
+                read_start: 0,
+                read_end: 3,
+            }],
+            cigar: vec![CigarOp::Match(3)],
+            score: 90,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 2],
+        };
+
+        let seq = vec![0, 1, 2, 3];
+        let qual = vec![30, 30, 30, 30];
+
+        // Both forward → neither should have 0x20 set
+        let rec1 = build_paired_mate_record(
+            "read1",
+            &seq,
+            &qual,
+            &mate1_trans,
+            &mate2_trans,
+            &genome,
+            255,
+            true,
+            true,
+            7,
+            1,
+            1,
+            false,
+        )
+        .unwrap();
+        assert!(!rec1.flags().is_mate_reverse_complemented());
+        assert!(!rec1.flags().is_reverse_complemented());
+
+        let rec2 = build_paired_mate_record(
+            "read1",
+            &seq,
+            &qual,
+            &mate2_trans,
+            &mate1_trans,
+            &genome,
+            255,
+            false,
+            true,
+            -7,
+            1,
+            1,
+            false,
+        )
+        .unwrap();
+        assert!(!rec2.flags().is_mate_reverse_complemented());
+        assert!(!rec2.flags().is_reverse_complemented());
     }
 }

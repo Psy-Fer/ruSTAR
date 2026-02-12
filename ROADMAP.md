@@ -29,7 +29,8 @@ Phase 1 (CLI) ✅
                                                                                                  └→ Phase 15.1 (NH/HI/AS/NM tags) ✅
                                                                                                       └→ Phase 15.2 (XS/SECONDARY/multNmax) ✅
                                                                                                            └→ Phase 15.3 (jM/jI/MD tags) ✅
-                                                                                                                └→ Phase 15.4+ (PE fixes, attribs) ← Next
+                                                                                                                └→ Phase 15.4 (PE FLAG/PNEXT) ✅
+                                                                                                                     └→ Phase 15.5+ (attribs, nM) ← Next
                                                                                                       └→ Phase 16 (accuracy parity)
                                                                                                            └→ Phase 17 (features + polish)
                                                                                                                 └→ Phase 14 (STARsolo) [DEFERRED]
@@ -1421,15 +1422,34 @@ BySJout mode (`--outFilterType BySJout`):
 **Files**: `src/io/sam.rs`, `src/align/transcript.rs`, `src/align/stitch.rs`, `src/align/read_align.rs`, `src/io/bam.rs`, `Cargo.toml`
 **Depends on**: 15.1
 
-### Phase 15.4: Paired-End FLAG/PNEXT Fixes
+### Phase 15.4: Paired-End FLAG/PNEXT Fixes ✅ COMPLETE (2026-02-12)
 
-**Problem**: Two bugs in `src/io/sam.rs`:
-- Line 484-486: Mate reverse flag (0x20) always assumes opposite strand (should use actual mate strand)
-- Line 527: PNEXT set to same transcript's start (should be mate's position)
+**Problem**: Three bugs in paired-end SAM record generation:
+1. FLAG 0x20 (mate reverse) assumed mate is on opposite strand — wrong, should use mate's actual alignment strand
+2. PNEXT used the current read's own global genome position instead of the mate's per-chromosome position
+3. RNEXT used the current read's chr_idx instead of the mate's
+4. Per-mate tags (AS, NM, XS, jM, jI, MD) all computed from mate1's transcript even for mate2's record
 
-**Fix**: Pass both mate transcripts into record builder. Set 0x20 from actual mate strand, PNEXT from actual mate position.
+**Root cause**: `PairedAlignment` only stored a single `transcript` (mate1's). Mate2's transcript was discarded in `combine_mate_transcripts()`.
 
-**Files**: `src/io/sam.rs`
+**Fix**:
+- `PairedAlignment` struct: replaced `transcript: Transcript` with `mate1_transcript: Transcript` + `mate2_transcript: Transcript`
+- `combine_mate_transcripts()`: now stores both mate transcripts
+- `build_paired_mate_record()`: added `mate_transcript: &Transcript` parameter
+  - FLAG 0x20: set from `mate_transcript.is_reverse` (not `!transcript.is_reverse`)
+  - RNEXT: set from `mate_transcript.chr_idx`
+  - PNEXT: `mate_transcript.genome_start - mate_chr_start + 1` (per-chr coords)
+  - Tags (AS, NM, XS, jM, jI, MD): computed from `transcript` (this mate's own)
+- `build_paired_records()` caller: mate1 gets `(mate1_trans, mate2_trans)`, mate2 gets `(mate2_trans, mate1_trans)`
+- `lib.rs`: updated `pair.transcript` → `pair.mate1_transcript` for junction recording and BySJout
+
+**Verified**:
+- 230/230 unit tests passing (+3 new: cross-strand, per-mate-tags, both-forward)
+- SE alignment unchanged (SE code path not modified)
+- Clippy: only pre-existing non-critical warnings
+
+**Files**: `src/align/read_align.rs`, `src/io/sam.rs`, `src/lib.rs`
+**Depends on**: 15.3
 
 ### Phase 15.5: --outSAMattributes Enforcement
 

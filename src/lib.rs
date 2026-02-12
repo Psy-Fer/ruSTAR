@@ -774,15 +774,20 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                 // Record junction statistics (unified transcript covers both mates)
                 let is_unique = paired_alns.len() == 1;
                 for pair in &paired_alns {
-                    record_transcript_junctions(&pair.transcript, &index, &sj_stats, is_unique);
+                    record_transcript_junctions(
+                        &pair.mate1_transcript,
+                        &index,
+                        &sj_stats,
+                        is_unique,
+                    );
                 }
 
                 // Extract junction keys from primary alignment for BySJout
                 let primary_junction_keys = if by_sjout
                     && !paired_alns.is_empty()
-                    && paired_alns[0].transcript.n_junction > 0
+                    && paired_alns[0].mate1_transcript.n_junction > 0
                 {
-                    extract_junction_keys(&paired_alns[0].transcript, &index)
+                    extract_junction_keys(&paired_alns[0].mate1_transcript, &index)
                 } else {
                     Vec::new()
                 };

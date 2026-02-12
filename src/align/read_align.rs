@@ -723,6 +723,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -743,6 +744,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -774,6 +776,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -794,6 +797,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -823,6 +827,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -843,6 +848,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -873,6 +879,7 @@ mod tests {
             n_gap: 0,
             n_junction: 2,
             junction_motifs: vec![SpliceMotif::GtAg, SpliceMotif::CtAc], // +strand and -strand
+            junction_annotated: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -894,6 +901,7 @@ mod tests {
             n_gap: 0,
             n_junction: 2,
             junction_motifs: vec![SpliceMotif::GtAg, SpliceMotif::GcAg], // both + strand
+            junction_annotated: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -954,6 +962,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -974,6 +983,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![0; 100],
         };
 

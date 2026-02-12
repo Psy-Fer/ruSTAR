@@ -163,6 +163,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![],
         };
 

@@ -4,15 +4,19 @@ use crate::align::transcript::{CigarOp, Transcript};
 use crate::error::Error;
 use crate::genome::Genome;
 use crate::io::fastq::{complement_base, decode_base};
+use crate::junction::encode_motif;
 use crate::mapq::calculate_mapq;
 use crate::params::Parameters;
+use bstr::BString;
 use noodles::sam;
 use noodles::sam::alignment::io::Write;
 use noodles::sam::alignment::record::MappingQuality;
 use noodles::sam::alignment::record::data::field::Tag;
 use noodles::sam::alignment::record_buf::data::field::Value;
+use noodles::sam::alignment::record_buf::data::field::value::Array;
 use noodles::sam::alignment::record_buf::{QualityScores, RecordBuf, Sequence};
 use noodles::sam::header::record::value::{Map, map::Program};
+use std::fmt::Write as FmtWrite;
 use std::fs::File;
 use std::io::BufWriter;
 use std::num::NonZeroUsize;
@@ -469,6 +473,18 @@ fn transcript_to_record(
         }
     }
 
+    // jM tag: junction motifs
+    if let Some(jm) = build_jm_tag(transcript) {
+        data.insert(Tag::new(b'j', b'M'), jm);
+    }
+    // jI tag: intron coordinates
+    if let Some(ji) = build_ji_tag(transcript, chr_start) {
+        data.insert(Tag::new(b'j', b'I'), ji);
+    }
+    // MD tag: mismatch descriptor
+    let md = build_md_tag(transcript, read_seq, genome, transcript.is_reverse);
+    data.insert(Tag::new(b'M', b'D'), Value::String(BString::from(md)));
+
     Ok(record)
 }
 
@@ -500,6 +516,129 @@ fn derive_xs_strand(transcript: &Transcript) -> Option<char> {
         }
     }
     strand
+}
+
+/// Build jM tag: array of junction motif codes (one per intron/RefSkip in CIGAR).
+///
+/// Encoding: 0=non-canonical, 1=GT/AG, 2=CT/AC, 3=GC/AG, 4=CT/GC, 5=AT/AC, 6=GT/AT.
+/// Add +20 if junction is annotated in GTF.
+fn build_jm_tag(transcript: &Transcript) -> Option<Value> {
+    if transcript.junction_motifs.is_empty() {
+        return None;
+    }
+    let motifs: Vec<i8> = transcript
+        .junction_motifs
+        .iter()
+        .zip(
+            transcript
+                .junction_annotated
+                .iter()
+                .chain(std::iter::repeat(&false)),
+        )
+        .map(|(motif, &annotated)| {
+            let code = encode_motif(*motif) as i8;
+            if annotated { code + 20 } else { code }
+        })
+        .collect();
+    Some(Value::Array(Array::Int8(motifs)))
+}
+
+/// Build jI tag: array of intron start/end coordinates (1-based, per-chromosome).
+///
+/// Format: [start1, end1, start2, end2, ...] where start is first intronic base
+/// and end is last intronic base (both 1-based, inclusive).
+fn build_ji_tag(transcript: &Transcript, chr_start: u64) -> Option<Value> {
+    if transcript.n_junction == 0 {
+        return None;
+    }
+    let mut coords: Vec<i32> = Vec::new();
+    let mut genome_pos = transcript.genome_start;
+    for op in &transcript.cigar {
+        match op {
+            CigarOp::RefSkip(n) => {
+                let intron_start = (genome_pos - chr_start + 1) as i32; // 1-based
+                let intron_end = (genome_pos + *n as u64 - chr_start) as i32; // 1-based inclusive
+                coords.push(intron_start);
+                coords.push(intron_end);
+                genome_pos += *n as u64;
+            }
+            CigarOp::Match(n) | CigarOp::Equal(n) | CigarOp::Diff(n) | CigarOp::Del(n) => {
+                genome_pos += *n as u64;
+            }
+            _ => {} // Ins, SoftClip, HardClip don't consume reference
+        }
+    }
+    Some(Value::Array(Array::Int32(coords)))
+}
+
+/// Build MD tag string: matches/mismatches/deletions relative to reference.
+///
+/// Format: "10A5^AC6" = 10 match, A mismatch, 5 match, 2bp deletion (AC), 6 match.
+/// The MD tag describes the reference sequence for positions that differ from the read.
+fn build_md_tag(
+    transcript: &Transcript,
+    read_seq: &[u8],
+    genome: &Genome,
+    is_reverse: bool,
+) -> String {
+    // Build the SAM-order sequence (RC for reverse strand)
+    let sam_seq: Vec<u8> = if is_reverse {
+        read_seq.iter().rev().map(|&b| complement_base(b)).collect()
+    } else {
+        read_seq.to_vec()
+    };
+
+    let mut md = String::new();
+    let mut match_count: u32 = 0;
+    let mut genome_pos = transcript.genome_start;
+    let mut read_pos: usize = 0;
+
+    for op in &transcript.cigar {
+        match op {
+            CigarOp::Match(n) | CigarOp::Equal(n) | CigarOp::Diff(n) => {
+                for _ in 0..*n {
+                    let ref_base = genome.get_base(genome_pos).unwrap_or(4);
+                    let read_base = if read_pos < sam_seq.len() {
+                        sam_seq[read_pos]
+                    } else {
+                        4
+                    };
+                    if ref_base == read_base {
+                        match_count += 1;
+                    } else {
+                        write!(md, "{}", match_count).unwrap();
+                        match_count = 0;
+                        md.push(decode_base(ref_base) as char);
+                    }
+                    genome_pos += 1;
+                    read_pos += 1;
+                }
+            }
+            CigarOp::Del(n) => {
+                write!(md, "{}", match_count).unwrap();
+                match_count = 0;
+                md.push('^');
+                for _ in 0..*n {
+                    let ref_base = genome.get_base(genome_pos).unwrap_or(4);
+                    md.push(decode_base(ref_base) as char);
+                    genome_pos += 1;
+                }
+            }
+            CigarOp::Ins(n) => {
+                read_pos += *n as usize;
+            }
+            CigarOp::RefSkip(n) => {
+                genome_pos += *n as u64;
+            }
+            CigarOp::SoftClip(n) => {
+                read_pos += *n as usize;
+            }
+            CigarOp::HardClip(_) => {}
+        }
+    }
+    // Emit trailing match count
+    write!(md, "{}", match_count).unwrap();
+    md
 }
 
 /// Convert ruSTAR CigarOp to noodles Cigar
@@ -653,6 +792,18 @@ fn build_paired_mate_record(
         }
     }
 
+    // jM tag: junction motifs
+    if let Some(jm) = build_jm_tag(transcript) {
+        data.insert(Tag::new(b'j', b'M'), jm);
+    }
+    // jI tag: intron coordinates
+    if let Some(ji) = build_ji_tag(transcript, chr_start) {
+        data.insert(Tag::new(b'j', b'I'), ji);
+    }
+    // MD tag: mismatch descriptor
+    let md = build_md_tag(transcript, mate_seq, genome, transcript.is_reverse);
+    data.insert(Tag::new(b'M', b'D'), Value::String(BString::from(md)));
+
     Ok(record)
 }
 
@@ -744,6 +895,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![0, 1, 2, 3],
         };
 
@@ -838,6 +990,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![0, 1, 2, 3],
         };
 
@@ -916,6 +1069,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -968,6 +1122,7 @@ mod tests {
             n_gap: 1,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![0, 1, 2, 3],
         };
 
@@ -1028,6 +1183,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![],
         };
         assert_eq!(compute_edit_distance(&t1), 3);
@@ -1051,6 +1207,7 @@ mod tests {
             n_gap: 2,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![],
         };
         assert_eq!(compute_edit_distance(&t2), 13); // 1 + 5 + 7
@@ -1072,6 +1229,7 @@ mod tests {
             n_gap: 0,
             n_junction: 1,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![],
         };
         assert_eq!(compute_edit_distance(&t3), 0);
@@ -1093,6 +1251,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![],
         };
         assert_eq!(compute_edit_distance(&t4), 2);
@@ -1115,6 +1274,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![0, 1, 2, 3],
         };
 
@@ -1166,6 +1326,7 @@ mod tests {
                 n_gap: 0,
                 n_junction: 0,
                 junction_motifs: vec![],
+                junction_annotated: vec![],
                 read_seq: vec![0; 4],
             },
             Transcript {
@@ -1180,6 +1341,7 @@ mod tests {
                 n_gap: 0,
                 n_junction: 0,
                 junction_motifs: vec![],
+                junction_annotated: vec![],
                 read_seq: vec![0; 4],
             },
             Transcript {
@@ -1194,6 +1356,7 @@ mod tests {
                 n_gap: 0,
                 n_junction: 0,
                 junction_motifs: vec![],
+                junction_annotated: vec![],
                 read_seq: vec![0; 4],
             },
         ];
@@ -1242,6 +1405,7 @@ mod tests {
             n_gap: 0,
             n_junction: 1,
             junction_motifs: vec![SpliceMotif::GtAg],
+            junction_annotated: vec![false],
             read_seq: vec![0; 4],
         };
 
@@ -1285,6 +1449,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![0; 4],
         };
 
@@ -1332,6 +1497,7 @@ mod tests {
             n_gap: 0,
             n_junction: 1,
             junction_motifs: vec![SpliceMotif::CtAc],
+            junction_annotated: vec![false],
             read_seq: vec![0; 4],
         };
 
@@ -1381,6 +1547,7 @@ mod tests {
             n_gap: 0,
             n_junction: 2,
             junction_motifs: vec![SpliceMotif::GtAg, SpliceMotif::CtAc], // +strand and -strand
+            junction_annotated: vec![false, false],
             read_seq: vec![0; 4],
         };
 
@@ -1428,6 +1595,7 @@ mod tests {
             n_gap: 0,
             n_junction: 1,
             junction_motifs: vec![SpliceMotif::GtAg],
+            junction_annotated: vec![false],
             read_seq: vec![0; 4],
         };
 
@@ -1479,6 +1647,7 @@ mod tests {
                 n_gap: 0,
                 n_junction: 0,
                 junction_motifs: vec![],
+                junction_annotated: vec![],
                 read_seq: vec![0; 4],
             })
             .collect();
@@ -1527,5 +1696,345 @@ mod tests {
         assert!(!records[0].flags().is_secondary());
         assert!(records[1].flags().is_secondary());
         assert!(records[2].flags().is_secondary());
+    }
+
+    #[test]
+    fn test_build_jm_tag_basic() {
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 200,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![
+                CigarOp::Match(25),
+                CigarOp::RefSkip(100),
+                CigarOp::Match(25),
+            ],
+            score: 50,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 1,
+            junction_motifs: vec![SpliceMotif::GtAg],
+            junction_annotated: vec![false],
+            read_seq: vec![],
+        };
+
+        let jm = build_jm_tag(&transcript);
+        assert!(jm.is_some());
+        // GT/AG = motif code 1, not annotated → 1
+        assert_eq!(jm.unwrap(), Value::Array(Array::Int8(vec![1])));
+    }
+
+    #[test]
+    fn test_build_jm_tag_annotated() {
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 200,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![
+                CigarOp::Match(25),
+                CigarOp::RefSkip(100),
+                CigarOp::Match(25),
+            ],
+            score: 50,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 1,
+            junction_motifs: vec![SpliceMotif::GtAg],
+            junction_annotated: vec![true],
+            read_seq: vec![],
+        };
+
+        let jm = build_jm_tag(&transcript);
+        assert!(jm.is_some());
+        // GT/AG = motif code 1, annotated → 1 + 20 = 21
+        assert_eq!(jm.unwrap(), Value::Array(Array::Int8(vec![21])));
+    }
+
+    #[test]
+    fn test_build_jm_tag_empty() {
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 50,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![CigarOp::Match(50)],
+            score: 50,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![],
+        };
+
+        assert!(build_jm_tag(&transcript).is_none());
+    }
+
+    #[test]
+    fn test_build_jm_tag_multiple_junctions() {
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 400,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![
+                CigarOp::Match(25),
+                CigarOp::RefSkip(100),
+                CigarOp::Match(25),
+                CigarOp::RefSkip(100),
+                CigarOp::Match(25),
+            ],
+            score: 50,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 2,
+            junction_motifs: vec![SpliceMotif::GtAg, SpliceMotif::CtAc],
+            junction_annotated: vec![true, false],
+            read_seq: vec![],
+        };
+
+        let jm = build_jm_tag(&transcript);
+        assert!(jm.is_some());
+        // GT/AG annotated=21, CT/AC not annotated=2
+        assert_eq!(jm.unwrap(), Value::Array(Array::Int8(vec![21, 2])));
+    }
+
+    #[test]
+    fn test_build_ji_tag_basic() {
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 100,
+            genome_end: 325,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![
+                CigarOp::Match(25),
+                CigarOp::RefSkip(200),
+                CigarOp::Match(25),
+            ],
+            score: 50,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 1,
+            junction_motifs: vec![SpliceMotif::GtAg],
+            junction_annotated: vec![false],
+            read_seq: vec![],
+        };
+
+        // chr_start=0, genome_start=100, intron starts at 125, ends at 324
+        let ji = build_ji_tag(&transcript, 0);
+        assert!(ji.is_some());
+        // Intron start: 100+25 - 0 + 1 = 126, Intron end: 100+25+200 - 0 = 325
+        assert_eq!(ji.unwrap(), Value::Array(Array::Int32(vec![126, 325])));
+    }
+
+    #[test]
+    fn test_build_ji_tag_empty() {
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 50,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![CigarOp::Match(50)],
+            score: 50,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![],
+        };
+
+        assert!(build_ji_tag(&transcript, 0).is_none());
+    }
+
+    #[test]
+    fn test_build_md_tag_perfect_match() {
+        // Genome: ACGTACGT (A=0,C=1,G=2,T=3)
+        let genome = make_test_genome();
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 4,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![CigarOp::Match(4)],
+            score: 4,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 2, 3],
+        };
+
+        // Read exactly matches genome[0..4] = ACGT
+        let read_seq = vec![0, 1, 2, 3];
+        let md = build_md_tag(&transcript, &read_seq, &genome, false);
+        assert_eq!(md, "4");
+    }
+
+    #[test]
+    fn test_build_md_tag_mismatches() {
+        // Genome: ACGTACGT
+        let genome = make_test_genome();
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 4,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![CigarOp::Match(4)],
+            score: 2,
+            n_mismatch: 2,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 0, 2, 0], // A,A,G,A vs genome A,C,G,T
+        };
+
+        // Position 1: read=A, ref=C → mismatch (C in MD)
+        // Position 3: read=A, ref=T → mismatch (T in MD)
+        let read_seq = vec![0, 0, 2, 0]; // AAGA
+        let md = build_md_tag(&transcript, &read_seq, &genome, false);
+        assert_eq!(md, "1C1T0");
+    }
+
+    #[test]
+    fn test_build_md_tag_deletion() {
+        // Genome: ACGTACGT
+        let genome = make_test_genome();
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 6,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![CigarOp::Match(2), CigarOp::Del(2), CigarOp::Match(2)],
+            score: 4,
+            n_mismatch: 0,
+            n_gap: 1,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 0, 1], // AC + AC (genome AC^GT AC)
+        };
+
+        // Read: A,C,[del G,T],A,C
+        let read_seq = vec![0, 1, 0, 1];
+        let md = build_md_tag(&transcript, &read_seq, &genome, false);
+        assert_eq!(md, "2^GT2");
+    }
+
+    #[test]
+    fn test_build_md_tag_insertion() {
+        // Genome: ACGTACGT
+        let genome = make_test_genome();
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 4,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![CigarOp::Match(2), CigarOp::Ins(2), CigarOp::Match(2)],
+            score: 4,
+            n_mismatch: 0,
+            n_gap: 1,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 3, 3, 2, 3], // AC + TT(ins) + GT
+        };
+
+        // Insertions are invisible in MD — just match counts
+        let read_seq = vec![0, 1, 3, 3, 2, 3];
+        let md = build_md_tag(&transcript, &read_seq, &genome, false);
+        assert_eq!(md, "4");
+    }
+
+    #[test]
+    fn test_build_md_tag_soft_clip() {
+        // Genome: ACGTACGT
+        let genome = make_test_genome();
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 2, // Starts at G
+            genome_end: 6,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![
+                CigarOp::SoftClip(2),
+                CigarOp::Match(4),
+                CigarOp::SoftClip(2),
+            ],
+            score: 4,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 0, 2, 3, 0, 1, 0, 0], // XX + GTAC + XX
+        };
+
+        // Soft clips don't appear in MD
+        let read_seq = vec![0, 0, 2, 3, 0, 1, 0, 0];
+        let md = build_md_tag(&transcript, &read_seq, &genome, false);
+        assert_eq!(md, "4");
+    }
+
+    #[test]
+    fn test_tags_jm_ji_md_in_record() {
+        // Verify tags appear in a full transcript_to_record call
+        let genome = make_test_genome();
+
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 4,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![CigarOp::Match(4)],
+            score: 4,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 2, 3],
+        };
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let record = transcript_to_record(
+            &transcript,
+            "read1",
+            &read_seq,
+            &read_qual,
+            &genome,
+            255,
+            1,
+            1,
+            false,
+        )
+        .unwrap();
+
+        let data = record.data();
+        // No junctions → no jM/jI tags
+        assert!(data.get(&Tag::new(b'j', b'M')).is_none());
+        assert!(data.get(&Tag::new(b'j', b'I')).is_none());
+        // MD should always be present
+        assert_eq!(
+            data.get(&Tag::new(b'M', b'D')),
+            Some(&Value::String(BString::from("4")))
+        );
     }
 }

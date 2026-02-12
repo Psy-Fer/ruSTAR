@@ -435,6 +435,7 @@ struct DpState {
     n_gap: u32,
     n_junction: u32,
     junction_motifs: Vec<crate::align::score::SpliceMotif>,
+    junction_annotated: Vec<bool>,
 }
 
 /// Expanded seed with specific genome position
@@ -567,6 +568,7 @@ pub fn stitch_seeds_with_jdb(
             n_gap: 0,
             n_junction: 0,
             junction_motifs: Vec::new(),
+            junction_annotated: Vec::new(),
         });
     }
 
@@ -581,6 +583,7 @@ pub fn stitch_seeds_with_jdb(
         let mut best_genome_gap = 0i64;
         let mut best_gap_mismatches = 0u32;
         let mut best_eff_length = curr.length;
+        let mut best_is_annotated = false;
 
         for j in 0..i {
             let prev = &expanded_seeds[j];
@@ -647,6 +650,7 @@ pub fn stitch_seeds_with_jdb(
             // Apply alignSJstitchMismatchNmax filter
             // STAR rejects junction stitches with too many mismatches for the motif type
             let mut annotation_bonus = 0i32;
+            let mut is_annotated = false;
             if let GapType::SpliceJunction {
                 ref motif,
                 intron_len,
@@ -663,7 +667,7 @@ pub fn stitch_seeds_with_jdb(
                 let right_overhang = eff_length;
 
                 // Check if this junction is annotated (for lower overhang threshold + bonus)
-                let is_annotated = junction_db.is_some_and(|db| {
+                is_annotated = junction_db.is_some_and(|db| {
                     // Convert genome positions to forward coordinates for junction lookup
                     let donor_sa_pos = prev.genome_end;
                     let donor_fwd = index.sa_pos_to_forward(
@@ -718,6 +722,7 @@ pub fn stitch_seeds_with_jdb(
                 best_genome_gap = genome_gap;
                 best_gap_mismatches = gap_mismatches;
                 best_eff_length = eff_length;
+                best_is_annotated = is_annotated;
             }
         }
 
@@ -797,11 +802,13 @@ pub fn stitch_seeds_with_jdb(
             let mut n_gap = dp[j].n_gap;
             let mut n_junction = dp[j].n_junction;
             let mut junction_motifs = dp[j].junction_motifs.clone();
+            let mut junction_annotated = dp[j].junction_annotated.clone();
             match best_gap_type {
                 GapType::Insertion(_) | GapType::Deletion(_) => n_gap += 1,
                 GapType::SpliceJunction { motif, .. } => {
                     n_junction += 1;
                     junction_motifs.push(motif);
+                    junction_annotated.push(best_is_annotated);
                 }
             }
             dp[i].score = best_score;
@@ -812,6 +819,7 @@ pub fn stitch_seeds_with_jdb(
             dp[i].n_gap = n_gap;
             dp[i].n_junction = n_junction;
             dp[i].junction_motifs = junction_motifs;
+            dp[i].junction_annotated = junction_annotated;
         }
         // If no best_j, dp[i] keeps its initial state (single seed)
     }
@@ -1067,6 +1075,7 @@ pub fn stitch_seeds_with_jdb(
         n_gap: best_state.n_gap,
         n_junction: best_state.n_junction,
         junction_motifs: best_state.junction_motifs.clone(),
+        junction_annotated: best_state.junction_annotated.clone(),
         read_seq: read_seq.to_vec(),
     };
 

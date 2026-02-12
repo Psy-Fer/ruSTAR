@@ -26,6 +26,8 @@ pub struct Transcript {
     pub n_junction: u32,
     /// Splice junction motifs (one per junction in CIGAR)
     pub junction_motifs: Vec<crate::align::score::SpliceMotif>,
+    /// Whether each junction is annotated in the GTF (for jM +20 offset)
+    pub junction_annotated: Vec<bool>,
     /// Original read sequence
     pub read_seq: Vec<u8>,
 }
@@ -216,6 +218,7 @@ mod tests {
             n_gap: 0,
             n_junction: 1,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![],
         };
 
@@ -260,6 +263,7 @@ mod tests {
             n_gap: 1,
             n_junction: 1,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![0; 100],
         };
 
@@ -306,6 +310,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![],
         };
 
@@ -328,6 +333,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![],
         };
 
@@ -350,6 +356,7 @@ mod tests {
             n_gap: 0,
             n_junction: 0,
             junction_motifs: vec![],
+            junction_annotated: vec![],
             read_seq: vec![],
         };
 

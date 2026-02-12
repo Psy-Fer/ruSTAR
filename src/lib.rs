@@ -771,7 +771,7 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                 // Record stats (count pairs, not individual reads)
                 stats.record_alignment(paired_alns.len(), max_multimaps);
 
-                // Record junction statistics (unified transcript covers both mates)
+                // Record junction statistics from both mates
                 let is_unique = paired_alns.len() == 1;
                 for pair in &paired_alns {
                     record_transcript_junctions(
@@ -780,14 +780,30 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                         &sj_stats,
                         is_unique,
                     );
+                    record_transcript_junctions(
+                        &pair.mate2_transcript,
+                        &index,
+                        &sj_stats,
+                        is_unique,
+                    );
                 }
 
-                // Extract junction keys from primary alignment for BySJout
-                let primary_junction_keys = if by_sjout
-                    && !paired_alns.is_empty()
-                    && paired_alns[0].mate1_transcript.n_junction > 0
-                {
-                    extract_junction_keys(&paired_alns[0].mate1_transcript, &index)
+                // Extract junction keys from primary alignment for BySJout (both mates)
+                let primary_junction_keys = if by_sjout && !paired_alns.is_empty() {
+                    let mut keys = Vec::new();
+                    if paired_alns[0].mate1_transcript.n_junction > 0 {
+                        keys.extend(extract_junction_keys(
+                            &paired_alns[0].mate1_transcript,
+                            &index,
+                        ));
+                    }
+                    if paired_alns[0].mate2_transcript.n_junction > 0 {
+                        keys.extend(extract_junction_keys(
+                            &paired_alns[0].mate2_transcript,
+                            &index,
+                        ));
+                    }
+                    keys
                 } else {
                     Vec::new()
                 };

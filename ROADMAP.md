@@ -30,7 +30,8 @@ Phase 1 (CLI) ✅
                                                                                                       └→ Phase 15.2 (XS/SECONDARY/multNmax) ✅
                                                                                                            └→ Phase 15.3 (jM/jI/MD tags) ✅
                                                                                                                 └→ Phase 15.4 (PE FLAG/PNEXT) ✅
-                                                                                                                     └→ Phase 15.5+ (attribs, nM) ← Next
+                                                                                                                     └→ PE alignment fix ✅
+                                                                                                                          └→ Phase 15.5+ (attribs, nM) ← Next
                                                                                                       └→ Phase 16 (accuracy parity)
                                                                                                            └→ Phase 17 (features + polish)
                                                                                                                 └→ Phase 14 (STARsolo) [DEFERRED]
@@ -302,7 +303,7 @@ ensure all future features are built with parallelism from the start.
 
 ## Phase 8: Paired-End Reads ✅
 
-**Status**: Complete
+**Status**: Complete (alignment logic superseded by PE alignment fix)
 
 **Goal**: Paired FASTQ, concordant/discordant pairing, proper SAM FLAG/TLEN/mate fields.
 
@@ -311,11 +312,12 @@ ensures we don't have to retrofit threading into paired-end logic later.
 
 **Key features implemented**:
 - Paired FASTQ reading (two input files)
-- Unified transcript for both mates
 - Proper pair detection (same chr, concordant orientation, distance)
 - SAM FLAGS for paired reads (0x1, 0x2, 0x8, 0x20, 0x40, 0x80)
 - TLEN (insert size) calculation
 - Mate position (RNEXT, PNEXT) fields
+
+**Note**: The original seed-pooling alignment approach (unified clustering of both mates' seeds) produced 0% mapped reads on real data. Superseded by the PE alignment fix which uses independent SE alignment per mate then pairing by chromosome + distance.
 
 **Files modified**: `src/io/fastq.rs`, `src/align/read_align.rs`, `src/io/sam.rs`, `src/lib.rs`
 
@@ -1451,6 +1453,41 @@ BySJout mode (`--outFilterType BySJout`):
 **Files**: `src/align/read_align.rs`, `src/io/sam.rs`, `src/lib.rs`
 **Depends on**: 15.3
 
+### PE Alignment Fix: Independent Mate Alignment + Pairing ✅
+
+**Status**: Complete
+
+**Problem**: The Phase 8 PE implementation pooled seeds from both mates into unified clusters, then tried to split back into per-mate sub-clusters for stitching. This failed because mates typically map 200-400bp apart — their seeds rarely coexist in the same genomic cluster. Result: **0% mapped reads** on real PE data.
+
+**Fix**: Rewrote `align_paired_read()` to align each mate independently using the proven SE `align_read()` function, then pair results by chromosome + distance constraints:
+1. Call `align_read()` for mate1 → get mate1 transcripts
+2. Call `align_read()` for mate2 → get mate2 transcripts
+3. If either empty → both unmapped
+4. Cross-product pairing: for each (t1, t2) on same chr, check distance via `check_proper_pair()`
+5. Deduplicate by (mate1 location, mate2 location), keeping highest combined score
+6. Sort by combined score (`t1.score + t2.score`), deterministic tie-breaking
+7. Score range filter + multimap truncation
+
+**Also changed**:
+- `filter_paired_transcripts()`: now checks both mates independently against quality thresholds
+- `lib.rs`: junction recording from both `mate1_transcript` and `mate2_transcript`
+- `lib.rs`: BySJout junction keys collected from both mates
+
+**Results** (10k yeast PE reads):
+- **87.1% mapped** (was 0%): 8127 unique (81.3%), 587 multi (5.9%), 1286 unmapped (12.9%)
+- **95.7% per-mate position agreement** with STAR (matches SE accuracy exactly)
+- **97.1% per-mate CIGAR agreement** among position-matching mates
+- 72 shared junctions with STAR (STAR: 90 total), 100% motif agreement
+- 12.9% unmapped (STAR: 0%) — needs PE joint DP stitching (Phase 16.6) for mate rescue
+- SE alignment unchanged (no regression): 8286 unique, 612 multi
+
+**Verified**: 230/230 unit tests passing, SE no regression, clippy only pre-existing warnings
+
+**Files**: `src/align/read_align.rs`, `src/lib.rs`
+**Depends on**: 15.4
+
+---
+
 ### Phase 15.5: --outSAMattributes Enforcement
 
 **Problem**: Parameter parsed but no tags generated until 15.1-15.3, then need to control which tags are emitted.
@@ -1509,9 +1546,9 @@ BySJout mode (`--outFilterType BySJout`):
 
 ### Phase 16.6: Paired-End Joint DP Stitching
 
-**Problem**: Mates aligned independently then combined. Misses rescue opportunities.
+**Problem**: Mates aligned independently then paired by chr+distance (PE alignment fix). This works (87.1% mapped, 95.7% per-mate position agreement) but leaves 12.9% unmapped (STAR: 0%) because it requires both mates to independently produce alignments. STAR uses joint mate-aware DP where seeds from both mates participate in a unified DP that bridges the inter-mate gap, enabling mate rescue.
 
-**Fix**: Consider seeds from both mates in DP with fragment length gap penalty.
+**Fix**: Implement STAR's joint DP stitching with fragment length gap penalty. Seeds from both mates in the same genomic window participate in DP together, with a gap penalty based on expected fragment size distribution.
 
 ---
 

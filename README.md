@@ -35,6 +35,16 @@ target/release/ruSTAR \
   --outFileNamePrefix /path/to/output_
 ```
 
+### Paired-end alignment
+
+```bash
+target/release/ruSTAR \
+  --genomeDir /path/to/genome_index \
+  --readFilesIn reads_1.fq reads_2.fq \
+  --outSAMtype SAM \
+  --outFileNamePrefix /path/to/output_
+```
+
 ### BAM output
 
 ```bash
@@ -57,9 +67,9 @@ target/release/ruSTAR \
 
 ## Accuracy Comparison vs STAR
 
-Tested on 10,000 yeast single-end RNA-seq reads (150bp):
+### Single-End (10k yeast reads, 150bp)
 
-### Alignment Rates
+#### Alignment Rates
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
@@ -68,14 +78,14 @@ Tested on 10,000 yeast single-end RNA-seq reads (150bp):
 | Soft-clipped reads | 26.1% | 26.0% |
 | Splice rate | 3.4% | 2.2% |
 
-### Position and CIGAR Agreement
+#### Position and CIGAR Agreement
 
 | Mode | Position agree | CIGAR agree | Splice rate |
 |------|---------------|-------------|-------------|
 | Normal (default) | 95.7% | 97.3% | 3.4% |
 | BySJout | 96.7% | 98.3% | 1.1% |
 
-### SAM Tag Agreement (position-matching reads)
+#### SAM Tag Agreement (position-matching reads)
 
 | Tag | Agreement | Notes |
 |-----|-----------|-------|
@@ -86,13 +96,42 @@ Tested on 10,000 yeast single-end RNA-seq reads (150bp):
 | FLAG (primary) | 99.8% | 22 strand flips on multi-mapper ties |
 | NH (with secondary) | 96.2% | 339 differ from different seeding |
 
-### Junction Statistics
+#### Junction Statistics (SE)
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
 | Shared junctions | 50 | 72 total |
 | ruSTAR-only junctions | 6 | -- |
 | Motif agreement (shared) | 100% | -- |
+
+### Paired-End (10k yeast read pairs, 150bp)
+
+#### Alignment Rates
+
+| Metric | ruSTAR | STAR |
+|--------|--------|------|
+| Unique mapped | 81.3% | 78.6% |
+| Multi-mapped | 5.9% | 5.3% |
+| Total mapped | 87.1% | 100% |
+| Unmapped pairs | 12.9% | 0% |
+
+#### Per-Mate Agreement
+
+| Metric | Value |
+|--------|-------|
+| Per-mate position agree | 95.7% |
+| Per-mate CIGAR agree | 97.1% |
+| Per-pair both mates correct | 93.3% |
+
+#### Junction Statistics (PE)
+
+| Metric | ruSTAR | STAR |
+|--------|--------|------|
+| Shared junctions | 72 | 90 total |
+| ruSTAR-only junctions | 6 | -- |
+| Motif agreement (shared) | 100% | -- |
+
+> **Note**: PE unmapped rate (12.9%) is because each mate must align independently before pairing. STAR uses joint DP stitching with mate rescue, which recovers pairs where only one mate has a clear alignment. Joint DP is planned for Phase 16.6.
 
 ## Supported Features
 
@@ -113,6 +152,7 @@ Tested on 10,000 yeast single-end RNA-seq reads (150bp):
 
 ## Known Limitations
 
+- PE unmapped rate higher than STAR (12.9% vs 0%) -- needs joint DP stitching for mate rescue
 - No coordinate-sorted BAM output (use `samtools sort` post-alignment)
 - No `Log.final.out` statistics file (MultiQC/RNA-SeQC)
 - No paired-end chimeric detection

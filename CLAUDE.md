@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.4 complete. Normal mode: 95.7% position agreement, 97.3% CIGAR agreement, 3.4% splice rate. BySJout mode: 96.7% position, 98.3% CIGAR, 1.1% splice rate. SAM tags: NH/HI/AS/NM/XS/jM/jI/MD all implemented. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement. PE FLAG/PNEXT/RNEXT fixed with per-mate tags.**
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.4 + PE alignment fix complete. SE: 95.7% position agreement, 97.3% CIGAR agreement. PE: 87.1% mapped (was 0%), 95.7% per-mate position agreement, 97.1% CIGAR agreement. SAM tags: NH/HI/AS/NM/XS/jM/jI/MD all implemented. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement.**
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -63,30 +63,38 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 15.2 (XS/SECONDARY/multNmax) ← **SECONDARY flag, XS strand tag, outSAMmultNmax limit**
 - Phase 15.3 (jM/jI/MD tags) ← **Junction motif/intron tags + mismatch descriptor for QC/GATK**
 - Phase 15.4 (PE FLAG/PNEXT fixes) ← **Mate strand flag, mate position, RNEXT, per-mate tags**
+- PE alignment fix ← **Independent mate alignment + pairing: 0% → 87.1% mapped, 95.7% per-mate position agreement**
 
 **Planned**:
 - Phase 15.5 (--outSAMattributes enforcement) ← Control which tags are emitted
 - Phase 16 (Accuracy + algorithm parity) ← jR scanning, rDNA MAPQ, seed params, PE joint DP
 - Phase 17 (Features + polish) ← Log.final.out, sorted BAM, PE chimeric, quantMode, stdout output
 
-**Current Status** (10k yeast reads, single-end):
+**Current Status** (10k yeast reads):
 
-Normal mode (default):
+Single-end (Normal mode):
 - ✅ **95.7% position agreement** with STAR (was 51% → 94.5% → 95.3% → 96.3% → 95.7%)
 - ✅ **97.3% CIGAR agreement** among position-matching reads
 - ✅ 82.9% unique mapped (STAR: 82.6%), 6.12% multi-mapped (STAR: 7.4%)
 - ✅ 26.1% soft clips (STAR: 26.0%)
 - ✅ **Splice rate 3.4%** (STAR: 2.2%) — exceeds STAR (over-splicing)
 
-BySJout mode (`--outFilterType BySJout`):
+Single-end (BySJout mode, `--outFilterType BySJout`):
 - ✅ **96.7% position agreement** (+1.0% vs Normal)
 - ✅ **98.3% CIGAR agreement** (+1.0% vs Normal)
 - ✅ 207 reads filtered with non-surviving junctions
 - ⚠️ **Splice rate 1.1%** — too aggressive without GTF (STAR: 2.2%)
 
-Both modes:
-- ✅ **100% motif agreement** on shared junctions (50/50)
-- ✅ **50 shared junctions** (STAR has 72 total)
+Paired-end (10k yeast read pairs):
+- ✅ **87.1% mapped** (8714/10000 pairs) — was 0% before PE alignment fix
+- ✅ **95.7% per-mate position agreement** with STAR (matches SE accuracy)
+- ✅ **97.1% per-mate CIGAR agreement** among position-matching mates
+- ✅ 81.3% unique mapped, 5.9% multi-mapped
+- ✅ **72 shared junctions** with STAR (STAR: 90 total), **100% motif agreement**
+- ⚠️ 12.9% unmapped pairs (STAR: 0%) — needs PE joint DP stitching (Phase 16.6)
+
+All modes:
+- ✅ **100% motif agreement** on shared junctions
 - ✅ SAM SEQ properly reverse-complemented for reverse-strand reads
 - ✅ 230 unit tests passing
 - ✅ Deterministic output (identical SAM across runs)
@@ -98,7 +106,6 @@ Both modes:
 - ✅ jM/jI/MD tags (junction motifs, intron coords, mismatch descriptor)
 - ✅ PE FLAG/PNEXT/RNEXT correct (mate strand from actual alignment, per-chr mate position)
 - ✅ Per-mate tags (AS, NM, XS, jM, jI, MD computed from each mate's own transcript)
-- ⚠️ **6 ruSTAR-only junctions** — slight increase from relaxed filter
 
 ## Source Layout
 
@@ -236,10 +243,12 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 7b. ~~**No SECONDARY flag / XS tag / outSAMmultNmax**~~ ✅ FIXED in Phase 15.2 — FLAG 0x100, XS:A:+/-, --outSAMmultNmax.
 7c. ~~**No jM/jI/MD tags**~~ ✅ FIXED in Phase 15.3 — jM/jI on 448 spliced records, MD on all 9774 records.
 7d. ~~**PE FLAG/PNEXT bugs**~~ ✅ FIXED in Phase 15.4 — FLAG 0x20 from mate's actual strand, PNEXT per-chr coords, RNEXT from mate, per-mate tags.
+7e. ~~**PE 0% mapped**~~ ✅ FIXED — Rewrote `align_paired_read()` to use independent SE alignment per mate then pair by chr+distance. 0% → 87.1% mapped, 95.7% per-mate position agreement.
 8. **Over-splicing in Normal mode** (3.4% vs STAR 2.2%): BySJout reduces to 1.1% (too aggressive without GTF). Optimal: use BySJout with GTF annotations.
 9. **rDNA multi-mapping** (~157 same-chr >500bp in BySJout): chrXII rDNA repeats — STAR=MAPQ 1-3, ruSTAR=MAPQ 255.
-10. **98 diff-chr disagreements**: Multi-mappers (harmless tie-breaking).
-11. **57 STAR-only mapped reads** (Normal) / 259 (BySJout): Stable in Normal; BySJout increase from filtering.
+10. **98 diff-chr disagreements** (SE) / 168 (PE): Multi-mappers (harmless tie-breaking).
+11. **57 STAR-only mapped reads** (SE Normal) / 259 (BySJout): Stable in Normal; BySJout increase from filtering.
+12. **PE 12.9% unmapped** (STAR: 0%): Requires both mates to align independently. Needs PE joint DP stitching (Phase 16.6) for mate rescue.
 12. ~~**SJ motif strand disagreement**~~ ✅ FIXED in Phase 13.12 — strand now derived from splice motif (`implied_strand()`), not read alignment strand.
 
 ## Limitations (to be addressed in future phases)
@@ -251,6 +260,8 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 - **STAR uses `nM` (mismatches only), ruSTAR uses `NM` (edit distance)** — different tags, both valid; may need `nM` for compat — Phase 15.6
 - ~~**jM/jI/MD tags**~~ ✅ DONE in Phase 15.3 — jM (junction motifs, B:c), jI (intron coords, B:i), MD (mismatch descriptor, Z:) on all records; 448 spliced records get jM/jI
 - ~~**Paired-end FLAG/PNEXT bugs**~~ ✅ DONE in Phase 15.4 — FLAG 0x20 from mate's actual strand, PNEXT per-chr coords, RNEXT from mate, per-mate AS/NM/XS/jM/jI/MD
+- ~~**PE 0% mapped**~~ ✅ FIXED — Independent mate alignment + pairing: 87.1% mapped, 95.7% per-mate position agreement
+- **PE 12.9% unmapped** (STAR: 0%) — needs PE joint DP stitching for mate rescue — Phase 16.6
 - **--outSAMattributes** parsed but not enforced — Phase 15.5
 - **No coordinate-sorted BAM output** (unsorted only; use `samtools sort`) — Phase 17.2
 - **No Log.final.out** statistics file (MultiQC/RNA-SeQC) — Phase 17.1

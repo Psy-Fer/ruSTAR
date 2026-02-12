@@ -1,7 +1,7 @@
 /// Read alignment driver function
 use crate::align::score::{AlignmentScorer, SpliceMotif};
 use crate::align::seed::Seed;
-use crate::align::stitch::{cluster_seeds, stitch_seeds, stitch_seeds_with_jdb};
+use crate::align::stitch::{cluster_seeds, stitch_seeds_with_jdb};
 use crate::align::transcript::Transcript;
 use crate::error::Error;
 use crate::index::GenomeIndex;
@@ -328,14 +328,17 @@ pub fn align_read(
     Ok((transcripts, chimeric_alignments))
 }
 
-/// Align paired-end read using STAR's unified seed clustering approach.
+/// Align paired-end reads by aligning each mate independently, then pairing results.
 ///
-/// # Algorithm (matching STAR)
-/// 1. Find seeds from both mates independently (tagged with mate_id)
-/// 2. Pool seeds together for unified clustering
-/// 3. Cluster seeds in genomic windows (both mates' seeds together)
-/// 4. Stitch seeds with DP that handles both mates
-/// 5. Split results back to mate regions for SAM output
+/// # Algorithm
+/// 1. Align mate1 independently using the proven SE align_read() path
+/// 2. Align mate2 independently using the proven SE align_read() path
+/// 3. Pair transcripts by chromosome + distance constraints
+/// 4. Deduplicate, sort by combined score, filter
+///
+/// This pragmatic approach leverages the well-tested SE alignment (95.7% position
+/// agreement) rather than the broken seed-pooling approach. Full mate-aware joint
+/// DP stitching (STAR's actual approach) is deferred to Phase 16.6.
 ///
 /// # Arguments
 /// * `mate1_seq` - First mate sequence (encoded)
@@ -344,112 +347,87 @@ pub fn align_read(
 /// * `params` - Parameters (includes alignMatesGapMax)
 ///
 /// # Returns
-/// Vector of paired alignments, sorted by score
+/// Vector of paired alignments, sorted by combined score (best first)
 pub fn align_paired_read(
     mate1_seq: &[u8],
     mate2_seq: &[u8],
     index: &GenomeIndex,
     params: &Parameters,
 ) -> Result<Vec<PairedAlignment>, Error> {
-    // Step 1: Find seeds from both mates (pooled together)
-    let min_seed_length = 8;
-    let pooled_seeds =
-        Seed::find_paired_seeds(mate1_seq, mate2_seq, index, min_seed_length, params)?;
+    // Step 1: Align each mate independently using the proven SE path
+    let (mate1_transcripts, _) = align_read(mate1_seq, "", index, params)?;
+    let (mate2_transcripts, _) = align_read(mate2_seq, "", index, params)?;
 
-    if pooled_seeds.is_empty() {
+    // If either mate has no alignments, return empty (both unmapped)
+    if mate1_transcripts.is_empty() || mate2_transcripts.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Step 2: Cluster seeds (unified across both mates)
-    let max_cluster_dist = 100000; // 100kb window
-    let max_loci_for_anchor = 10;
-    let clusters = cluster_seeds(
-        &pooled_seeds,
-        index,
-        max_cluster_dist,
-        max_loci_for_anchor,
-        params.win_anchor_multimap_nmax,
-        params.seed_none_loci_per_window,
-    );
-
-    if clusters.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Step 3: Stitch seeds within each cluster
-    // For Phase 8, we use a simplified approach: align each mate independently
-    // then combine results. Full mate-aware DP stitching is deferred to refinement.
-    let scorer = AlignmentScorer::from_params(params);
+    // Step 2: Pair transcripts by chromosome + distance
     let mut paired_alignments = Vec::new();
 
-    for cluster in clusters {
-        // Separate cluster by mate
-        let mate1_indices: Vec<_> = cluster
-            .seed_indices
-            .iter()
-            .filter(|&&i| pooled_seeds[i].mate_id == 0)
-            .copied()
-            .collect();
-        let mate2_indices: Vec<_> = cluster
-            .seed_indices
-            .iter()
-            .filter(|&&i| pooled_seeds[i].mate_id == 1)
-            .copied()
-            .collect();
-
-        // Stitch each mate independently
-        let mate1_transcripts = if !mate1_indices.is_empty() {
-            // Create a SeedCluster for mate1
-            use crate::align::stitch::SeedCluster;
-            let mate1_cluster = SeedCluster {
-                seed_indices: mate1_indices,
-                chr_idx: cluster.chr_idx,
-                genome_start: cluster.genome_start,
-                genome_end: cluster.genome_end,
-                is_reverse: cluster.is_reverse,
-                anchor_idx: cluster.anchor_idx,
-            };
-            stitch_seeds(&mate1_cluster, &pooled_seeds, mate1_seq, index, &scorer)?
-        } else {
-            Vec::new()
-        };
-
-        let mate2_transcripts = if !mate2_indices.is_empty() {
-            // Create a SeedCluster for mate2
-            use crate::align::stitch::SeedCluster;
-            let mate2_cluster = SeedCluster {
-                seed_indices: mate2_indices,
-                chr_idx: cluster.chr_idx,
-                genome_start: cluster.genome_start,
-                genome_end: cluster.genome_end,
-                is_reverse: cluster.is_reverse,
-                anchor_idx: cluster.anchor_idx,
-            };
-            stitch_seeds(&mate2_cluster, &pooled_seeds, mate2_seq, index, &scorer)?
-        } else {
-            Vec::new()
-        };
-
-        // Combine best transcript from each mate
-        if let (Some(t1), Some(t2)) = (mate1_transcripts.first(), mate2_transcripts.first()) {
-            // Check if they map to the same chromosome
-            if t1.chr_idx == t2.chr_idx {
-                // Create a paired alignment
-                let paired =
-                    combine_mate_transcripts(t1, t2, mate1_seq.len(), mate2_seq.len(), params)?;
-                paired_alignments.push(paired);
+    for t1 in &mate1_transcripts {
+        for t2 in &mate2_transcripts {
+            // Must be on same chromosome
+            if t1.chr_idx != t2.chr_idx {
+                continue;
             }
+
+            // Check distance constraint
+            if params.align_mates_gap_max > 0 && !check_proper_pair(t1, t2, params) {
+                continue;
+            }
+
+            let is_proper_pair = check_proper_pair(t1, t2, params);
+            let insert_size = calculate_insert_size(t1, t2);
+
+            paired_alignments.push(PairedAlignment {
+                mate1_transcript: t1.clone(),
+                mate2_transcript: t2.clone(),
+                mate1_region: (0, mate1_seq.len()),
+                mate2_region: (0, mate2_seq.len()),
+                is_proper_pair,
+                insert_size,
+            });
         }
     }
 
-    // Step 4: Filter and sort
-    filter_paired_transcripts(&mut paired_alignments, params);
-    // Deterministic tie-breaking for equal-score pairs:
-    // smallest chr index → smallest position → forward strand first
+    // Step 3: Deduplicate — if same (mate1 location, mate2 location) appears, keep highest score
     paired_alignments.sort_by(|a, b| {
-        b.mate1_transcript
-            .score
-            .cmp(&a.mate1_transcript.score)
+        (
+            a.mate1_transcript.chr_idx,
+            a.mate1_transcript.genome_start,
+            a.mate1_transcript.is_reverse,
+            a.mate2_transcript.genome_start,
+            a.mate2_transcript.is_reverse,
+        )
+            .cmp(&(
+                b.mate1_transcript.chr_idx,
+                b.mate1_transcript.genome_start,
+                b.mate1_transcript.is_reverse,
+                b.mate2_transcript.genome_start,
+                b.mate2_transcript.is_reverse,
+            ))
+            .then_with(|| {
+                let b_combined = b.mate1_transcript.score + b.mate2_transcript.score;
+                let a_combined = a.mate1_transcript.score + a.mate2_transcript.score;
+                b_combined.cmp(&a_combined)
+            })
+    });
+    paired_alignments.dedup_by(|a, b| {
+        a.mate1_transcript.chr_idx == b.mate1_transcript.chr_idx
+            && a.mate1_transcript.genome_start == b.mate1_transcript.genome_start
+            && a.mate1_transcript.is_reverse == b.mate1_transcript.is_reverse
+            && a.mate2_transcript.genome_start == b.mate2_transcript.genome_start
+            && a.mate2_transcript.is_reverse == b.mate2_transcript.is_reverse
+    });
+
+    // Step 4: Sort by combined score (descending) with deterministic tie-breaking
+    paired_alignments.sort_by(|a, b| {
+        let a_combined = a.mate1_transcript.score + a.mate2_transcript.score;
+        let b_combined = b.mate1_transcript.score + b.mate2_transcript.score;
+        b_combined
+            .cmp(&a_combined)
             .then_with(|| a.mate1_transcript.chr_idx.cmp(&b.mate1_transcript.chr_idx))
             .then_with(|| {
                 a.mate1_transcript
@@ -463,38 +441,21 @@ pub fn align_paired_read(
             })
     });
 
+    // Step 5: Filter by score range from best combined score
+    if !paired_alignments.is_empty() {
+        let best_score = paired_alignments[0].mate1_transcript.score
+            + paired_alignments[0].mate2_transcript.score;
+        let score_threshold = best_score - params.out_filter_multimap_score_range;
+        paired_alignments.retain(|pa| {
+            let combined = pa.mate1_transcript.score + pa.mate2_transcript.score;
+            combined >= score_threshold
+        });
+    }
+
+    // Step 6: Apply quality filters and truncate
+    filter_paired_transcripts(&mut paired_alignments, params);
+
     Ok(paired_alignments)
-}
-
-/// Combine two mate transcripts into a paired alignment
-fn combine_mate_transcripts(
-    mate1_trans: &Transcript,
-    mate2_trans: &Transcript,
-    mate1_len: usize,
-    mate2_len: usize,
-    params: &Parameters,
-) -> Result<PairedAlignment, Error> {
-    // For now, we create a simplified paired alignment
-    // The transcript from mate1 is used as the primary transcript
-    // This is a simplified implementation - full mate-aware stitching is deferred
-
-    let mate1_region = (0, mate1_len);
-    let mate2_region = (0, mate2_len);
-
-    // Check if proper pair
-    let is_proper_pair = check_proper_pair(mate1_trans, mate2_trans, params);
-
-    // Calculate insert size (signed genomic distance)
-    let insert_size = calculate_insert_size(mate1_trans, mate2_trans);
-
-    Ok(PairedAlignment {
-        mate1_transcript: mate1_trans.clone(),
-        mate2_transcript: mate2_trans.clone(),
-        mate1_region,
-        mate2_region,
-        is_proper_pair,
-        insert_size,
-    })
 }
 
 /// Check if paired alignment is a proper pair
@@ -535,42 +496,48 @@ fn calculate_insert_size(mate1_trans: &Transcript, mate2_trans: &Transcript) -> 
     }
 }
 
-/// Filter paired transcripts by quality thresholds
+/// Filter paired transcripts by quality thresholds.
+/// Each mate is checked independently against per-read thresholds.
+/// Combined score uses sum of both mates.
 fn filter_paired_transcripts(paired_alns: &mut Vec<PairedAlignment>, params: &Parameters) {
     paired_alns.retain(|pa| {
-        let t = &pa.mate1_transcript;
-        let read_length =
-            (pa.mate1_region.1 - pa.mate1_region.0 + pa.mate2_region.1 - pa.mate2_region.0) as f64;
+        let t1 = &pa.mate1_transcript;
+        let t2 = &pa.mate2_transcript;
+        let mate1_len = (pa.mate1_region.1 - pa.mate1_region.0) as f64;
+        let mate2_len = (pa.mate2_region.1 - pa.mate2_region.0) as f64;
 
-        // Absolute score threshold
-        if t.score < params.out_filter_score_min {
-            return false;
-        }
+        // Check each mate independently for per-read thresholds
+        for (t, read_len) in [(t1, mate1_len), (t2, mate2_len)] {
+            // Absolute score threshold (per mate)
+            if t.score < params.out_filter_score_min {
+                return false;
+            }
 
-        // Relative score threshold
-        if (t.score as f64) < params.out_filter_score_min_over_lread * read_length {
-            return false;
-        }
+            // Relative score threshold (per mate)
+            if (t.score as f64) < params.out_filter_score_min_over_lread * read_len {
+                return false;
+            }
 
-        // Absolute mismatch count
-        if t.n_mismatch > params.out_filter_mismatch_nmax {
-            return false;
-        }
+            // Absolute mismatch count (per mate)
+            if t.n_mismatch > params.out_filter_mismatch_nmax {
+                return false;
+            }
 
-        // Relative mismatch count
-        if (t.n_mismatch as f64) > params.out_filter_mismatch_nover_lmax * read_length {
-            return false;
-        }
+            // Relative mismatch count (per mate)
+            if (t.n_mismatch as f64) > params.out_filter_mismatch_nover_lmax * read_len {
+                return false;
+            }
 
-        // Absolute matched bases
-        let n_matched = t.n_matched();
-        if n_matched < params.out_filter_match_nmin {
-            return false;
-        }
+            // Absolute matched bases (per mate)
+            let n_matched = t.n_matched();
+            if n_matched < params.out_filter_match_nmin {
+                return false;
+            }
 
-        // Relative matched bases
-        if (n_matched as f64) < params.out_filter_match_nmin_over_lread * read_length {
-            return false;
+            // Relative matched bases (per mate)
+            if (n_matched as f64) < params.out_filter_match_nmin_over_lread * read_len {
+                return false;
+            }
         }
 
         true

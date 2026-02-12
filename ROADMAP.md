@@ -28,7 +28,8 @@ Phase 1 (CLI) ✅
                                                                                             └→ Phase 13.14 (outFilterBySJout) ✅
                                                                                                  └→ Phase 15.1 (NH/HI/AS/NM tags) ✅
                                                                                                       └→ Phase 15.2 (XS/SECONDARY/multNmax) ✅
-                                                                                                           └→ Phase 15.3+ (jM/jI/MD, PE fixes) ← Next
+                                                                                                           └→ Phase 15.3 (jM/jI/MD tags) ✅
+                                                                                                                └→ Phase 15.4+ (PE fixes, attribs) ← Next
                                                                                                       └→ Phase 16 (accuracy parity)
                                                                                                            └→ Phase 17 (features + polish)
                                                                                                                 └→ Phase 14 (STARsolo) [DEFERRED]
@@ -1397,15 +1398,27 @@ BySJout mode (`--outFilterType BySJout`):
 
 **Files**: `src/io/sam.rs`, `src/params.rs`
 
-### Phase 15.3: jM, jI, MD Tags
+### Phase 15.3: jM, jI, MD Tags ✅ COMPLETE (2026-02-12)
 
-**Problem**: jM/jI are STAR-specific junction tags used by QC pipelines. MD is required by GATK and variant calling.
+**Problem**: jM/jI are STAR-specific junction tags used by QC pipelines (RSeQC, RNA-SeQC). MD is required by GATK variant calling and many QC tools.
 
 **Fix**:
-- Walk CIGAR for RefSkip ops, encode motifs as integers → jM (array of i8), jI (array of i32 pairs)
-- New `build_md_string()` function: walk CIGAR, count consecutive matches, emit mismatch bases
+- Added `junction_annotated: Vec<bool>` to Transcript struct and DpState
+- `is_annotated` in stitch.rs DP loop was already computed but discarded — now stored and propagated
+- `build_jm_tag()`: motif codes 0-6 per STAR convention, +20 if annotated in GTF → `B:c` array
+- `build_ji_tag()`: walk CIGAR for RefSkip ops, extract 1-based per-chr intron start/end pairs → `B:i` array
+- `build_md_tag()`: walk CIGAR, compare read vs genome bases, emit match counts / mismatch bases / `^DEL` → `Z:` string
+- Tags wired into both `transcript_to_record()` and `build_paired_mate_record()`
+- Added `bstr = "1"` dependency for `BString` (used by noodles `Value::String`)
 
-**Files**: `src/io/sam.rs`, possibly `src/align/stitch.rs`
+**Verified** (10k yeast reads):
+- MD:Z: present on all 9774 records (100%)
+- jM:B:c: present on 448 spliced records
+- jI:B:i: present on 448 spliced records (matches jM count)
+- MD consistent with NM: 4 reads show MD "mismatches" at N-base positions, which NM correctly excludes (expected SAM spec behavior)
+- 227/227 unit tests passing (+12 new: jM x4, jI x2, MD x5, integration x1)
+
+**Files**: `src/io/sam.rs`, `src/align/transcript.rs`, `src/align/stitch.rs`, `src/align/read_align.rs`, `src/io/bam.rs`, `Cargo.toml`
 **Depends on**: 15.1
 
 ### Phase 15.4: Paired-End FLAG/PNEXT Fixes

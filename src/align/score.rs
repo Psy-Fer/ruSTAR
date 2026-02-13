@@ -90,7 +90,7 @@ impl AlignmentScorer {
             align_sj_overhang_min: params.align_sj_overhang_min,
             align_sjdb_overhang_min: params.align_sjdb_overhang_min,
             align_intron_max: if params.align_intron_max == 0 {
-                589_824 // STAR default: 2^winBinNbits * winAnchorDistNbins = 65536 * 9
+                params.win_bin_window_dist() as u32
             } else {
                 params.align_intron_max
             },

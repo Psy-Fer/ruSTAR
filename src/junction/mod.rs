@@ -151,7 +151,7 @@ pub fn filter_novel_junctions(
     use std::sync::atomic::Ordering;
 
     let max_intron = if params.align_intron_max == 0 {
-        589_824u64 // STAR default: 2^winBinNbits * winAnchorDistNbins = 65536 * 9
+        params.win_bin_window_dist()
     } else {
         params.align_intron_max as u64
     };

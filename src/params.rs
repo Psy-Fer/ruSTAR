@@ -472,6 +472,14 @@ pub struct Parameters {
     #[arg(long = "winReadCoverageRelativeMin", default_value_t = 0.5)]
     pub win_read_coverage_relative_min: f64,
 
+    /// Log2 of window bin size for seed clustering
+    #[arg(long = "winBinNbits", default_value_t = 16)]
+    pub win_bin_nbits: u32,
+
+    /// Max number of bins for seed anchor distance
+    #[arg(long = "winAnchorDistNbins", default_value_t = 9)]
+    pub win_anchor_dist_nbins: u32,
+
     /// Max number of loci a seed can map to (seeds with more loci are discarded)
     #[arg(long = "seedMultimapNmax", default_value_t = 10000)]
     pub seed_multimap_nmax: usize,
@@ -593,6 +601,12 @@ impl Parameters {
         }
     }
 
+    /// Compute the default window distance: 2^winBinNbits * winAnchorDistNbins.
+    /// Used for max_cluster_dist and as default alignIntronMax (when 0).
+    pub fn win_bin_window_dist(&self) -> u64 {
+        (1u64 << self.win_bin_nbits) * self.win_anchor_dist_nbins as u64
+    }
+
     /// Validate parameter combinations that clap alone cannot enforce.
     pub fn validate(&self) -> Result<(), crate::error::Error> {
         // genomeGenerate requires FASTA files
@@ -689,6 +703,8 @@ mod tests {
         assert_eq!(p.align_windows_per_read_nmax, 10000);
         assert_eq!(p.align_transcripts_per_window_nmax, 100);
         assert!((p.win_read_coverage_relative_min - 0.5).abs() < f64::EPSILON);
+        assert_eq!(p.win_bin_nbits, 16);
+        assert_eq!(p.win_anchor_dist_nbins, 9);
         assert!(p.sjdb_gtf_file.is_none());
         assert_eq!(p.sjdb_overhang, 100);
         assert_eq!(p.sjdb_score, 2);
@@ -871,6 +887,25 @@ mod tests {
             p.chim_out_type,
             vec!["WithinBAM".to_string(), "SoftClip".to_string()]
         );
+    }
+
+    #[test]
+    fn win_bin_window_dist_default() {
+        let p = parse(&["--readFilesIn", "r.fq"]);
+        assert_eq!(p.win_bin_window_dist(), 589_824); // 2^16 * 9
+    }
+
+    #[test]
+    fn win_bin_window_dist_custom() {
+        let p = parse(&[
+            "--readFilesIn",
+            "r.fq",
+            "--winBinNbits",
+            "14",
+            "--winAnchorDistNbins",
+            "5",
+        ]);
+        assert_eq!(p.win_bin_window_dist(), 81_920); // 2^14 * 5
     }
 
     #[test]

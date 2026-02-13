@@ -58,7 +58,7 @@ pub fn align_read(
     }
 
     // Step 2: Cluster seeds
-    let max_cluster_dist = 100000; // 100kb window (TODO: make configurable)
+    let max_cluster_dist = params.win_bin_window_dist();
     let max_loci_for_anchor = 10; // Seeds mapping to <=10 loci can be anchors
     let clusters = cluster_seeds(
         &seeds,

@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.6 + 16.1-16.2 + PE alignment fix complete. SE: 95.8% position agreement, 97.8% CIGAR agreement, 2.2% splice rate (matches STAR). With GTF: 94.5% position, 97.6% CIGAR (STAR detects more annotated junctions via index insertion). PE: 87.1% mapped (was 0%), 95.7% per-mate position agreement, 97.1% CIGAR agreement. SAM tags: NH/HI/AS/NM/nM/XS/jM/jI/MD all implemented + --outSAMattributes enforcement. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement.**
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.6 + 16.1-16.3 + PE alignment fix complete. SE: 95.8% position agreement, 97.8% CIGAR agreement, 2.1% splice rate (matches STAR 2.2%). With GTF: 94.5% position, 97.6% CIGAR (STAR detects more annotated junctions via index insertion). PE: 87.1% mapped (was 0%), 95.7% per-mate position agreement, 97.1% CIGAR agreement. SAM tags: NH/HI/AS/NM/nM/XS/jM/jI/MD all implemented + --outSAMattributes enforcement. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement. jR scanning: post-DP junction boundary optimization.**
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -68,9 +68,10 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 15.6 (nM tag) ← **STAR-compatible mismatch-only count, nM in Standard/All presets, 235 tests**
 - Phase 16.1 (max_cluster_dist) ← **winBinNbits/winAnchorDistNbins params, 100kb→589kb clustering, splice rate 3.4%→2.2% (matches STAR), 237 tests**
 - Phase 16.2 (RemoveNoncanonicalUnannotated + GTF testing) ← **Filter fix: only reject unannotated non-canonical junctions. GTF differential testing baseline established. 238 tests**
+- Phase 16.3 (jR scanning) ← **Post-DP junction boundary optimization. Neutral on yeast (95.8% pos, 97.8% CIGAR unchanged). +1 shared junction. 241 tests**
 
 **Planned**:
-- Phase 16.3+ (Accuracy + algorithm parity) ← jR scanning, rDNA MAPQ, seed params, PE joint DP
+- Phase 16.4+ (Accuracy + algorithm parity) ← rDNA MAPQ, seed params, PE joint DP
 - Phase 17 (Features + polish) ← Log.final.out, sorted BAM, PE chimeric, quantMode, stdout output
 
 **Current Status** (10k yeast reads):
@@ -78,9 +79,9 @@ before adding complex features. Threading affects the entire execution model and
 Single-end (Normal mode):
 - ✅ **95.8% position agreement** with STAR (was 51% → 94.5% → 95.3% → 96.3% → 95.7% → 95.8%)
 - ✅ **97.8% CIGAR agreement** among position-matching reads
-- ✅ 83.2% unique mapped (STAR: 82.6%), 5.5% multi-mapped (STAR: 7.4%)
+- ✅ 83.1% unique mapped (STAR: 82.6%), 5.4% multi-mapped (STAR: 7.4%)
 - ✅ 26.6% soft clips (STAR: 26.0%)
-- ✅ **Splice rate 2.2%** (STAR: 2.2%) — **exact match!** (was 3.4%, fixed by Phase 16.1)
+- ✅ **Splice rate 2.1%** (STAR: 2.2%) — matches STAR (was 3.4%, fixed by Phase 16.1)
 
 Paired-end (10k yeast read pairs):
 - ✅ **87.1% mapped** (8714/10000 pairs) — was 0% before PE alignment fix
@@ -93,7 +94,7 @@ Paired-end (10k yeast read pairs):
 All modes:
 - ✅ **100% motif agreement** on shared junctions
 - ✅ SAM SEQ properly reverse-complemented for reverse-strand reads
-- ✅ 238 unit tests passing
+- ✅ 241 unit tests passing
 - ✅ Deterministic output (identical SAM across runs)
 - ✅ Bidirectional seed search (L→R + R→L)
 - ✅ Annotation-aware DP scoring (sjdbScore bonus during stitching)
@@ -104,6 +105,7 @@ All modes:
 - ✅ PE FLAG/PNEXT/RNEXT correct (mate strand from actual alignment, per-chr mate position)
 - ✅ Per-mate tags (AS, NM, XS, jM, jI, MD computed from each mate's own transcript)
 - ✅ --outSAMattributes enforcement (Standard/All/None/explicit tag control)
+- ✅ Post-DP junction boundary optimization (jR scanning, Phase 16.3)
 
 ## Source Layout
 
@@ -189,7 +191,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 238/238 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, manual_contains × 2, implicit_saturating_sub × 1)
+**Current test status**: 241/241 unit tests passing, non-critical clippy warnings (too_many_arguments × 4, manual_contains × 2, implicit_saturating_sub × 1)
 
 **Note**: Phase 9 integration tests fail due to pathologically repetitive test genomes (50 exact copies of 20bp). These tests need realistic genomes (deferred to Phase 13).
 

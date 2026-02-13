@@ -40,6 +40,8 @@ pub struct AlignmentScorer {
     pub align_intron_max: u32,
     /// Extra score log-scaled with genomic length: scale * log2(genomicLength)
     pub score_genomic_length_log2_scale: f64,
+    /// Max score reduction for SJ stitching shift (scoreStitchSJshift, default 1)
+    pub score_stitch_sj_shift: i32,
 }
 
 impl AlignmentScorer {
@@ -63,6 +65,7 @@ impl AlignmentScorer {
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
+            score_stitch_sj_shift: 1,
         }
     }
 
@@ -95,6 +98,7 @@ impl AlignmentScorer {
                 params.align_intron_max
             },
             score_genomic_length_log2_scale: params.score_genomic_length_log2_scale,
+            score_stitch_sj_shift: params.score_stitch_sj_shift,
         }
     }
 
@@ -241,6 +245,189 @@ impl AlignmentScorer {
         }
     }
 
+    /// Find the optimal junction boundary position by scanning all candidates.
+    ///
+    /// STAR's jR scanning: given a gap between seeds A and B where gGap > rGap,
+    /// slide the junction boundary through all valid positions. At each position,
+    /// score how well the read matches the upstream vs downstream genome, plus
+    /// the splice motif quality. Return the shift that maximizes the combined score.
+    ///
+    /// All coordinates are in SA coordinate space (forward for fwd reads, RC genome for rev).
+    ///
+    /// Returns: (jr_shift, best_motif, best_motif_score)
+    /// - jr_shift: how many bases to shift the junction boundary (positive = rightward)
+    /// - best_motif: the splice motif at the optimal position
+    /// - best_motif_score: the motif penalty at the optimal position
+    pub fn find_best_junction_position(
+        &self,
+        read_seq: &[u8],
+        r_a_end: usize, // prev.read_end (exclusive, ruSTAR convention)
+        g_a_end: u64,   // prev.genome_end (exclusive, ruSTAR convention)
+        r_gap: i64,     // read gap between seeds
+        g_gap: i64,     // genome gap between seeds
+        genome: &Genome,
+        is_reverse: bool,
+        n_genome: u64,
+        prev_exon_len: usize,
+    ) -> (i32, SpliceMotif, i32) {
+        let del = g_gap - r_gap; // net intron/deletion length (constant)
+        debug_assert!(del > 0);
+
+        // Convert to STAR-style inclusive coordinates for the scanning algorithm
+        // ruSTAR: r_a_end is exclusive (one past last base of seed A)
+        // STAR:   rAend is inclusive (last base of seed A)
+        let g_a_end_inc = g_a_end - 1; // last genome base of seed A (inclusive)
+        let r_a_end_inc = r_a_end - 1; // last read base of seed A (inclusive)
+
+        // gBstart1 = position in genome corresponding to the acceptor side at jR=0
+        // In STAR: gBstart1 = gAend + gGap - rGap (= gAend + Del)
+        // With inclusive coords: gBstart1 = g_a_end_inc + del
+        let g_b_start1 = g_a_end_inc as i64 + del;
+
+        let genome_offset: u64 = if is_reverse { n_genome } else { 0 };
+
+        // Phase 1: Move LEFT from jR1=1, scoring mismatches
+        // Find how far left we need to start scanning
+        let mut jr1: i32 = 1;
+        let mut score1: i32 = 0;
+        loop {
+            jr1 -= 1;
+            let ri = r_a_end_inc as i64 + jr1 as i64;
+            if ri < 0 || ri >= read_seq.len() as i64 {
+                break;
+            }
+            let read_base = read_seq[ri as usize];
+
+            let g_up_pos = g_a_end_inc as i64 + jr1 as i64;
+            let g_dn_pos = g_b_start1 + jr1 as i64;
+            if g_up_pos < 0 || g_dn_pos < 0 {
+                break;
+            }
+
+            let g_upstream = genome.get_base(g_up_pos as u64 + genome_offset);
+            let g_downstream = genome.get_base(g_dn_pos as u64 + genome_offset);
+
+            match (g_upstream, g_downstream) {
+                (Some(g_up), Some(g_dn)) if g_up < 4 && g_dn < 4 => {
+                    if read_base == g_up && read_base != g_dn {
+                        // Moving left costs: this base matches upstream but not downstream
+                        score1 -= 1;
+                    }
+                }
+                _ => break,
+            }
+
+            if score1 + self.score_stitch_sj_shift < 0 {
+                break;
+            }
+            if prev_exon_len as i32 + jr1 <= 1 {
+                break;
+            }
+        }
+        // jr1 is now one past where we stopped; the scan will start from jr1
+
+        // Phase 2: Scan RIGHT through all jR1 positions
+        score1 = 0;
+        let mut max_score2 = i32::MIN;
+        let mut best_jr: i32 = 0;
+        let mut best_motif = SpliceMotif::NonCanonical;
+        let mut best_motif_score = self.score_gap_noncan;
+
+        loop {
+            let ri = r_a_end_inc as i64 + jr1 as i64;
+            if ri >= 0 && (ri as usize) < read_seq.len() {
+                let read_base = read_seq[ri as usize];
+                let g_up_pos = g_a_end_inc as i64 + jr1 as i64;
+                let g_dn_pos = g_b_start1 + jr1 as i64;
+
+                if g_up_pos >= 0 && g_dn_pos >= 0 {
+                    let g_up = genome.get_base(g_up_pos as u64 + genome_offset);
+                    let g_dn = genome.get_base(g_dn_pos as u64 + genome_offset);
+
+                    match (g_up, g_dn) {
+                        (Some(gu), Some(gd)) if gu < 4 && gd < 4 => {
+                            if read_base == gu && read_base != gd {
+                                score1 += 1;
+                            } else if read_base != gu && read_base == gd {
+                                score1 -= 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Check splice motif at this junction position
+            if del >= self.align_intron_min as i64 && del <= self.align_intron_max as i64 {
+                // Donor position in SA space: one past the last donor-exon base
+                let donor_sa = (g_a_end_inc as i64 + jr1 as i64 + 1) as u64;
+                // Convert to forward genome coordinates for motif detection
+                let donor_fwd = if is_reverse {
+                    n_genome - donor_sa - del as u64
+                } else {
+                    donor_sa
+                };
+                let motif = self.detect_splice_motif(donor_fwd, del as u32, genome);
+                let motif_score = self.score_splice_junction(&motif);
+                let score2 = score1 + motif_score;
+
+                if score2 > max_score2 {
+                    max_score2 = score2;
+                    best_jr = jr1;
+                    best_motif = motif;
+                    best_motif_score = motif_score;
+                }
+            }
+
+            jr1 += 1;
+            if jr1 > r_gap as i32 {
+                break;
+            }
+        }
+
+        // Phase 3: Repeat detection around best_jr + left-flush for non-canonical/deletion
+        // Count matching bases between donor and acceptor sides around best_jr
+        let mut jj_l: i32 = 0;
+        loop {
+            let left_pos = g_a_end_inc as i64 + best_jr as i64 - jj_l as i64;
+            let right_pos = g_b_start1 + best_jr as i64 - jj_l as i64;
+            if left_pos < 0 || right_pos < 0 {
+                break;
+            }
+            let g_left = genome.get_base(left_pos as u64 + genome_offset);
+            let g_right = genome.get_base(right_pos as u64 + genome_offset);
+            match (g_left, g_right) {
+                (Some(gl), Some(gr)) if gl < 4 && gl == gr => {
+                    jj_l += 1;
+                }
+                _ => break,
+            }
+            if jj_l > 100 {
+                break;
+            }
+        }
+
+        // Non-canonical or deletion: flush LEFT to be deterministic in repeat regions
+        if best_motif == SpliceMotif::NonCanonical || del < self.align_intron_min as i64 {
+            best_jr -= jj_l;
+            // Clamp: don't shift beyond available flanking Matches
+            best_jr = best_jr.max(-(prev_exon_len as i32)).min(r_gap as i32);
+            // Re-check motif at flushed position
+            if del >= self.align_intron_min as i64 && del <= self.align_intron_max as i64 {
+                let donor_sa = (g_a_end_inc as i64 + best_jr as i64 + 1) as u64;
+                let donor_fwd = if is_reverse {
+                    n_genome - donor_sa - del as u64
+                } else {
+                    donor_sa
+                };
+                best_motif = self.detect_splice_motif(donor_fwd, del as u32, genome);
+                best_motif_score = self.score_splice_junction(&best_motif);
+            }
+        }
+
+        (best_jr, best_motif, best_motif_score)
+    }
+
     /// Detect splice junction motif
     ///
     /// # Arguments
@@ -302,7 +489,7 @@ impl AlignmentScorer {
     }
 
     /// Score a splice junction based on motif
-    fn score_splice_junction(&self, motif: &SpliceMotif) -> i32 {
+    pub(crate) fn score_splice_junction(&self, motif: &SpliceMotif) -> i32 {
         match motif {
             SpliceMotif::GtAg | SpliceMotif::CtAc => self.score_gap,
             SpliceMotif::GcAg | SpliceMotif::CtGc => self.score_gap_gcag,
@@ -444,6 +631,7 @@ mod tests {
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
+            score_stitch_sj_shift: 1,
         };
 
         // Intron from position 2, length 12 (spans positions 2-13 inclusive)
@@ -484,6 +672,7 @@ mod tests {
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
+            score_stitch_sj_shift: 1,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -523,6 +712,7 @@ mod tests {
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
+            score_stitch_sj_shift: 1,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -560,6 +750,7 @@ mod tests {
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
+            score_stitch_sj_shift: 1,
         };
 
         let motif = scorer.detect_splice_motif(2, 12, &genome);
@@ -590,6 +781,7 @@ mod tests {
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
+            score_stitch_sj_shift: 1,
         };
 
         let (score, gap_type) = scorer.score_gap(0, 5, 0, &genome);
@@ -618,6 +810,7 @@ mod tests {
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
+            score_stitch_sj_shift: 1,
         };
 
         // Small gap (< align_intron_min) is deletion
@@ -654,6 +847,7 @@ mod tests {
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
+            score_stitch_sj_shift: 1,
         };
 
         // Gap starting at position 2 (GT), length 26 (>= 21) is splice junction
@@ -688,6 +882,7 @@ mod tests {
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
+            score_stitch_sj_shift: 1,
         };
 
         // Annotated junction should get bonus
@@ -726,6 +921,7 @@ mod tests {
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
+            score_stitch_sj_shift: 1,
         };
 
         // CT-AC motif: (1,3,0,1) — reverse complement of GT-AG
@@ -825,6 +1021,7 @@ mod tests {
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
+            score_stitch_sj_shift: 1,
         };
 
         // Gap of exactly 589824 starting at position 100 should be splice junction
@@ -900,6 +1097,7 @@ mod tests {
             align_sjdb_overhang_min: 3,
             align_intron_max: 1000, // Small max for testing
             score_genomic_length_log2_scale: -0.25,
+            score_stitch_sj_shift: 1,
         };
 
         // Gap of 1001 (> 1000 max) should be deletion, not splice junction
@@ -926,5 +1124,202 @@ mod tests {
         // Gap of 20 (< min) should be deletion
         let (_score, gap_type) = scorer.score_gap(20, 0, 0, &genome);
         assert!(matches!(gap_type, GapType::Deletion(20)));
+    }
+
+    fn make_scorer_for_junction_test() -> AlignmentScorer {
+        AlignmentScorer {
+            score_gap: 0,
+            score_gap_noncan: -8,
+            score_gap_gcag: -4,
+            score_gap_atac: -8,
+            score_del_open: -2,
+            score_del_base: -2,
+            score_ins_open: -2,
+            score_ins_base: -2,
+            align_intron_min: 21,
+            sjdb_score: 2,
+            align_sj_stitch_mismatch_nmax: [0, -1, 0, 0],
+            n_mm_max: 10,
+            p_mm_max: 0.3,
+            align_sj_overhang_min: 5,
+            align_sjdb_overhang_min: 3,
+            align_intron_max: 589_824,
+            score_genomic_length_log2_scale: -0.25,
+            score_stitch_sj_shift: 1,
+        }
+    }
+
+    #[test]
+    fn test_junction_scan_finds_canonical() {
+        // Genome layout (forward):
+        //   pos: 0  1  2  3  4  5  6  7  8  ...  28 29 30 31
+        //        A  C  G  T  A  G  T  C  C  ...   C  A  G  A
+        //                       ^GT                 ^AG
+        // Two seeds: A ends at genome pos 5 (exclusive), B starts at genome pos 30 (exclusive end)
+        // The gap: genome_gap = 30-5 = 25, read_gap = 1
+        // del = 24 (>= 21 intron min)
+        // Without jR shift (jR=0): intron starts at pos 5, motif at pos 5..6 = AG (non-canonical with G,T at 5,6)
+        // Wait, let me set up the motif so jR=+1 shift reveals GT-AG:
+        // At jR=0: donor at pos 5 = AG... not GT
+        // At jR=+1: donor at pos 6 = GT, acceptor at pos 6+24-2 = 28, 6+24-1 = 29 = AG? Need to set that up.
+
+        // Let me design carefully:
+        // Intron length = del = genome_gap - read_gap
+        // We want: 1 read gap base, donor at position (g_a_end + jr_shift)
+        // Let g_a_end = 5 (exclusive), read_gap = 1
+        // At jR=0: donor at pos 5, check motif at fwd pos 5
+        // At jR=1: donor at pos 6, check motif at fwd pos 6
+        // We want GT-AG at jR=1 position.
+
+        // Genome: build so that:
+        //   pos 6,7 = G,T (GT donor at pos 6)
+        //   pos 6+del-2, 6+del-1 = A,G (AG acceptor)
+        // With del = genome_gap - read_gap, genome_gap = 25, read_gap = 1, del = 24
+        //   acceptor at pos 6+24-2=28, 6+24-1=29 → set pos 28=A(0), 29=G(2)
+
+        let mut seq = vec![0u8; 100]; // A=0 fill
+        // Seed A region (pos 0-4): matching bases
+        seq[0] = 0; // A
+        seq[1] = 1; // C
+        seq[2] = 2; // G
+        seq[3] = 3; // T
+        seq[4] = 0; // A
+        // At pos 5: not GT (make it A,C so jR=0 finds non-canonical)
+        seq[5] = 0; // A
+        // At pos 6,7: GT donor
+        seq[6] = 2; // G
+        seq[7] = 3; // T
+        // Fill intron body
+        for i in 8..28 {
+            seq[i] = 1; // C
+        }
+        // AG acceptor for jR=1 position (donor at pos 6, del=24, acceptor at 28,29)
+        seq[28] = 0; // A
+        seq[29] = 2; // G
+        // Seed B region (pos 30+)
+        seq[30] = 0; // A
+        seq[31] = 1; // C
+
+        let genome = make_test_genome(&seq);
+        let scorer = make_scorer_for_junction_test();
+
+        // Read: seed A covers read[0..5], gap has 1 base, seed B covers read[6..8]
+        // The gap base at read[5] should match genome[5] (=A) on upstream side
+        // and genome[5+24] = genome[29] (=G) on downstream side
+        // Read[5] = A matches upstream but not downstream → score1 += 1 for jR=1
+        let read_seq = vec![0, 1, 2, 3, 0, 0, 0, 1]; // ACGTAACG...
+
+        let (jr_shift, motif, _motif_score) = scorer.find_best_junction_position(
+            &read_seq,
+            5,  // r_a_end (exclusive)
+            5,  // g_a_end (exclusive)
+            1,  // read_gap
+            25, // genome_gap
+            &genome,
+            false, // forward strand
+            genome.n_genome,
+            5, // prev_exon_len
+        );
+
+        // jR=1 should find GT-AG motif
+        assert_eq!(motif, SpliceMotif::GtAg);
+        assert_eq!(jr_shift, 1);
+    }
+
+    #[test]
+    fn test_junction_scan_no_shift_needed() {
+        // GT-AG motif is already at the natural junction boundary (jR=0)
+        // Genome: donor GT at pos 5,6 and acceptor AG at pos 5+24-2=27, 5+24-1=28
+        let mut seq = vec![1u8; 100]; // C fill
+        seq[0] = 0;
+        seq[1] = 1;
+        seq[2] = 2;
+        seq[3] = 3;
+        seq[4] = 0;
+        // GT donor at pos 5,6
+        seq[5] = 2; // G
+        seq[6] = 3; // T
+        // AG acceptor at pos 27,28 (donor at 5, del=24: 5+24-2=27, 5+24-1=28)
+        seq[27] = 0; // A
+        seq[28] = 2; // G
+        // Seed B
+        seq[29] = 0;
+        seq[30] = 1;
+
+        let genome = make_test_genome(&seq);
+        let scorer = make_scorer_for_junction_test();
+
+        // Read gap = 0, genome gap = 24 (pure splice junction)
+        let read_seq = vec![0, 1, 2, 3, 0, 0, 1]; // ACGTAAC
+
+        let (jr_shift, motif, _motif_score) = scorer.find_best_junction_position(
+            &read_seq,
+            5,  // r_a_end (exclusive)
+            5,  // g_a_end (exclusive)
+            0,  // read_gap = 0 (pure splice)
+            24, // genome_gap = intron length
+            &genome,
+            false,
+            genome.n_genome,
+            5,
+        );
+
+        assert_eq!(motif, SpliceMotif::GtAg);
+        assert_eq!(jr_shift, 0);
+    }
+
+    #[test]
+    fn test_junction_scan_left_flush_noncanonical() {
+        // Non-canonical junction in a repeat region should be flushed left
+        // Build genome where no canonical motif exists, and there's a repeat
+        // at the junction boundary
+        let mut seq = vec![1u8; 100]; // C fill
+        // Seed A region
+        seq[0] = 0;
+        seq[1] = 1;
+        seq[2] = 2;
+        seq[3] = 3;
+        seq[4] = 0;
+        // At pos 5: non-canonical (CC at donor, CC at acceptor)
+        seq[5] = 1; // C
+        seq[6] = 1; // C
+        // Make a repeat: genome[5] == genome[5+24] (both C)
+        // del = 24, acceptor at 5+24-2=27, 5+24-1=28
+        seq[27] = 1; // C (same as donor d1 at jR=0)
+        seq[28] = 1; // C (same as donor d2 at jR=0)
+        // Also make genome[4] == genome[4+24] = genome[28] (both 0=A)
+        // Already seq[4]=0, seq[28]=1. Not equal, so repeat only extends 0 left.
+        // Make them equal: set seq[28]=0
+        // Actually, let me set up a 2-base repeat:
+        seq[4] = 1; // C at pos 4 (end of seed A)
+        seq[28] = 1; // C at pos 28 = pos 4+del
+        seq[5] = 1; // C at pos 5
+        seq[29] = 1; // C at pos 29 = pos 5+del
+
+        let genome = make_test_genome(&seq);
+        let scorer = make_scorer_for_junction_test();
+
+        // read_gap = 0
+        let read_seq = vec![0, 1, 2, 3, 1, 1, 1]; // the gap base
+
+        let (jr_shift, motif, _) = scorer.find_best_junction_position(
+            &read_seq,
+            5,  // r_a_end
+            5,  // g_a_end
+            0,  // read_gap
+            24, // genome_gap
+            &genome,
+            false,
+            genome.n_genome,
+            5,
+        );
+
+        // Non-canonical junction should be flushed left
+        assert_eq!(motif, SpliceMotif::NonCanonical);
+        // jr_shift should be <= 0 (flushed left)
+        assert!(
+            jr_shift <= 0,
+            "Non-canonical should flush left, got jr_shift={jr_shift}"
+        );
     }
 }

@@ -971,8 +971,8 @@ mod tests {
 
     #[test]
     fn test_noncanonical_unannotated_filter() {
-        use crate::align::transcript::{CigarOp, Exon, Transcript};
         use crate::align::score::SpliceMotif;
+        use crate::align::transcript::{CigarOp, Exon, Transcript};
 
         // Helper: check if a transcript would be filtered by RemoveNoncanonicalUnannotated
         // (mirrors the logic in the retain closure)

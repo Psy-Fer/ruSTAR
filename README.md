@@ -73,10 +73,10 @@ target/release/ruSTAR \
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Unique mapped | 83.2% | 82.6% |
-| Multi-mapped | 5.5% | 7.4% |
+| Unique mapped | 83.1% | 82.6% |
+| Multi-mapped | 5.4% | 7.4% |
 | Soft-clipped reads | 26.6% | 26.0% |
-| Splice rate | 2.2% | 2.2% |
+| Splice rate | 2.1% | 2.2% |
 
 #### Position and CIGAR Agreement
 
@@ -99,8 +99,8 @@ target/release/ruSTAR \
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Shared junctions | 41 | 72 total |
-| ruSTAR-only junctions | 5 | -- |
+| Shared junctions | 42 | 72 total |
+| ruSTAR-only junctions | 6 | -- |
 | Motif agreement (shared) | 100% | -- |
 
 ### Paired-End (10k yeast read pairs, 150bp)
@@ -147,6 +147,7 @@ target/release/ruSTAR \
 - SECONDARY flag (0x100) on multi-mapper alignments
 - Configurable output limits (`--outSAMmultNmax`)
 - Bidirectional seed search (L-to-R and R-to-L)
+- Junction boundary optimization (jR scanning for optimal splice motifs)
 - Deterministic output (identical SAM across runs)
 
 ## Known Limitations

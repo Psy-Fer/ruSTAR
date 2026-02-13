@@ -35,7 +35,8 @@ Phase 1 (CLI) ✅
                                                                                                                                └→ Phase 15.6 (nM tag) ✅
                                                                                                       └→ Phase 16.1 (max_cluster_dist) ✅
                                                                                                            └→ Phase 16.2 (NoncanonicalUnannotated + GTF testing) ✅
-                                                                                                                └→ Phase 16.3+ (accuracy parity) ← Next
+                                                                                                                └→ Phase 16.3 (jR scanning) ✅
+                                                                                                                     └→ Phase 16.4+ (accuracy parity) ← Next
                                                                                                                 └→ Phase 17 (features + polish)
                                                                                                                 └→ Phase 14 (STARsolo) [DEFERRED]
 ```
@@ -1611,11 +1612,27 @@ Key findings:
 **Files**: `src/align/read_align.rs`
 **Depends on**: 16.1
 
-### Phase 16.3: Junction Position Optimization (jR Scanning)
+### Phase 16.3: Junction Position Optimization (jR Scanning) ✅ COMPLETE (2026-02-13)
 
-**Problem**: ~~Splice rate 3.4% vs STAR 2.2%.~~ Splice rate fixed by Phase 16.1 (now 2.2%). 5 false junctions remain. STAR shifts junction boundaries by ±scoreStitchSJshift bases to prefer canonical motifs.
+**Problem**: STAR's `stitchAlignToTranscript.cpp:104-156` scans all possible junction boundary positions within the gap between seeds and picks the one maximizing read-genome match quality + splice motif score. Without this, ruSTAR may place junction boundaries at suboptimal positions.
 
-**Fix**: After detecting a splice junction in DP, try shifting boundary ± `scoreStitchSJshift` bases. Keep the shift that produces the best motif score.
+**Fix**: Implemented STAR's 3-phase jR scanning algorithm as a post-DP optimization:
+1. `find_best_junction_position()` in `score.rs` — Phase 1 (scan left), Phase 2 (scan right scoring match quality + motif), Phase 3 (repeat detection + left-flush for non-canonical)
+2. `optimize_junction_positions()` in `stitch.rs` — walks winning chain's CIGAR, applies jR scanning to each RefSkip
+3. Critical bug fix: `jr_shift` clamped to `[-prev_match_len, next_match_len]` to prevent CIGAR length corruption from Phase 3 repeat left-flush
+
+**Architecture**: Post-DP approach matches STAR — scanning runs on winning chain's ~1-3 junctions (O(n) per alignment), NOT in the O(n²) DP search. Zero performance impact verified by baseline comparison.
+
+**Results** (10k yeast reads, Normal mode):
+- Position agreement: 95.8% (unchanged)
+- CIGAR agreement: 97.8% (unchanged)
+- Shared junctions: 42 (+1 from 41)
+- ruSTAR-only junctions: 6 (+1 from 5)
+- Neutral on yeast (junction boundaries already at optimal positions). Expected benefit on mammalian genomes with ambiguous boundaries.
+
+**Tests**: 241/241 passing (+3 new: `test_junction_scan_finds_canonical`, `test_junction_scan_no_shift_needed`, `test_junction_scan_left_flush_noncanonical`)
+
+**Depends on**: 16.2
 
 ### Phase 16.4: seedSearchStartLmax + seedSearchLmax
 

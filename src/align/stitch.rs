@@ -450,6 +450,195 @@ struct ExpandedSeed {
     length: usize,
 }
 
+/// Post-DP junction optimization: apply jR scanning to each splice junction in the
+/// winning chain's CIGAR. This matches STAR's architecture where stitchAlignToTranscript
+/// is called per adjacent pair in the chosen path, NOT in the O(n²) DP search.
+///
+/// Walks the CIGAR, and for each RefSkip (splice junction), scans all possible boundary
+/// positions to find the one that maximizes read-genome match quality + splice motif score.
+/// Returns an optimized CIGAR with adjusted Match lengths around RefSkips, plus updated
+/// junction motifs and annotation flags.
+#[allow(clippy::too_many_arguments)]
+fn optimize_junction_positions(
+    cigar_ops: &[CigarOp],
+    junction_motifs: &[crate::align::score::SpliceMotif],
+    junction_annotated: &[bool],
+    genome_start: u64,
+    read_seq: &[u8],
+    scorer: &AlignmentScorer,
+    genome: &crate::genome::Genome,
+    is_reverse: bool,
+    n_genome: u64,
+) -> (
+    Vec<CigarOp>,
+    Vec<crate::align::score::SpliceMotif>,
+    Vec<bool>,
+) {
+    // Quick exit: no junctions to optimize
+    if junction_motifs.is_empty() {
+        return (
+            cigar_ops.to_vec(),
+            junction_motifs.to_vec(),
+            junction_annotated.to_vec(),
+        );
+    }
+
+    let mut result_cigar = Vec::with_capacity(cigar_ops.len());
+    let mut result_motifs = Vec::with_capacity(junction_motifs.len());
+    let mut result_annotated = Vec::with_capacity(junction_annotated.len());
+    let mut junction_idx = 0usize;
+
+    // Track positions as we walk the CIGAR (in SA coordinate space)
+    let mut read_pos = 0usize;
+    let mut genome_pos = genome_start;
+
+    let mut i = 0;
+    while i < cigar_ops.len() {
+        match cigar_ops[i] {
+            CigarOp::RefSkip(intron_len) => {
+                // Found a splice junction — apply jR scanning
+                // Get the preceding Match length (donor exon boundary)
+                let prev_match_len = match result_cigar.last() {
+                    Some(CigarOp::Match(len)) => *len,
+                    _ => 0,
+                };
+
+                // Get the following Match length (acceptor exon boundary)
+                let next_match_len = match cigar_ops.get(i + 1) {
+                    Some(CigarOp::Match(len)) => *len,
+                    _ => 0,
+                };
+
+                // Call jR scanning: r_gap = next_match_len (rightward bound),
+                // g_gap = intron_len + next_match_len (so del = g_gap - r_gap = intron_len)
+                let (jr_shift, new_motif, _motif_score) = scorer.find_best_junction_position(
+                    read_seq,
+                    read_pos,
+                    genome_pos,
+                    next_match_len as i64,
+                    intron_len as i64 + next_match_len as i64,
+                    genome,
+                    is_reverse,
+                    n_genome,
+                    prev_match_len as usize,
+                );
+
+                // Clamp jr_shift to valid range: neither flanking Match can go negative
+                let jr_shift = jr_shift
+                    .max(-(prev_match_len as i32))
+                    .min(next_match_len as i32);
+
+                // Apply the shift to surrounding Matches
+                if jr_shift != 0 {
+                    // Adjust donor Match (before RefSkip) — guaranteed >= 0 by clamping
+                    let new_prev = (prev_match_len as i32 + jr_shift) as u32;
+                    if let Some(CigarOp::Match(len)) = result_cigar.last_mut() {
+                        *len = new_prev;
+                        if *len == 0 {
+                            result_cigar.pop();
+                        }
+                    }
+
+                    // Emit RefSkip (intron length unchanged)
+                    result_cigar.push(CigarOp::RefSkip(intron_len));
+
+                    // Adjust acceptor Match (after RefSkip) — will be handled below
+                    let new_next = (next_match_len as i32 - jr_shift).max(0) as u32;
+                    if new_next > 0 {
+                        result_cigar.push(CigarOp::Match(new_next));
+                    }
+
+                    // Update genome/read positions: the shift moved the boundary
+                    // genome_pos was at the junction boundary; now advance past intron + acceptor
+                    genome_pos += intron_len as u64 + next_match_len as u64;
+                    read_pos += next_match_len as usize;
+
+                    // Skip the next Match op since we already handled it
+                    i += 2;
+                } else {
+                    // No shift needed — emit RefSkip as-is
+                    result_cigar.push(CigarOp::RefSkip(intron_len));
+                    genome_pos += intron_len as u64;
+                    i += 1;
+                }
+
+                // Record the (possibly updated) motif
+                result_motifs.push(new_motif);
+                if junction_idx < junction_annotated.len() {
+                    result_annotated.push(junction_annotated[junction_idx]);
+                }
+                junction_idx += 1;
+            }
+            CigarOp::Match(len) => {
+                // Merge with previous Match if possible
+                if let Some(CigarOp::Match(prev_len)) = result_cigar.last_mut() {
+                    *prev_len += len;
+                } else {
+                    result_cigar.push(CigarOp::Match(len));
+                }
+                read_pos += len as usize;
+                genome_pos += len as u64;
+                i += 1;
+            }
+            CigarOp::Ins(len) => {
+                result_cigar.push(CigarOp::Ins(len));
+                read_pos += len as usize;
+                i += 1;
+            }
+            CigarOp::Del(len) => {
+                result_cigar.push(CigarOp::Del(len));
+                genome_pos += len as u64;
+                i += 1;
+            }
+            other => {
+                result_cigar.push(other);
+                match other {
+                    CigarOp::SoftClip(len) | CigarOp::Equal(len) | CigarOp::Diff(len) => {
+                        read_pos += len as usize;
+                        if matches!(other, CigarOp::Equal(_) | CigarOp::Diff(_)) {
+                            genome_pos += len as u64;
+                        }
+                    }
+                    CigarOp::HardClip(_) => {}
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+    }
+
+    // Verify: total read-consuming bases must be unchanged
+    let original_read_len: u32 = cigar_ops
+        .iter()
+        .map(|op| match op {
+            CigarOp::Match(n)
+            | CigarOp::Ins(n)
+            | CigarOp::SoftClip(n)
+            | CigarOp::Equal(n)
+            | CigarOp::Diff(n) => *n,
+            _ => 0,
+        })
+        .sum();
+    let optimized_read_len: u32 = result_cigar
+        .iter()
+        .map(|op| match op {
+            CigarOp::Match(n)
+            | CigarOp::Ins(n)
+            | CigarOp::SoftClip(n)
+            | CigarOp::Equal(n)
+            | CigarOp::Diff(n) => *n,
+            _ => 0,
+        })
+        .sum();
+    debug_assert_eq!(
+        original_read_len, optimized_read_len,
+        "jR optimization changed read-consuming CIGAR length: {} -> {}, cigar_ops={:?}, result={:?}",
+        original_read_len, optimized_read_len, cigar_ops, result_cigar
+    );
+
+    (result_cigar, result_motifs, result_annotated)
+}
+
 /// Stitch seeds within a cluster using dynamic programming.
 ///
 /// # Arguments
@@ -745,23 +934,21 @@ pub fn stitch_seeds_with_jdb(
                 continue;
             } else if best_read_gap == 0 && best_genome_gap > 0 {
                 // Pure deletion or splice junction (read doesn't advance, genome does)
-                let gg = best_genome_gap as u32; // Safe: checked > 0
                 match best_gap_type {
                     GapType::SpliceJunction { intron_len, .. } => {
                         cigar.push(CigarOp::RefSkip(intron_len));
                     }
                     _ => {
-                        cigar.push(CigarOp::Del(gg));
+                        cigar.push(CigarOp::Del(best_genome_gap as u32));
                     }
                 }
             } else if best_read_gap > 0 && best_genome_gap == 0 {
                 // Pure insertion (read advances, genome doesn't)
-                let rg = best_read_gap as u32; // Safe: checked > 0
-                cigar.push(CigarOp::Ins(rg));
+                cigar.push(CigarOp::Ins(best_read_gap as u32));
             } else {
                 // Both gaps positive: combined gap region
-                let rg = best_read_gap as u32; // Safe: checked > 0 above
-                let gg = best_genome_gap as u32; // Safe: checked > 0 above
+                let rg = best_read_gap as u32;
+                let gg = best_genome_gap as u32;
 
                 let shared = rg.min(gg);
                 let excess_genome = gg.saturating_sub(rg);
@@ -841,12 +1028,28 @@ pub fn stitch_seeds_with_jdb(
     }
     let chain_start_seed = &expanded_seeds[chain_start_idx];
 
+    // Post-DP junction optimization: apply jR scanning to each splice junction
+    // in the winning chain. STAR calls stitchAlignToTranscript per adjacent pair
+    // in the chosen path, NOT in the O(n²) DP. We do the same: scan only the
+    // ~1-3 junctions in the final alignment.
+    let (optimized_cigar, optimized_motifs, optimized_annotated) = optimize_junction_positions(
+        &best_state.cigar_ops,
+        &best_state.junction_motifs,
+        &best_state.junction_annotated,
+        chain_start_seed.genome_pos,
+        read_seq,
+        scorer,
+        &index.genome,
+        cluster.is_reverse,
+        index.genome.n_genome,
+    );
+
     // Calculate the read region covered by the alignment
     let alignment_start = chain_start_seed.read_pos;
 
     // Calculate aligned read length from CIGAR operations
     let mut aligned_read_len = 0usize;
-    for op in &best_state.cigar_ops {
+    for op in &optimized_cigar {
         match op {
             CigarOp::Match(len) | CigarOp::Equal(len) | CigarOp::Diff(len) | CigarOp::Ins(len) => {
                 aligned_read_len += *len as usize;
@@ -856,9 +1059,9 @@ pub fn stitch_seeds_with_jdb(
     }
     let alignment_end = alignment_start + aligned_read_len;
 
-    // Compute right-side genome position by walking the DP CIGAR
+    // Compute right-side genome position by walking the optimized CIGAR
     let mut right_genome_pos = chain_start_seed.genome_pos;
-    for op in &best_state.cigar_ops {
+    for op in &optimized_cigar {
         match op {
             CigarOp::Match(len) | CigarOp::Equal(len) | CigarOp::Diff(len) => {
                 right_genome_pos += *len as u64;
@@ -930,7 +1133,7 @@ pub fn stitch_seeds_with_jdb(
     }
 
     // Main alignment CIGAR (merge first op with left extension Match if both are Match)
-    for op in &best_state.cigar_ops {
+    for op in &optimized_cigar {
         if let CigarOp::Match(len) = op {
             if let Some(CigarOp::Match(prev_len)) = final_cigar.last_mut() {
                 *prev_len += len;
@@ -1074,8 +1277,8 @@ pub fn stitch_seeds_with_jdb(
         n_mismatch,
         n_gap: best_state.n_gap,
         n_junction: best_state.n_junction,
-        junction_motifs: best_state.junction_motifs.clone(),
-        junction_annotated: best_state.junction_annotated.clone(),
+        junction_motifs: optimized_motifs,
+        junction_annotated: optimized_annotated,
         read_seq: read_seq.to_vec(),
     };
 
@@ -1429,6 +1632,7 @@ mod tests {
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
+            score_stitch_sj_shift: 1,
         };
 
         // Left overhang (prev.length) = 3, below min of 5
@@ -1468,6 +1672,7 @@ mod tests {
             align_sjdb_overhang_min: 3,
             align_intron_max: 589_824,
             score_genomic_length_log2_scale: -0.25,
+            score_stitch_sj_shift: 1,
         };
 
         // Both overhangs >= 5

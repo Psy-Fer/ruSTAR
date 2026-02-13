@@ -1656,7 +1656,21 @@ Key findings:
 
 **Fix**: Use hint_pos to set initial binary search bounds, finding more repeat copies.
 
-### Phase 16.6: Paired-End Joint DP Stitching
+### Phase 16.6: Sparse Seed Search Activation (DP Adaptation)
+
+**Problem**: Phase 16.4 added sparse seed search infrastructure (`search_direction_sparse()`, `MmpResult`, STAR-compatible params) but it's dormant because our DP stitcher was designed for dense (every-position) seeds. STAR uses sparse seeds (Nstart≈3-4 starting positions, MMP advancement) and gets excellent results because its DP is designed for it. With sparse seeds, our DP creates false RefSkips to bridge gaps between distant seeds (splice rate 2.1%→4.6%, position 95.8%→91.9%).
+
+**Root cause**: Our DP clustering and stitching relies on having seeds at nearly every read position to determine window boundaries and anchor points. With sparse seeds (~6-10 per read vs ~100+), windows are under-populated and the DP makes poor bridging decisions.
+
+**Fix**: Study STAR's `stitchAlignToTranscript` and clustering to understand how it works with sparse seeds. Key areas to investigate and adapt:
+1. Window/cluster formation with sparse anchors
+2. DP gap scoring when seed gaps are large
+3. extendAlign behavior with fewer anchor points
+4. Whether STAR uses additional seed sources (e.g., junction-aware seeds) to compensate
+
+Once DP is adapted, switch `find_seeds()` from every-position to `search_direction_sparse()`.
+
+### Phase 16.7: Paired-End Joint DP Stitching
 
 **Problem**: Mates aligned independently then paired by chr+distance (PE alignment fix). This works (87.1% mapped, 95.7% per-mate position agreement) but leaves 12.9% unmapped (STAR: 0%) because it requires both mates to independently produce alignments. STAR uses joint mate-aware DP where seeds from both mates participate in a unified DP that bridges the inter-mate gap, enabling mate rescue.
 

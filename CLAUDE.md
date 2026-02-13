@@ -72,7 +72,9 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 16.4 (Seed search params) ← **seedSearchStartLmax/seedSearchLmax/seedMapMin params + MmpResult refactoring. Sparse search infrastructure ready but dormant — DP needs dense seeds. 241 tests**
 
 **Planned**:
-- Phase 16.5+ (Accuracy + algorithm parity) ← rDNA MAPQ, PE joint DP
+- Phase 16.5 (rDNA MAPQ fix) ← SAindex hint usage for tandem repeat detection
+- Phase 16.6 (Sparse seed search activation) ← Adapt DP stitcher for sparse seeds, then activate search_direction_sparse()
+- Phase 16.7 (PE joint DP) ← Mate-aware DP stitching for mate rescue (12.9% → ~0% unmapped)
 - Phase 17 (Features + polish) ← Log.final.out, sorted BAM, PE chimeric, quantMode, stdout output
 
 **Current Status** (10k yeast reads):
@@ -265,12 +267,12 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 - ~~**jM/jI/MD tags**~~ ✅ DONE in Phase 15.3 — jM (junction motifs, B:c), jI (intron coords, B:i), MD (mismatch descriptor, Z:) on all records; 448 spliced records get jM/jI
 - ~~**Paired-end FLAG/PNEXT bugs**~~ ✅ DONE in Phase 15.4 — FLAG 0x20 from mate's actual strand, PNEXT per-chr coords, RNEXT from mate, per-mate AS/NM/XS/jM/jI/MD
 - ~~**PE 0% mapped**~~ ✅ FIXED — Independent mate alignment + pairing: 87.1% mapped, 95.7% per-mate position agreement
-- **PE 12.9% unmapped** (STAR: 0%) — needs PE joint DP stitching for mate rescue — Phase 16.6
+- **PE 12.9% unmapped** (STAR: 0%) — needs PE joint DP stitching for mate rescue — Phase 16.7
 - ~~**--outSAMattributes**~~ ✅ DONE in Phase 15.5 — Standard/All/None/explicit tag control enforced
 - **No coordinate-sorted BAM output** (unsorted only; use `samtools sort`) — Phase 17.2
 - **No Log.final.out** statistics file (MultiQC/RNA-SeQC) — Phase 17.1
 - ~~**Over-splicing**~~ ✅ FIXED in Phase 16.1 — splice rate 2.2% matches STAR
-- **Sparse seed search dormant** — infrastructure ready (seedSearchStartLmax, MmpResult) but DP needs dense seeds; will activate when DP is adapted
+- **Sparse seed search dormant** — infrastructure ready (seedSearchStartLmax, MmpResult) but DP needs dense seeds — Phase 16.6
 - **rDNA MAPQ inflation** (~157 reads, MAPQ 255 vs STAR 1-3) — Phase 16.5
 - **No --outReadsUnmapped Fastx** — Phase 17.4
 - **No --outStd SAM/BAM** (stdout output) — Phase 17.6

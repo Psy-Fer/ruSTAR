@@ -34,7 +34,8 @@ Phase 1 (CLI) ✅
                                                                                                                           └→ Phase 15.5 (outSAMattributes) ✅
                                                                                                                                └→ Phase 15.6 (nM tag) ✅
                                                                                                       └→ Phase 16.1 (max_cluster_dist) ✅
-                                                                                                           └→ Phase 16 (accuracy parity) ← Next
+                                                                                                           └→ Phase 16.2 (NoncanonicalUnannotated + GTF testing) ✅
+                                                                                                                └→ Phase 16.3+ (accuracy parity) ← Next
                                                                                                                 └→ Phase 17 (features + polish)
                                                                                                                 └→ Phase 14 (STARsolo) [DEFERRED]
 ```
@@ -1546,7 +1547,7 @@ BySJout mode (`--outFilterType BySJout`):
 
 ## Phase 16: Accuracy + Algorithm Parity
 
-**Status**: In Progress (Phase 16.1 complete)
+**Status**: In Progress (Phase 16.1-16.2 complete)
 
 **Goal**: Close remaining accuracy gaps vs STAR. Fix over-splicing, rDNA MAPQ, missing seed parameters, and DP junction optimization.
 
@@ -1581,11 +1582,34 @@ Key: **Splice rate now exactly matches STAR** (2.2%). Over-splicing fixed by lar
 **Files**: `src/params.rs`, `src/align/read_align.rs`, `src/align/score.rs`, `src/junction/mod.rs`
 **Depends on**: 15.6
 
-### Phase 16.2: RemoveNoncanonicalUnannotated Filter
+### Phase 16.2: RemoveNoncanonicalUnannotated Filter + GTF Testing ✅ COMPLETE (2026-02-13)
 
-**Problem**: `src/align/read_align.rs:217` TODO — falls through to `RemoveNoncanonical`, incorrectly rejecting annotated non-canonical junctions.
+**Problem**: `src/align/read_align.rs:218` TODO — `RemoveNoncanonicalUnannotated` fell through to same behavior as `RemoveNoncanonical`, incorrectly rejecting ALL non-canonical junctions even when annotated in GTF.
 
-**Fix**: Pass junction DB into filter check. Only reject unannotated non-canonical junctions.
+**Implementation** (`src/align/read_align.rs`):
+1. Replaced TODO fallthrough with proper `zip(junction_motifs, junction_annotated)` — only reject when `NonCanonical && !annotated`
+2. Added `test_noncanonical_unannotated_filter` unit test (5 cases: unannotated filtered, annotated kept, canonical kept, mixed unannotated filtered, mixed annotated kept)
+3. Established GTF differential testing baseline (STAR vs ruSTAR both with `--sjdbGTFfile`)
+
+**Test Results**: 238/238 tests passing (+1 new)
+
+**GTF Differential Testing** (10k yeast reads, `--sjdbGTFfile`):
+
+| Metric | Without GTF | With GTF (ruSTAR) | With GTF (STAR) |
+|--------|-------------|-------------------|-----------------|
+| Position agreement | 95.8% | 94.5% | — |
+| CIGAR agreement | 97.8% | 97.6% | — |
+| Shared junctions | 41/72 | 41/80 | — |
+| STAR-only junctions | 31 | 39 | — |
+
+Key findings:
+- ruSTAR SAM core columns identical with/without GTF on yeast data (annotation bonus doesn't change outcomes)
+- STAR gains 8 more junctions with GTF because it inserts splice sites into the genome index at alignment time
+- Slight position agreement drop (95.8% → 94.5%) because STAR detects more annotated junctions, creating more position disagreements where STAR finds spliced alignments ruSTAR misses
+- No annotated non-canonical junctions in yeast GTF, so the filter fix has no impact on yeast data — correct for organisms with annotated non-canonical junctions (e.g., U12-type introns)
+
+**Files**: `src/align/read_align.rs`
+**Depends on**: 16.1
 
 ### Phase 16.3: Junction Position Optimization (jR Scanning)
 

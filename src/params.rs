@@ -568,8 +568,8 @@ impl Parameters {
 
     /// Expand `--outSAMattributes` into a set of individual tag names.
     ///
-    /// - `"Standard"` → {NH, HI, AS, NM}
-    /// - `"All"`      → {NH, HI, AS, NM, MD, jM, jI, XS}
+    /// - `"Standard"` → {NH, HI, AS, NM, nM}
+    /// - `"All"`      → {NH, HI, AS, NM, nM, MD, jM, jI, XS}
     /// - `"None"`     → {} (empty)
     /// - Explicit list (e.g. ["NH", "AS"]) → collected as-is
     pub fn sam_attribute_set(&self) -> HashSet<String> {
@@ -580,11 +580,11 @@ impl Parameters {
             .collect::<Vec<_>>()
             .as_slice()
         {
-            ["Standard"] => ["NH", "HI", "AS", "NM"]
+            ["Standard"] => ["NH", "HI", "AS", "NM", "nM"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            ["All"] => ["NH", "HI", "AS", "NM", "MD", "jM", "jI", "XS"]
+            ["All"] => ["NH", "HI", "AS", "NM", "nM", "MD", "jM", "jI", "XS"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),

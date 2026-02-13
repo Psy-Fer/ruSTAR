@@ -32,8 +32,8 @@ Phase 1 (CLI) ✅
                                                                                                                 └→ Phase 15.4 (PE FLAG/PNEXT) ✅
                                                                                                                      └→ PE alignment fix ✅
                                                                                                                           └→ Phase 15.5 (outSAMattributes) ✅
-                                                                                                                               └→ Phase 15.6+ (nM tag) ← Next
-                                                                                                      └→ Phase 16 (accuracy parity)
+                                                                                                                               └→ Phase 15.6 (nM tag) ✅
+                                                                                                      └→ Phase 16 (accuracy parity) ← Next
                                                                                                            └→ Phase 17 (features + polish)
                                                                                                                 └→ Phase 14 (STARsolo) [DEFERRED]
 ```
@@ -1519,13 +1519,26 @@ BySJout mode (`--outFilterType BySJout`):
 **Files**: `src/io/sam.rs`, `src/params.rs`
 **Depends on**: 15.3
 
-### Phase 15.6: nM Tag (STAR-compatible Mismatch Count)
+### Phase 15.6: nM Tag (STAR-compatible Mismatch Count) ✅ COMPLETE (2026-02-13)
 
 **Problem**: STAR outputs `nM:i:N` (mismatches only, excluding indels). ruSTAR outputs `NM:i:N` (edit distance = mismatches + indels, SAM spec). Both are valid tags but some downstream tools expect STAR's `nM`. On same-CIGAR reads with indels, the values differ by exactly the indel base count.
 
-**Fix**: Add `nM` tag alongside `NM`. `nM` = `transcript.n_mismatch` directly (no indel sum). Custom tag: `Tag::new(b'n', b'M')`.
+**Implementation** (`src/params.rs`, `src/io/sam.rs`):
+1. Updated `sam_attribute_set()` presets: Standard `{NH, HI, AS, NM}` → `{NH, HI, AS, NM, nM}`, All adds `nM` too
+2. Added `nM` emission in both `transcript_to_record()` and `build_paired_mate_record()`: `Tag::new(b'n', b'M')` with value `transcript.n_mismatch as i32`
+3. Gated by `attrs.contains("nM")` — same pattern as all other tags
 
-**Files**: `src/io/sam.rs`
+**Test Results**: 235/235 tests passing (+1 new):
+- `test_nm_vs_nm_mismatch_difference` — verifies NM=10 (2 mismatch + 5 ins + 3 del) vs nM=2 (mismatches only)
+- Existing tests updated: nM assertions added to tag/attribute tests
+
+**Behavior**:
+- Default (`Standard`): NH, HI, AS, NM, nM — both edit distance and mismatch-only count
+- `All`: adds nM alongside all other tags
+- Explicit: user can include/exclude nM independently
+- nM = NM for reads without indels; nM < NM for reads with indels (difference = indel base count)
+
+**Files**: `src/io/sam.rs`, `src/params.rs`
 **Depends on**: 15.1
 
 ---

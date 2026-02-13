@@ -485,6 +485,12 @@ fn transcript_to_record(
             Value::from(compute_edit_distance(transcript)),
         );
     }
+    if attrs.contains("nM") {
+        data.insert(
+            Tag::new(b'n', b'M'),
+            Value::from(transcript.n_mismatch as i32),
+        );
+    }
     if attrs.contains("XS") {
         if let Some(xs_strand) = derive_xs_strand(transcript) {
             data.insert(Tag::new(b'X', b'S'), Value::Character(xs_strand as u8));
@@ -813,6 +819,12 @@ fn build_paired_mate_record(
             Value::from(compute_edit_distance(transcript)),
         );
     }
+    if attrs.contains("nM") {
+        data.insert(
+            Tag::new(b'n', b'M'),
+            Value::from(transcript.n_mismatch as i32),
+        );
+    }
     if attrs.contains("XS") {
         if let Some(xs_strand) = derive_xs_strand(transcript) {
             data.insert(Tag::new(b'X', b'S'), Value::Character(xs_strand as u8));
@@ -846,15 +858,15 @@ mod tests {
 
     /// Build an attribute set with all tags enabled (for tests that don't care about filtering)
     fn all_attrs() -> HashSet<String> {
-        ["NH", "HI", "AS", "NM", "XS", "jM", "jI", "MD"]
+        ["NH", "HI", "AS", "NM", "nM", "XS", "jM", "jI", "MD"]
             .iter()
             .map(|s| s.to_string())
             .collect()
     }
 
-    /// Build the standard attribute set (NH, HI, AS, NM)
+    /// Build the standard attribute set (NH, HI, AS, NM, nM)
     fn standard_attrs() -> HashSet<String> {
-        ["NH", "HI", "AS", "NM"]
+        ["NH", "HI", "AS", "NM", "nM"]
             .iter()
             .map(|s| s.to_string())
             .collect()
@@ -1272,6 +1284,11 @@ mod tests {
             Some(&Value::from(5_i32)),
             "NM tag should be 5 (2 mismatches + 3 deleted bases)"
         );
+        assert_eq!(
+            data.get(&Tag::new(b'n', b'M')),
+            Some(&Value::from(2_i32)),
+            "nM tag should be 2 (mismatches only, no indels)"
+        );
     }
 
     #[test]
@@ -1410,6 +1427,8 @@ mod tests {
         assert_eq!(data.get(&Tag::ALIGNMENT_SCORE), Some(&Value::from(100_i32)));
         // NM = 2 mismatches, no indels
         assert_eq!(data.get(&Tag::EDIT_DISTANCE), Some(&Value::from(2_i32)));
+        // nM = 2 mismatches only (same as NM when no indels)
+        assert_eq!(data.get(&Tag::new(b'n', b'M')), Some(&Value::from(2_i32)));
         // XS not in standard attrs
         assert_eq!(data.get(&Tag::new(b'X', b'S')), None);
     }
@@ -2499,6 +2518,10 @@ mod tests {
             data.get(&Tag::EDIT_DISTANCE).is_some(),
             "NM should be present"
         );
+        assert!(
+            data.get(&Tag::new(b'n', b'M')).is_some(),
+            "nM should be present"
+        );
         // Non-standard tags absent
         assert!(
             data.get(&Tag::new(b'X', b'S')).is_none(),
@@ -2569,6 +2592,10 @@ mod tests {
         assert!(
             data.get(&Tag::EDIT_DISTANCE).is_none(),
             "NM should be absent"
+        );
+        assert!(
+            data.get(&Tag::new(b'n', b'M')).is_none(),
+            "nM should be absent"
         );
         assert!(
             data.get(&Tag::new(b'X', b'S')).is_none(),
@@ -2647,6 +2674,10 @@ mod tests {
             "NM should be absent"
         );
         assert!(
+            data.get(&Tag::new(b'n', b'M')).is_none(),
+            "nM should be absent"
+        );
+        assert!(
             data.get(&Tag::new(b'X', b'S')).is_none(),
             "XS should be absent"
         );
@@ -2667,11 +2698,12 @@ mod tests {
         // Standard
         let p = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "r.fq"]);
         let attrs = p.sam_attribute_set();
-        assert_eq!(attrs.len(), 4);
+        assert_eq!(attrs.len(), 5);
         assert!(attrs.contains("NH"));
         assert!(attrs.contains("HI"));
         assert!(attrs.contains("AS"));
         assert!(attrs.contains("NM"));
+        assert!(attrs.contains("nM"));
 
         // All
         let p = Parameters::parse_from(vec![
@@ -2682,7 +2714,8 @@ mod tests {
             "All",
         ]);
         let attrs = p.sam_attribute_set();
-        assert_eq!(attrs.len(), 8);
+        assert_eq!(attrs.len(), 9);
+        assert!(attrs.contains("nM"));
         assert!(attrs.contains("XS"));
         assert!(attrs.contains("MD"));
         assert!(attrs.contains("jM"));
@@ -2715,5 +2748,63 @@ mod tests {
         assert!(attrs.contains("AS"));
         assert!(attrs.contains("MD"));
         assert!(!attrs.contains("HI"));
+    }
+
+    #[test]
+    fn test_nm_vs_nm_mismatch_difference() {
+        // Verify NM (edit distance) ≠ nM (mismatches only) when indels present
+        let genome = make_test_genome();
+
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 60,
+            is_reverse: false,
+            exons: vec![],
+            cigar: vec![
+                CigarOp::Match(20),
+                CigarOp::Ins(5),
+                CigarOp::Match(10),
+                CigarOp::Del(3),
+                CigarOp::Match(20),
+            ],
+            score: 80,
+            n_mismatch: 2,
+            n_gap: 2,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 2, 3],
+        };
+
+        let read_seq = vec![0, 1, 2, 3];
+        let read_qual = vec![30, 30, 30, 30];
+
+        let record = transcript_to_record(
+            &transcript,
+            "read1",
+            &read_seq,
+            &read_qual,
+            &genome,
+            255,
+            1,
+            1,
+            &all_attrs(),
+        )
+        .unwrap();
+
+        let data = record.data();
+        // NM = edit distance: 2 mismatches + 5 ins + 3 del = 10
+        assert_eq!(
+            data.get(&Tag::EDIT_DISTANCE),
+            Some(&Value::from(10_i32)),
+            "NM should be 10 (2 mismatches + 5 ins + 3 del)"
+        );
+        // nM = mismatches only: 2
+        assert_eq!(
+            data.get(&Tag::new(b'n', b'M')),
+            Some(&Value::from(2_i32)),
+            "nM should be 2 (mismatches only, excluding indels)"
+        );
     }
 }

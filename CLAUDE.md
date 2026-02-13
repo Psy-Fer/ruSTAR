@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.5 + PE alignment fix complete. SE: 95.7% position agreement, 97.3% CIGAR agreement. PE: 87.1% mapped (was 0%), 95.7% per-mate position agreement, 97.1% CIGAR agreement. SAM tags: NH/HI/AS/NM/XS/jM/jI/MD all implemented + --outSAMattributes enforcement. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement.**
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.6 + PE alignment fix complete. SE: 95.7% position agreement, 97.3% CIGAR agreement. PE: 87.1% mapped (was 0%), 95.7% per-mate position agreement, 97.1% CIGAR agreement. SAM tags: NH/HI/AS/NM/nM/XS/jM/jI/MD all implemented + --outSAMattributes enforcement. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement.**
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -65,9 +65,9 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 15.4 (PE FLAG/PNEXT fixes) ← **Mate strand flag, mate position, RNEXT, per-mate tags**
 - PE alignment fix ← **Independent mate alignment + pairing: 0% → 87.1% mapped, 95.7% per-mate position agreement**
 - Phase 15.5 (--outSAMattributes enforcement) ← **Standard/All/None/explicit tag control, 234 tests**
+- Phase 15.6 (nM tag) ← **STAR-compatible mismatch-only count, nM in Standard/All presets, 235 tests**
 
 **Planned**:
-- Phase 15.6 (nM tag) ← STAR-compatible mismatch-only count
 - Phase 16 (Accuracy + algorithm parity) ← jR scanning, rDNA MAPQ, seed params, PE joint DP
 - Phase 17 (Features + polish) ← Log.final.out, sorted BAM, PE chimeric, quantMode, stdout output
 
@@ -97,7 +97,7 @@ Paired-end (10k yeast read pairs):
 All modes:
 - ✅ **100% motif agreement** on shared junctions
 - ✅ SAM SEQ properly reverse-complemented for reverse-strand reads
-- ✅ 234 unit tests passing
+- ✅ 235 unit tests passing
 - ✅ Deterministic output (identical SAM across runs)
 - ✅ Bidirectional seed search (L→R + R→L)
 - ✅ Annotation-aware DP scoring (sjdbScore bonus during stitching)
@@ -193,7 +193,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 234/234 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, manual_contains × 2, implicit_saturating_sub × 1)
+**Current test status**: 235/235 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, manual_contains × 2, implicit_saturating_sub × 1)
 
 **Note**: Phase 9 integration tests fail due to pathologically repetitive test genomes (50 exact copies of 20bp). These tests need realistic genomes (deferred to Phase 13).
 
@@ -216,7 +216,7 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
   - MAPQ scores
   - 1-based genomic positions
   - Correct mate information (RNEXT, PNEXT, TLEN for paired-end — from actual mate alignment)
-  - SAM optional tags: NH, HI, AS, NM, XS (strand), jM (junction motifs), jI (intron coords), MD (mismatch descriptor)
+  - SAM optional tags: NH, HI, AS, NM, nM (mismatches only), XS (strand), jM (junction motifs), jI (intron coords), MD (mismatch descriptor)
   - --outSAMattributes controls which tags are emitted (Standard/All/None/explicit)
   - SECONDARY flag (0x100) on multi-mapper hit_index > 1
   - outSAMmultNmax limits number of reported alignments per read
@@ -260,7 +260,7 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 - ~~**XS strand tag**~~ ✅ DONE in Phase 15.2 — emitted with `--outSAMstrandField intronMotif` (221 XS tags on 10k reads)
 - ~~**Secondary alignment output**~~ ✅ DONE in Phase 15.2 — FLAG 0x100 on hit_index > 1 (876 secondaries, 99.8% FLAG agree, 96.2% NH agree)
 - ~~**outSAMmultNmax**~~ ✅ DONE in Phase 15.2 — limits reported alignments (default -1 = all)
-- **STAR uses `nM` (mismatches only), ruSTAR uses `NM` (edit distance)** — different tags, both valid; may need `nM` for compat — Phase 15.6
+- ~~**STAR uses `nM` (mismatches only), ruSTAR uses `NM` (edit distance)**~~ ✅ DONE in Phase 15.6 — nM tag added alongside NM; both emitted in Standard/All presets
 - ~~**jM/jI/MD tags**~~ ✅ DONE in Phase 15.3 — jM (junction motifs, B:c), jI (intron coords, B:i), MD (mismatch descriptor, Z:) on all records; 448 spliced records get jM/jI
 - ~~**Paired-end FLAG/PNEXT bugs**~~ ✅ DONE in Phase 15.4 — FLAG 0x20 from mate's actual strand, PNEXT per-chr coords, RNEXT from mate, per-mate AS/NM/XS/jM/jI/MD
 - ~~**PE 0% mapped**~~ ✅ FIXED — Independent mate alignment + pairing: 87.1% mapped, 95.7% per-mate position agreement

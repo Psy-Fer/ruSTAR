@@ -73,17 +73,16 @@ target/release/ruSTAR \
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Unique mapped | 82.9% | 82.6% |
-| Multi-mapped | 6.1% | 7.4% |
-| Soft-clipped reads | 26.1% | 26.0% |
-| Splice rate | 3.4% | 2.2% |
+| Unique mapped | 83.2% | 82.6% |
+| Multi-mapped | 5.5% | 7.4% |
+| Soft-clipped reads | 26.6% | 26.0% |
+| Splice rate | 2.2% | 2.2% |
 
 #### Position and CIGAR Agreement
 
 | Mode | Position agree | CIGAR agree | Splice rate |
 |------|---------------|-------------|-------------|
-| Normal (default) | 95.7% | 97.3% | 3.4% |
-| BySJout | 96.7% | 98.3% | 1.1% |
+| Normal (default) | 95.8% | 97.8% | 2.2% |
 
 #### SAM Tag Agreement (position-matching reads)
 
@@ -100,8 +99,8 @@ target/release/ruSTAR \
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Shared junctions | 50 | 72 total |
-| ruSTAR-only junctions | 6 | -- |
+| Shared junctions | 41 | 72 total |
+| ruSTAR-only junctions | 5 | -- |
 | Motif agreement (shared) | 100% | -- |
 
 ### Paired-End (10k yeast read pairs, 150bp)
@@ -159,8 +158,7 @@ target/release/ruSTAR \
 - No `--quantMode GeneCounts`
 - No `--outReadsUnmapped Fastx`
 - No `--outStd SAM/BAM` (stdout output)
-- Over-splicing in normal mode (3.4% vs STAR 2.2%) -- use BySJout with GTF for best accuracy
-- STAR uses `nM` (mismatches only); ruSTAR uses `NM` (edit distance) -- different semantics, both valid
+- STAR uses `nM` (mismatches only); ruSTAR emits both `NM` (edit distance) and `nM` (mismatches only)
 
 ## Building from Source
 

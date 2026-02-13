@@ -33,8 +33,9 @@ Phase 1 (CLI) ✅
                                                                                                                      └→ PE alignment fix ✅
                                                                                                                           └→ Phase 15.5 (outSAMattributes) ✅
                                                                                                                                └→ Phase 15.6 (nM tag) ✅
-                                                                                                      └→ Phase 16 (accuracy parity) ← Next
-                                                                                                           └→ Phase 17 (features + polish)
+                                                                                                      └→ Phase 16.1 (max_cluster_dist) ✅
+                                                                                                           └→ Phase 16 (accuracy parity) ← Next
+                                                                                                                └→ Phase 17 (features + polish)
                                                                                                                 └→ Phase 14 (STARsolo) [DEFERRED]
 ```
 
@@ -1545,15 +1546,40 @@ BySJout mode (`--outFilterType BySJout`):
 
 ## Phase 16: Accuracy + Algorithm Parity
 
-**Status**: Not Started
+**Status**: In Progress (Phase 16.1 complete)
 
 **Goal**: Close remaining accuracy gaps vs STAR. Fix over-splicing, rDNA MAPQ, missing seed parameters, and DP junction optimization.
 
-### Phase 16.1: max_cluster_dist from winBinNbits
+### Phase 16.1: max_cluster_dist from winBinNbits ✅ COMPLETE (2026-02-13)
 
-**Problem**: `src/align/read_align.rs:59` hardcodes 100kb. STAR default is `2^winBinNbits * winAnchorDistNbins` = 589,824bp.
+**Problem**: `src/align/read_align.rs:61` hardcoded `max_cluster_dist = 100000` (100kb). STAR computes this as `2^winBinNbits * winAnchorDistNbins` = 65536 × 9 = 589,824bp — nearly 6× larger. Also, `align_intron_max` default (589,824) was duplicated as a literal in `score.rs` and `junction/mod.rs`.
 
-**Fix**: Add `--winBinNbits` (16) and `--winAnchorDistNbins` (9) params. Compute max_cluster_dist from them.
+**Implementation** (`src/params.rs`, `src/align/read_align.rs`, `src/align/score.rs`, `src/junction/mod.rs`):
+1. Added `--winBinNbits` (default 16) and `--winAnchorDistNbins` (default 9) params
+2. Added `win_bin_window_dist()` helper: `2^winBinNbits * winAnchorDistNbins` (default = 589,824)
+3. Replaced hardcoded 100kb in `read_align.rs` with `params.win_bin_window_dist()`
+4. Replaced hardcoded 589,824 in `score.rs` and `junction/mod.rs` with computed value from params
+
+**Test Results**: 237/237 tests passing (+2 new):
+- `win_bin_window_dist_default` — verifies 2^16 * 9 = 589,824
+- `win_bin_window_dist_custom` — verifies 2^14 * 5 = 81,920
+
+**Impact** (10k yeast reads, Normal mode):
+
+| Metric | Before (100kb) | After (589kb) | STAR |
+|--------|---------------|---------------|------|
+| Unique mapped | 82.9% | 83.2% | 82.6% |
+| Multi mapped | 6.1% | 5.5% | 7.4% |
+| Splice rate | **3.4%** | **2.2%** | 2.2% |
+| Position agreement | 95.7% | 95.8% | — |
+| CIGAR agreement | 97.3% | 97.8% | — |
+| Shared junctions | 50/72 | 41/72 | — |
+| ruSTAR-only junctions | 6 | 5 | — |
+
+Key: **Splice rate now exactly matches STAR** (2.2%). Over-splicing fixed by larger clustering window.
+
+**Files**: `src/params.rs`, `src/align/read_align.rs`, `src/align/score.rs`, `src/junction/mod.rs`
+**Depends on**: 15.6
 
 ### Phase 16.2: RemoveNoncanonicalUnannotated Filter
 
@@ -1563,7 +1589,7 @@ BySJout mode (`--outFilterType BySJout`):
 
 ### Phase 16.3: Junction Position Optimization (jR Scanning)
 
-**Problem**: Splice rate 3.4% vs STAR 2.2%. 6 false junctions. STAR shifts junction boundaries by ±scoreStitchSJshift bases to prefer canonical motifs.
+**Problem**: ~~Splice rate 3.4% vs STAR 2.2%.~~ Splice rate fixed by Phase 16.1 (now 2.2%). 5 false junctions remain. STAR shifts junction boundaries by ±scoreStitchSJshift bases to prefer canonical motifs.
 
 **Fix**: After detecting a splice junction in DP, try shifting boundary ± `scoreStitchSJshift` bases. Keep the shift that produces the best motif score.
 

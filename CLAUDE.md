@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.6 + PE alignment fix complete. SE: 95.7% position agreement, 97.3% CIGAR agreement. PE: 87.1% mapped (was 0%), 95.7% per-mate position agreement, 97.1% CIGAR agreement. SAM tags: NH/HI/AS/NM/nM/XS/jM/jI/MD all implemented + --outSAMattributes enforcement. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement.**
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.6 + 16.1 + PE alignment fix complete. SE: 95.8% position agreement, 97.8% CIGAR agreement, 2.2% splice rate (matches STAR). PE: 87.1% mapped (was 0%), 95.7% per-mate position agreement, 97.1% CIGAR agreement. SAM tags: NH/HI/AS/NM/nM/XS/jM/jI/MD all implemented + --outSAMattributes enforcement. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement.**
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -66,25 +66,20 @@ before adding complex features. Threading affects the entire execution model and
 - PE alignment fix ← **Independent mate alignment + pairing: 0% → 87.1% mapped, 95.7% per-mate position agreement**
 - Phase 15.5 (--outSAMattributes enforcement) ← **Standard/All/None/explicit tag control, 234 tests**
 - Phase 15.6 (nM tag) ← **STAR-compatible mismatch-only count, nM in Standard/All presets, 235 tests**
+- Phase 16.1 (max_cluster_dist) ← **winBinNbits/winAnchorDistNbins params, 100kb→589kb clustering, splice rate 3.4%→2.2% (matches STAR), 237 tests**
 
 **Planned**:
-- Phase 16 (Accuracy + algorithm parity) ← jR scanning, rDNA MAPQ, seed params, PE joint DP
+- Phase 16.2+ (Accuracy + algorithm parity) ← RemoveNoncanonicalUnannotated, jR scanning, rDNA MAPQ, seed params, PE joint DP
 - Phase 17 (Features + polish) ← Log.final.out, sorted BAM, PE chimeric, quantMode, stdout output
 
 **Current Status** (10k yeast reads):
 
 Single-end (Normal mode):
-- ✅ **95.7% position agreement** with STAR (was 51% → 94.5% → 95.3% → 96.3% → 95.7%)
-- ✅ **97.3% CIGAR agreement** among position-matching reads
-- ✅ 82.9% unique mapped (STAR: 82.6%), 6.12% multi-mapped (STAR: 7.4%)
-- ✅ 26.1% soft clips (STAR: 26.0%)
-- ✅ **Splice rate 3.4%** (STAR: 2.2%) — exceeds STAR (over-splicing)
-
-Single-end (BySJout mode, `--outFilterType BySJout`):
-- ✅ **96.7% position agreement** (+1.0% vs Normal)
-- ✅ **98.3% CIGAR agreement** (+1.0% vs Normal)
-- ✅ 207 reads filtered with non-surviving junctions
-- ⚠️ **Splice rate 1.1%** — too aggressive without GTF (STAR: 2.2%)
+- ✅ **95.8% position agreement** with STAR (was 51% → 94.5% → 95.3% → 96.3% → 95.7% → 95.8%)
+- ✅ **97.8% CIGAR agreement** among position-matching reads
+- ✅ 83.2% unique mapped (STAR: 82.6%), 5.5% multi-mapped (STAR: 7.4%)
+- ✅ 26.6% soft clips (STAR: 26.0%)
+- ✅ **Splice rate 2.2%** (STAR: 2.2%) — **exact match!** (was 3.4%, fixed by Phase 16.1)
 
 Paired-end (10k yeast read pairs):
 - ✅ **87.1% mapped** (8714/10000 pairs) — was 0% before PE alignment fix
@@ -97,7 +92,7 @@ Paired-end (10k yeast read pairs):
 All modes:
 - ✅ **100% motif agreement** on shared junctions
 - ✅ SAM SEQ properly reverse-complemented for reverse-strand reads
-- ✅ 235 unit tests passing
+- ✅ 237 unit tests passing
 - ✅ Deterministic output (identical SAM across runs)
 - ✅ Bidirectional seed search (L→R + R→L)
 - ✅ Annotation-aware DP scoring (sjdbScore bonus during stitching)
@@ -193,7 +188,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 235/235 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, manual_contains × 2, implicit_saturating_sub × 1)
+**Current test status**: 237/237 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, manual_contains × 2, implicit_saturating_sub × 1)
 
 **Note**: Phase 9 integration tests fail due to pathologically repetitive test genomes (50 exact copies of 20bp). These tests need realistic genomes (deferred to Phase 13).
 
@@ -247,10 +242,10 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 7c. ~~**No jM/jI/MD tags**~~ ✅ FIXED in Phase 15.3 — jM/jI on 448 spliced records, MD on all 9774 records.
 7d. ~~**PE FLAG/PNEXT bugs**~~ ✅ FIXED in Phase 15.4 — FLAG 0x20 from mate's actual strand, PNEXT per-chr coords, RNEXT from mate, per-mate tags.
 7e. ~~**PE 0% mapped**~~ ✅ FIXED — Rewrote `align_paired_read()` to use independent SE alignment per mate then pair by chr+distance. 0% → 87.1% mapped, 95.7% per-mate position agreement.
-8. **Over-splicing in Normal mode** (3.4% vs STAR 2.2%): BySJout reduces to 1.1% (too aggressive without GTF). Optimal: use BySJout with GTF annotations.
+8. ~~**Over-splicing in Normal mode**~~ ✅ FIXED in Phase 16.1 — splice rate now 2.2% (matches STAR exactly). max_cluster_dist 100kb→589kb.
 9. **rDNA multi-mapping** (~157 same-chr >500bp in BySJout): chrXII rDNA repeats — STAR=MAPQ 1-3, ruSTAR=MAPQ 255.
-10. **98 diff-chr disagreements** (SE) / 168 (PE): Multi-mappers (harmless tie-breaking).
-11. **57 STAR-only mapped reads** (SE Normal) / 259 (BySJout): Stable in Normal; BySJout increase from filtering.
+10. **112 diff-chr disagreements** (SE) / 168 (PE): Multi-mappers (harmless tie-breaking).
+11. **87 STAR-only mapped reads** (SE Normal) / 259 (BySJout): Stable in Normal; BySJout increase from filtering.
 12. **PE 12.9% unmapped** (STAR: 0%): Requires both mates to align independently. Needs PE joint DP stitching (Phase 16.6) for mate rescue.
 12. ~~**SJ motif strand disagreement**~~ ✅ FIXED in Phase 13.12 — strand now derived from splice motif (`implied_strand()`), not read alignment strand.
 
@@ -268,7 +263,7 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 - ~~**--outSAMattributes**~~ ✅ DONE in Phase 15.5 — Standard/All/None/explicit tag control enforced
 - **No coordinate-sorted BAM output** (unsorted only; use `samtools sort`) — Phase 17.2
 - **No Log.final.out** statistics file (MultiQC/RNA-SeQC) — Phase 17.1
-- **Over-splicing** (3.4% vs STAR 2.2%) — needs jR scanning (Phase 16.3)
+- ~~**Over-splicing**~~ ✅ FIXED in Phase 16.1 — splice rate 2.2% matches STAR
 - **rDNA MAPQ inflation** (~157 reads, MAPQ 255 vs STAR 1-3) — Phase 16.5
 - **No --outReadsUnmapped Fastx** — Phase 17.4
 - **No --outStd SAM/BAM** (stdout output) — Phase 17.6

@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.6 + 16.1 + PE alignment fix complete. SE: 95.8% position agreement, 97.8% CIGAR agreement, 2.2% splice rate (matches STAR). PE: 87.1% mapped (was 0%), 95.7% per-mate position agreement, 97.1% CIGAR agreement. SAM tags: NH/HI/AS/NM/nM/XS/jM/jI/MD all implemented + --outSAMattributes enforcement. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement.**
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.6 + 16.1-16.2 + PE alignment fix complete. SE: 95.8% position agreement, 97.8% CIGAR agreement, 2.2% splice rate (matches STAR). With GTF: 94.5% position, 97.6% CIGAR (STAR detects more annotated junctions via index insertion). PE: 87.1% mapped (was 0%), 95.7% per-mate position agreement, 97.1% CIGAR agreement. SAM tags: NH/HI/AS/NM/nM/XS/jM/jI/MD all implemented + --outSAMattributes enforcement. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement.**
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -67,9 +67,10 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 15.5 (--outSAMattributes enforcement) ← **Standard/All/None/explicit tag control, 234 tests**
 - Phase 15.6 (nM tag) ← **STAR-compatible mismatch-only count, nM in Standard/All presets, 235 tests**
 - Phase 16.1 (max_cluster_dist) ← **winBinNbits/winAnchorDistNbins params, 100kb→589kb clustering, splice rate 3.4%→2.2% (matches STAR), 237 tests**
+- Phase 16.2 (RemoveNoncanonicalUnannotated + GTF testing) ← **Filter fix: only reject unannotated non-canonical junctions. GTF differential testing baseline established. 238 tests**
 
 **Planned**:
-- Phase 16.2+ (Accuracy + algorithm parity) ← RemoveNoncanonicalUnannotated, jR scanning, rDNA MAPQ, seed params, PE joint DP
+- Phase 16.3+ (Accuracy + algorithm parity) ← jR scanning, rDNA MAPQ, seed params, PE joint DP
 - Phase 17 (Features + polish) ← Log.final.out, sorted BAM, PE chimeric, quantMode, stdout output
 
 **Current Status** (10k yeast reads):
@@ -92,7 +93,7 @@ Paired-end (10k yeast read pairs):
 All modes:
 - ✅ **100% motif agreement** on shared junctions
 - ✅ SAM SEQ properly reverse-complemented for reverse-strand reads
-- ✅ 237 unit tests passing
+- ✅ 238 unit tests passing
 - ✅ Deterministic output (identical SAM across runs)
 - ✅ Bidirectional seed search (L→R + R→L)
 - ✅ Annotation-aware DP scoring (sjdbScore bonus during stitching)
@@ -188,7 +189,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 237/237 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, manual_contains × 2, implicit_saturating_sub × 1)
+**Current test status**: 238/238 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, manual_contains × 2, implicit_saturating_sub × 1)
 
 **Note**: Phase 9 integration tests fail due to pathologically repetitive test genomes (50 exact copies of 20bp). These tests need realistic genomes (deferred to Phase 13).
 
@@ -243,6 +244,7 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 7d. ~~**PE FLAG/PNEXT bugs**~~ ✅ FIXED in Phase 15.4 — FLAG 0x20 from mate's actual strand, PNEXT per-chr coords, RNEXT from mate, per-mate tags.
 7e. ~~**PE 0% mapped**~~ ✅ FIXED — Rewrote `align_paired_read()` to use independent SE alignment per mate then pair by chr+distance. 0% → 87.1% mapped, 95.7% per-mate position agreement.
 8. ~~**Over-splicing in Normal mode**~~ ✅ FIXED in Phase 16.1 — splice rate now 2.2% (matches STAR exactly). max_cluster_dist 100kb→589kb.
+8b. ~~**RemoveNoncanonicalUnannotated filter incorrect**~~ ✅ FIXED in Phase 16.2 — now properly checks annotation status via `junction_annotated` Vec.
 9. **rDNA multi-mapping** (~157 same-chr >500bp in BySJout): chrXII rDNA repeats — STAR=MAPQ 1-3, ruSTAR=MAPQ 255.
 10. **112 diff-chr disagreements** (SE) / 168 (PE): Multi-mappers (harmless tie-breaking).
 11. **87 STAR-only mapped reads** (SE Normal) / 259 (BySJout): Stable in Normal; BySJout increase from filtering.

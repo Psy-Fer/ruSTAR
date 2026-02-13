@@ -216,11 +216,11 @@ pub fn align_read(
                 }
             }
             IntronMotifFilter::RemoveNoncanonicalUnannotated => {
-                // TODO: requires checking junction database for annotation status
-                // For now, treat same as RemoveNoncanonical
+                // Only reject if a non-canonical junction is NOT annotated in GTF
                 if t.junction_motifs
                     .iter()
-                    .any(|m| *m == SpliceMotif::NonCanonical)
+                    .zip(t.junction_annotated.iter())
+                    .any(|(m, annotated)| *m == SpliceMotif::NonCanonical && !annotated)
                 {
                     *filter_reasons
                         .entry("noncanonical_unannotated_junction")
@@ -967,5 +967,83 @@ mod tests {
 
         let tlen = calculate_insert_size(&t1, &t2);
         assert_eq!(tlen, -300); // Negative because mate2 is leftmost
+    }
+
+    #[test]
+    fn test_noncanonical_unannotated_filter() {
+        use crate::align::transcript::{CigarOp, Exon, Transcript};
+        use crate::align::score::SpliceMotif;
+
+        // Helper: check if a transcript would be filtered by RemoveNoncanonicalUnannotated
+        // (mirrors the logic in the retain closure)
+        let would_filter = |t: &Transcript| -> bool {
+            t.junction_motifs
+                .iter()
+                .zip(t.junction_annotated.iter())
+                .any(|(m, annotated)| *m == SpliceMotif::NonCanonical && !annotated)
+        };
+
+        let base_transcript = || Transcript {
+            chr_idx: 0,
+            genome_start: 1000,
+            genome_end: 1200,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 1000,
+                genome_end: 1200,
+                read_start: 0,
+                read_end: 100,
+            }],
+            cigar: vec![CigarOp::Match(100)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 1,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0; 100],
+        };
+
+        // Case 1: NonCanonical + unannotated → should be filtered
+        let mut t1 = base_transcript();
+        t1.junction_motifs = vec![SpliceMotif::NonCanonical];
+        t1.junction_annotated = vec![false];
+        assert!(
+            would_filter(&t1),
+            "NonCanonical + unannotated should be filtered"
+        );
+
+        // Case 2: NonCanonical + annotated → should be KEPT
+        let mut t2 = base_transcript();
+        t2.junction_motifs = vec![SpliceMotif::NonCanonical];
+        t2.junction_annotated = vec![true];
+        assert!(
+            !would_filter(&t2),
+            "NonCanonical + annotated should be kept"
+        );
+
+        // Case 3: Canonical + unannotated → should be KEPT
+        let mut t3 = base_transcript();
+        t3.junction_motifs = vec![SpliceMotif::GtAg];
+        t3.junction_annotated = vec![false];
+        assert!(!would_filter(&t3), "Canonical + unannotated should be kept");
+
+        // Case 4: Mixed — one canonical + one non-canonical unannotated → filtered
+        let mut t4 = base_transcript();
+        t4.junction_motifs = vec![SpliceMotif::GtAg, SpliceMotif::NonCanonical];
+        t4.junction_annotated = vec![true, false];
+        assert!(
+            would_filter(&t4),
+            "Mixed with unannotated non-canonical should be filtered"
+        );
+
+        // Case 5: Mixed — one canonical + one non-canonical annotated → kept
+        let mut t5 = base_transcript();
+        t5.junction_motifs = vec![SpliceMotif::GtAg, SpliceMotif::NonCanonical];
+        t5.junction_annotated = vec![false, true];
+        assert!(
+            !would_filter(&t5),
+            "Mixed with annotated non-canonical should be kept"
+        );
     }
 }

@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.4 + PE alignment fix complete. SE: 95.7% position agreement, 97.3% CIGAR agreement. PE: 87.1% mapped (was 0%), 95.7% per-mate position agreement, 97.1% CIGAR agreement. SAM tags: NH/HI/AS/NM/XS/jM/jI/MD all implemented. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement.**
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.5 + PE alignment fix complete. SE: 95.7% position agreement, 97.3% CIGAR agreement. PE: 87.1% mapped (was 0%), 95.7% per-mate position agreement, 97.1% CIGAR agreement. SAM tags: NH/HI/AS/NM/XS/jM/jI/MD all implemented + --outSAMattributes enforcement. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement.**
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -64,9 +64,10 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 15.3 (jM/jI/MD tags) ← **Junction motif/intron tags + mismatch descriptor for QC/GATK**
 - Phase 15.4 (PE FLAG/PNEXT fixes) ← **Mate strand flag, mate position, RNEXT, per-mate tags**
 - PE alignment fix ← **Independent mate alignment + pairing: 0% → 87.1% mapped, 95.7% per-mate position agreement**
+- Phase 15.5 (--outSAMattributes enforcement) ← **Standard/All/None/explicit tag control, 234 tests**
 
 **Planned**:
-- Phase 15.5 (--outSAMattributes enforcement) ← Control which tags are emitted
+- Phase 15.6 (nM tag) ← STAR-compatible mismatch-only count
 - Phase 16 (Accuracy + algorithm parity) ← jR scanning, rDNA MAPQ, seed params, PE joint DP
 - Phase 17 (Features + polish) ← Log.final.out, sorted BAM, PE chimeric, quantMode, stdout output
 
@@ -96,7 +97,7 @@ Paired-end (10k yeast read pairs):
 All modes:
 - ✅ **100% motif agreement** on shared junctions
 - ✅ SAM SEQ properly reverse-complemented for reverse-strand reads
-- ✅ 230 unit tests passing
+- ✅ 234 unit tests passing
 - ✅ Deterministic output (identical SAM across runs)
 - ✅ Bidirectional seed search (L→R + R→L)
 - ✅ Annotation-aware DP scoring (sjdbScore bonus during stitching)
@@ -106,6 +107,7 @@ All modes:
 - ✅ jM/jI/MD tags (junction motifs, intron coords, mismatch descriptor)
 - ✅ PE FLAG/PNEXT/RNEXT correct (mate strand from actual alignment, per-chr mate position)
 - ✅ Per-mate tags (AS, NM, XS, jM, jI, MD computed from each mate's own transcript)
+- ✅ --outSAMattributes enforcement (Standard/All/None/explicit tag control)
 
 ## Source Layout
 
@@ -191,7 +193,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 230/230 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, manual_contains × 2, implicit_saturating_sub × 1)
+**Current test status**: 234/234 unit tests passing, non-critical clippy warnings (too_many_arguments × 3, manual_contains × 2, implicit_saturating_sub × 1)
 
 **Note**: Phase 9 integration tests fail due to pathologically repetitive test genomes (50 exact copies of 20bp). These tests need realistic genomes (deferred to Phase 13).
 
@@ -215,6 +217,7 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
   - 1-based genomic positions
   - Correct mate information (RNEXT, PNEXT, TLEN for paired-end — from actual mate alignment)
   - SAM optional tags: NH, HI, AS, NM, XS (strand), jM (junction motifs), jI (intron coords), MD (mismatch descriptor)
+  - --outSAMattributes controls which tags are emitted (Standard/All/None/explicit)
   - SECONDARY flag (0x100) on multi-mapper hit_index > 1
   - outSAMmultNmax limits number of reported alignments per read
 - Splice junction statistics output (SJ.out.tab, SJ.pass1.out.tab in two-pass mode)
@@ -262,7 +265,7 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 - ~~**Paired-end FLAG/PNEXT bugs**~~ ✅ DONE in Phase 15.4 — FLAG 0x20 from mate's actual strand, PNEXT per-chr coords, RNEXT from mate, per-mate AS/NM/XS/jM/jI/MD
 - ~~**PE 0% mapped**~~ ✅ FIXED — Independent mate alignment + pairing: 87.1% mapped, 95.7% per-mate position agreement
 - **PE 12.9% unmapped** (STAR: 0%) — needs PE joint DP stitching for mate rescue — Phase 16.6
-- **--outSAMattributes** parsed but not enforced — Phase 15.5
+- ~~**--outSAMattributes**~~ ✅ DONE in Phase 15.5 — Standard/All/None/explicit tag control enforced
 - **No coordinate-sorted BAM output** (unsorted only; use `samtools sort`) — Phase 17.2
 - **No Log.final.out** statistics file (MultiQC/RNA-SeQC) — Phase 17.1
 - **Over-splicing** (3.4% vs STAR 2.2%) — needs jR scanning (Phase 16.3)

@@ -31,7 +31,8 @@ Phase 1 (CLI) ✅
                                                                                                            └→ Phase 15.3 (jM/jI/MD tags) ✅
                                                                                                                 └→ Phase 15.4 (PE FLAG/PNEXT) ✅
                                                                                                                      └→ PE alignment fix ✅
-                                                                                                                          └→ Phase 15.5+ (attribs, nM) ← Next
+                                                                                                                          └→ Phase 15.5 (outSAMattributes) ✅
+                                                                                                                               └→ Phase 15.6+ (nM tag) ← Next
                                                                                                       └→ Phase 16 (accuracy parity)
                                                                                                            └→ Phase 17 (features + polish)
                                                                                                                 └→ Phase 14 (STARsolo) [DEFERRED]
@@ -1488,11 +1489,32 @@ BySJout mode (`--outFilterType BySJout`):
 
 ---
 
-### Phase 15.5: --outSAMattributes Enforcement
+### Phase 15.5: --outSAMattributes Enforcement ✅ COMPLETE (2026-02-12)
 
-**Problem**: Parameter parsed but no tags generated until 15.1-15.3, then need to control which tags are emitted.
+**Problem**: `--outSAMattributes` was parsed (as `Vec<String>`, default `["Standard"]`) but never enforced. All tags (NH, HI, AS, NM, XS, jM, jI, MD) were unconditionally emitted regardless of what the user requested. STAR uses this parameter to control which optional tags appear in SAM/BAM output.
 
-**Fix**: Parse attribute list into a set. Check the set before emitting each tag.
+**Implementation** (`src/params.rs`, `src/io/sam.rs`):
+1. Added `Parameters::sam_attribute_set()` method — expands the raw `out_sam_attributes` Vec into a `HashSet<String>`:
+   - `"Standard"` → `{NH, HI, AS, NM}` (default)
+   - `"All"` → `{NH, HI, AS, NM, MD, jM, jI, XS}`
+   - `"None"` → `{}` (empty set)
+   - Explicit list → collected as-is (e.g. `["NH", "MD"]` → `{NH, MD}`)
+2. Replaced `emit_xs: bool` parameter with `attrs: &HashSet<String>` in `transcript_to_record()` and `build_paired_mate_record()`
+3. Wrapped each tag insertion (NH, HI, AS, NM, XS, jM, jI, MD) in `attrs.contains()` checks
+4. Updated all 3 call sites (`write_alignment`, `build_alignment_records`, `build_paired_records`) to compute attrs from `params.sam_attribute_set()` and remove XS if `out_sam_strand_field != "intronMotif"`
+
+**Test Results**: 234/234 tests passing (+4 new):
+- `test_out_sam_attributes_standard` — NH/HI/AS/NM present, XS/jM/jI/MD absent
+- `test_out_sam_attributes_none` — no optional tags at all
+- `test_out_sam_attributes_explicit` — only NH and MD present when `["NH", "MD"]` requested
+- `test_sam_attribute_set_expansion` — Standard/All/None/explicit parsing verified
+
+**Behavior**:
+- Default (`Standard`): NH, HI, AS, NM — matches STAR default output
+- `All`: NH, HI, AS, NM, MD, jM, jI, XS — all implemented tags emitted
+- `None`: no optional tags — minimal output for file size savings
+- Explicit: any subset of tags — full user control
+- XS emission still requires `--outSAMstrandField intronMotif` AND `XS` in attribute set (double gate)
 
 **Files**: `src/io/sam.rs`, `src/params.rs`
 **Depends on**: 15.3

@@ -36,7 +36,8 @@ Phase 1 (CLI) ✅
                                                                                                       └→ Phase 16.1 (max_cluster_dist) ✅
                                                                                                            └→ Phase 16.2 (NoncanonicalUnannotated + GTF testing) ✅
                                                                                                                 └→ Phase 16.3 (jR scanning) ✅
-                                                                                                                     └→ Phase 16.4+ (accuracy parity) ← Next
+                                                                                                                     └→ Phase 16.4 (seed search params) ✅
+                                                                                                                          └→ Phase 16.5+ (accuracy parity) ← Next
                                                                                                                 └→ Phase 17 (features + polish)
                                                                                                                 └→ Phase 14 (STARsolo) [DEFERRED]
 ```
@@ -1548,7 +1549,7 @@ BySJout mode (`--outFilterType BySJout`):
 
 ## Phase 16: Accuracy + Algorithm Parity
 
-**Status**: In Progress (Phase 16.1-16.2 complete)
+**Status**: In Progress (Phase 16.1-16.4 complete)
 
 **Goal**: Close remaining accuracy gaps vs STAR. Fix over-splicing, rDNA MAPQ, missing seed parameters, and DP junction optimization.
 
@@ -1634,11 +1635,20 @@ Key findings:
 
 **Depends on**: 16.2
 
-### Phase 16.4: seedSearchStartLmax + seedSearchLmax
+### Phase 16.4: Seed Search Parameters + Sparse Infrastructure ✅ COMPLETE (2026-02-13)
 
-**Problem**: Neither parsed. `seedSearchStartLmax` (50) controls R-to-L search start position.
+**Problem**: Missing STAR seed search parameters (seedSearchStartLmax, seedSearchLmax, seedMapMin, seedSearchStartLmaxOverLread). Sparse seed search with MMP advancement was attempted but caused major regression (95.8%→91.9% pos, 2.1%→4.6% splice rate) because DP stitcher requires dense (every-position) seeds.
 
-**Fix**: Add parameters. In `find_seeds()`, start R-to-L loop from `read_len - seedSearchStartLmax`.
+**Fix**:
+- Added 4 STAR-compatible params: `seedSearchStartLmax` (50), `seedSearchStartLmaxOverLread` (1.0), `seedSearchLmax` (0), `seedMapMin` (5)
+- Refactored `find_seed_at_position()` → returns `MmpResult` (always provides MMP advance length, even when seed not stored)
+- Added `search_direction_sparse()` with correct STAR-matching Lmapped tracking
+- Kept every-position search as default — sparse search dormant until DP is adapted
+- Two STAR algorithm bugs fixed in MmpResult: (1) advance-by-MMP on multimap-filtered seeds, (2) seedMapMin threshold for while-loop termination
+
+**Files**: `src/params.rs`, `src/align/seed.rs`
+**Tests**: 241/241 passing (unchanged from Phase 16.3 baseline)
+**Metrics**: Unchanged from Phase 16.3 — 94.5% position, 97.8% CIGAR, 2.1% splice rate, 42 shared junctions
 
 ### Phase 16.5: SAindex Hint Usage (rDNA MAPQ Fix)
 

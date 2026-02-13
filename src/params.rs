@@ -492,6 +492,22 @@ pub struct Parameters {
     #[arg(long = "seedPerWindowNmax", default_value_t = 50)]
     pub seed_per_window_nmax: usize,
 
+    /// Max distance between seed search start positions (defines Nstart = readLen/seedSearchStartLmax + 1)
+    #[arg(long = "seedSearchStartLmax", default_value_t = 50)]
+    pub seed_search_start_lmax: usize,
+
+    /// seedSearchStartLmax normalized by read length (effective = min(seedSearchStartLmax, this * (readLen-1)))
+    #[arg(long = "seedSearchStartLmaxOverLread", default_value_t = 1.0)]
+    pub seed_search_start_lmax_over_lread: f64,
+
+    /// Max seed length; 0 = unlimited (default)
+    #[arg(long = "seedSearchLmax", default_value_t = 0)]
+    pub seed_search_lmax: usize,
+
+    /// Min mappable length for seed search while-loop termination (STAR default: 5)
+    #[arg(long = "seedMapMin", default_value_t = 5)]
+    pub seed_map_min: usize,
+
     /// Max number of loci anchors are allowed to map to
     #[arg(long = "winAnchorMultimapNmax", default_value_t = 50)]
     pub win_anchor_multimap_nmax: usize,
@@ -698,6 +714,10 @@ mod tests {
         assert_eq!(p.seed_multimap_nmax, 10000);
         assert_eq!(p.seed_per_read_nmax, 1000);
         assert_eq!(p.seed_per_window_nmax, 50);
+        assert_eq!(p.seed_search_start_lmax, 50);
+        assert!((p.seed_search_start_lmax_over_lread - 1.0).abs() < f64::EPSILON);
+        assert_eq!(p.seed_search_lmax, 0);
+        assert_eq!(p.seed_map_min, 5);
         assert_eq!(p.win_anchor_multimap_nmax, 50);
         assert_eq!(p.seed_none_loci_per_window, 10);
         assert_eq!(p.align_windows_per_read_nmax, 10000);

@@ -53,9 +53,9 @@ impl Seed {
 
         // Search L→R (forward direction on read)
         for read_pos in 0..read_len {
-            if let Some(seed) =
-                find_seed_at_position(read_seq, read_pos, index, min_seed_length, false, params)?
-            {
+            let result =
+                find_seed_at_position(read_seq, read_pos, index, min_seed_length, false, params)?;
+            if let Some(seed) = result.seed {
                 seeds.push(seed);
                 // Cap total seeds per read (STAR: seedPerReadNmax)
                 if seeds.len() >= params.seed_per_read_nmax {
@@ -67,9 +67,9 @@ impl Seed {
         // Search R→L: reverse-complement the read and run L→R search on it
         let rc_read = reverse_complement_read(read_seq);
         for rc_pos in 0..rc_read.len() {
-            if let Some(mut seed) =
-                find_seed_at_position(&rc_read, rc_pos, index, min_seed_length, false, params)?
-            {
+            let result =
+                find_seed_at_position(&rc_read, rc_pos, index, min_seed_length, false, params)?;
+            if let Some(mut seed) = result.seed {
                 // Convert RC read position back to original read coordinates
                 seed.read_pos = read_len - rc_pos - seed.length;
                 seed.search_rc = true;
@@ -167,7 +167,82 @@ fn reverse_complement_read(read_seq: &[u8]) -> Vec<u8> {
     read_seq.iter().rev().map(|&b| complement_base(b)).collect()
 }
 
+/// Result of an MMP (Maximal Mappable Prefix) search at a single position.
+/// Always provides the advance length for Lmapped tracking, even when no
+/// seed is stored (matching STAR's behavior).
+struct MmpResult {
+    /// The seed to store, if it passed all filters (multimap, min length)
+    seed: Option<Seed>,
+    /// MMP length to advance by (>= 1). Used for Lmapped tracking regardless
+    /// of whether a seed was stored.
+    advance: usize,
+}
+
+/// Search one direction using STAR's sparse starting positions with Lmapped tracking.
+///
+/// Divides read into Nstart evenly-spaced starting positions. From each start,
+/// does successive MMP searches forward, advancing past found seeds (Lmapped).
+///
+/// NOTE: Currently unused — our DP stitcher requires dense (every-position) seeds.
+/// STAR's DP is designed for sparse seeds; we'll activate this when our DP is adapted.
+/// The MmpResult and seedMapMin/seedSearchStartLmax params are ready for that transition.
+#[allow(dead_code)]
+fn search_direction_sparse(
+    read_seq: &[u8],
+    index: &GenomeIndex,
+    min_seed_length: usize,
+    params: &Parameters,
+    effective_start_lmax: usize,
+    is_rc: bool,
+    seeds: &mut Vec<Seed>,
+) -> Result<(), Error> {
+    let read_len = read_seq.len();
+
+    // Calculate Nstart and Lstart (STAR formula)
+    let nstart = if effective_start_lmax < read_len {
+        read_len / effective_start_lmax + 1
+    } else {
+        1
+    };
+    let lstart = read_len / nstart.max(1);
+
+    for istart in 0..nstart {
+        let start_pos = (istart * lstart).min(read_len);
+        let mut pos = start_pos;
+
+        // From this starting position, search forward with Lmapped tracking.
+        // Use seedMapMin for while-loop termination (STAR default: 5), not min_seed_length (8).
+        while pos + params.seed_map_min <= read_len {
+            let result =
+                find_seed_at_position(read_seq, pos, index, min_seed_length, false, params)?;
+
+            if let Some(mut seed) = result.seed {
+                // Apply seedSearchLmax cap
+                if params.seed_search_lmax > 0 && seed.length > params.seed_search_lmax {
+                    seed.length = params.seed_search_lmax;
+                }
+
+                seed.search_rc = is_rc;
+                seeds.push(seed);
+
+                if seeds.len() >= params.seed_per_read_nmax {
+                    return Ok(());
+                }
+            }
+
+            pos += result.advance; // Always advance by MMP length (matches STAR)
+        }
+    }
+
+    Ok(())
+}
+
 /// Find a seed starting at a specific position in the read.
+///
+/// Returns an MmpResult that always provides the MMP advance length for Lmapped
+/// tracking, even when no seed is stored. This matches STAR's behavior where
+/// `maxMappableLength2strands()` always returns the MMP length, and `Lmapped += L`
+/// always advances — regardless of whether the seed passes filters.
 fn find_seed_at_position(
     read_seq: &[u8],
     read_pos: usize,
@@ -175,9 +250,12 @@ fn find_seed_at_position(
     min_seed_length: usize,
     is_reverse: bool,
     params: &Parameters,
-) -> Result<Option<Seed>, Error> {
+) -> Result<MmpResult, Error> {
     if read_pos >= read_seq.len() {
-        return Ok(None);
+        return Ok(MmpResult {
+            seed: None,
+            advance: 1,
+        });
     }
 
     // Extract k-mer for SAindex lookup
@@ -185,7 +263,10 @@ fn find_seed_at_position(
     let remaining = read_seq.len() - read_pos;
 
     if remaining < min_seed_length {
-        return Ok(None);
+        return Ok(MmpResult {
+            seed: None,
+            advance: 1,
+        });
     }
 
     // Use SAindex to get initial SA range
@@ -203,14 +284,20 @@ fn find_seed_at_position(
     }
 
     if has_n {
-        return Ok(None); // Skip k-mers containing N
+        return Ok(MmpResult {
+            seed: None,
+            advance: 1,
+        }); // N base — no match possible
     }
 
     // Look up in SAindex
     let (sa_pos, is_present) = index.sa_index.lookup(kmer_idx, lookup_len as u32);
 
     if !is_present {
-        return Ok(None);
+        return Ok(MmpResult {
+            seed: None,
+            advance: 1,
+        }); // K-mer not in index
     }
 
     // Binary search to find exact range
@@ -218,30 +305,44 @@ fn find_seed_at_position(
         binary_search_sa(read_seq, read_pos, index, sa_pos as usize, lookup_len)?;
 
     if sa_start >= sa_end {
-        return Ok(None);
+        return Ok(MmpResult {
+            seed: None,
+            advance: 1,
+        }); // SA range empty
     }
+
+    // Extend match as far as possible — always compute MMP length
+    let match_length = extend_match(read_seq, read_pos, index, sa_start)?;
+    let advance = match_length.max(1);
 
     // Check seedMultimapNmax: filter seeds that map to too many loci
+    // Key fix: still advance by MMP length even when seed is not stored
     let n_loci = sa_end - sa_start;
     if n_loci > params.seed_multimap_nmax {
-        return Ok(None); // Skip this seed - maps to too many places
+        return Ok(MmpResult {
+            seed: None,
+            advance,
+        });
     }
 
-    // Extend match as far as possible
-    let match_length = extend_match(read_seq, read_pos, index, sa_start)?;
-
     if match_length >= min_seed_length {
-        Ok(Some(Seed {
-            read_pos,
-            length: match_length,
-            sa_start,
-            sa_end,
-            is_reverse,
-            search_rc: false,
-            mate_id: 2, // Single-end default
-        }))
+        Ok(MmpResult {
+            seed: Some(Seed {
+                read_pos,
+                length: match_length,
+                sa_start,
+                sa_end,
+                is_reverse,
+                search_rc: false,
+                mate_id: 2, // Single-end default
+            }),
+            advance,
+        })
     } else {
-        Ok(None)
+        Ok(MmpResult {
+            seed: None,
+            advance,
+        })
     }
 }
 

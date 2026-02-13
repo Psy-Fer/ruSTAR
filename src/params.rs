@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -562,6 +563,33 @@ impl Parameters {
                 sort_order: Some(OutSamSortOrder::SortedByCoordinate),
             }),
             other => Err(format!("unknown outSAMtype: {:?}", other)),
+        }
+    }
+
+    /// Expand `--outSAMattributes` into a set of individual tag names.
+    ///
+    /// - `"Standard"` → {NH, HI, AS, NM}
+    /// - `"All"`      → {NH, HI, AS, NM, MD, jM, jI, XS}
+    /// - `"None"`     → {} (empty)
+    /// - Explicit list (e.g. ["NH", "AS"]) → collected as-is
+    pub fn sam_attribute_set(&self) -> HashSet<String> {
+        match self
+            .out_sam_attributes
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            ["Standard"] => ["NH", "HI", "AS", "NM"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            ["All"] => ["NH", "HI", "AS", "NM", "MD", "jM", "jI", "XS"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            ["None"] => HashSet::new(),
+            tags => tags.iter().map(|s| s.to_string()).collect(),
         }
     }
 

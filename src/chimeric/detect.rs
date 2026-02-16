@@ -255,6 +255,7 @@ mod tests {
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 0,
+            anchor_bin: 0,
         };
         let c2 = SeedCluster {
             seed_indices: vec![1],
@@ -263,6 +264,7 @@ mod tests {
             genome_end: 1300,
             is_reverse: false,
             anchor_idx: 1,
+            anchor_bin: 0,
         };
 
         assert_eq!(genomic_distance(&c1, &c2), 100);
@@ -278,6 +280,7 @@ mod tests {
             genome_end: 1200,
             is_reverse: false,
             anchor_idx: 0,
+            anchor_bin: 0,
         };
         let c2 = SeedCluster {
             seed_indices: vec![1],
@@ -286,6 +289,7 @@ mod tests {
             genome_end: 1300,
             is_reverse: false,
             anchor_idx: 1,
+            anchor_bin: 0,
         };
 
         assert_eq!(genomic_distance(&c1, &c2), 0);
@@ -300,6 +304,7 @@ mod tests {
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 0,
+            anchor_bin: 0,
         };
         let c2 = SeedCluster {
             seed_indices: vec![1],
@@ -308,6 +313,7 @@ mod tests {
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 1,
+            anchor_bin: 0,
         };
 
         assert_eq!(genomic_distance(&c1, &c2), u64::MAX);
@@ -325,6 +331,7 @@ mod tests {
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 0,
+            anchor_bin: 0,
         };
         let c2 = SeedCluster {
             seed_indices: vec![1],
@@ -333,6 +340,7 @@ mod tests {
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 1,
+            anchor_bin: 0,
         };
 
         assert!(detector.is_chimeric_signature(&c1, &c2));
@@ -350,6 +358,7 @@ mod tests {
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 0,
+            anchor_bin: 0,
         };
         let c2 = SeedCluster {
             seed_indices: vec![1],
@@ -358,6 +367,7 @@ mod tests {
             genome_end: 1300,
             is_reverse: true,
             anchor_idx: 1,
+            anchor_bin: 0,
         };
 
         assert!(detector.is_chimeric_signature(&c1, &c2));
@@ -375,6 +385,7 @@ mod tests {
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 0,
+            anchor_bin: 0,
         };
         let c2 = SeedCluster {
             seed_indices: vec![1],
@@ -383,6 +394,7 @@ mod tests {
             genome_end: 2_000_100,
             is_reverse: false,
             anchor_idx: 1,
+            anchor_bin: 0,
         };
 
         assert!(detector.is_chimeric_signature(&c1, &c2));
@@ -400,6 +412,7 @@ mod tests {
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 0,
+            anchor_bin: 0,
         };
         let c2 = SeedCluster {
             seed_indices: vec![1],
@@ -408,6 +421,7 @@ mod tests {
             genome_end: 1300,
             is_reverse: false,
             anchor_idx: 1,
+            anchor_bin: 0,
         };
 
         assert!(!detector.is_chimeric_signature(&c1, &c2));

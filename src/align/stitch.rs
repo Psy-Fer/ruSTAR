@@ -289,6 +289,8 @@ pub struct SeedCluster {
     pub is_reverse: bool,
     /// Anchor seed index (in the seeds array)
     pub anchor_idx: usize,
+    /// Anchor genomic bin (anchor_pos >> win_bin_nbits) for MAPQ window counting
+    pub anchor_bin: u64,
 }
 
 /// Cluster seeds by genomic proximity around anchor seeds.
@@ -310,6 +312,7 @@ pub fn cluster_seeds(
     max_loci_for_anchor: usize,
     win_anchor_multimap_nmax: usize,
     seed_none_loci_per_window: usize,
+    win_bin_nbits: u32,
 ) -> Vec<SeedCluster> {
     let mut clusters = Vec::with_capacity(seeds.len());
 
@@ -416,6 +419,7 @@ pub fn cluster_seeds(
                     genome_end,
                     is_reverse: anchor_strand,
                     anchor_idx,
+                    anchor_bin: anchor_pos >> win_bin_nbits,
                 });
             }
         }
@@ -1370,7 +1374,7 @@ mod tests {
             },
         ];
 
-        let clusters = cluster_seeds(&seeds, &index, 100000, 10, 50, 10);
+        let clusters = cluster_seeds(&seeds, &index, 100000, 10, 50, 10, 16);
 
         // With empty SA ranges, no clusters will be created
         assert_eq!(clusters.len(), 0);

@@ -78,6 +78,7 @@ pub fn align_read(
         max_loci_for_anchor,
         params.win_anchor_multimap_nmax,
         params.seed_none_loci_per_window,
+        params.win_bin_nbits,
     );
 
     if clusters.is_empty() {
@@ -337,9 +338,12 @@ pub fn align_read(
     }
 
     // n_for_mapq: currently same as transcripts.len().
-    // NOTE: rDNA reads still get MAPQ=255 instead of STAR's 1-3 because our large clusters
-    // (589kb) merge seeds from different tandem repeat copies (9kb spacing), while STAR's
-    // smaller windows keep them separate. Fixing this requires window-model changes (Phase 16.5b).
+    // NOTE: rDNA reads (~157) still get MAPQ=255 instead of STAR's 1-3 because our large
+    // clusters (589kb) merge seeds from all tandem repeat copies. The DP finds one optimal
+    // path shared across all clusters (same seeds due to 589kb distance). Bin-counting
+    // approaches fail because "wrong" clusters also share seeds and produce the same
+    // transcript. The fix requires splitting clusters into ~65kb sub-windows with
+    // independent DP per sub-window (Phase 16.5b → cluster splitting).
     let n_for_mapq = transcripts.len();
 
     Ok((transcripts, chimeric_alignments, n_for_mapq))

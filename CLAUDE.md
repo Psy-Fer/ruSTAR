@@ -73,7 +73,7 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 16.5 (MAPQ formula fix) ← **STAR lookup table (n≥5→0, n=3-4→1, n=2→3). n_for_mapq infrastructure threaded through align→SAM. rDNA MAPQ=255 remains (needs window-model fix). 241 tests**
 
 **Planned**:
-- Phase 16.5b (rDNA window-model fix) ← Sub-cluster splitting for tandem repeats within large clusters
+- Phase 16.5b (rDNA window-model fix) ← DEFERRED: bin-counting approach investigated & failed (589kb clusters share seeds); needs ~65kb sub-window splitting
 - Phase 16.6 (Sparse seed search activation) ← Adapt DP stitcher for sparse seeds, then activate search_direction_sparse()
 - Phase 16.7 (PE joint DP) ← Mate-aware DP stitching for mate rescue (12.9% → ~0% unmapped)
 - Phase 17 (Features + polish) ← Log.final.out, sorted BAM, PE chimeric, quantMode, stdout output
@@ -252,7 +252,7 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 8. ~~**Over-splicing in Normal mode**~~ ✅ FIXED in Phase 16.1 — splice rate now 2.2% (matches STAR exactly). max_cluster_dist 100kb→589kb.
 8b. ~~**RemoveNoncanonicalUnannotated filter incorrect**~~ ✅ FIXED in Phase 16.2 — now properly checks annotation status via `junction_annotated` Vec.
 8c. ~~**No seedSearchStartLmax/seedSearchLmax/seedMapMin params**~~ ✅ ADDED in Phase 16.4 — params parsed; sparse search infrastructure ready but dormant (DP needs dense seeds).
-9. **rDNA multi-mapping** (~157 same-chr >500bp in BySJout): chrXII rDNA repeats — STAR=MAPQ 1-3, ruSTAR=MAPQ 255. Root cause: 589kb clusters merge 9kb-spaced tandem repeats into one cluster; STAR's smaller windows keep them separate. MAPQ formula fixed (lookup table), but cluster-level fix needed (Phase 16.5b).
+9. **rDNA multi-mapping** (~157 same-chr >500bp in BySJout): chrXII rDNA repeats — STAR=MAPQ 1-3, ruSTAR=MAPQ 255. Root cause: 589kb clusters merge all repeat copy seeds into one cluster; DP produces one transcript. Bin-counting approaches fail because shared seeds make all clusters produce identical transcripts. Needs ~65kb sub-window splitting (Phase 16.5b deferred).
 10. **113 diff-chr disagreements** (SE): Multi-mappers (harmless tie-breaking).
 11. **98 STAR-only mapped reads** (SE Normal): Stable.
 12. **PE 12.9% unmapped** (STAR: 0%): Requires both mates to align independently. Needs PE joint DP stitching (Phase 16.6) for mate rescue.
@@ -274,7 +274,7 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 - **No Log.final.out** statistics file (MultiQC/RNA-SeQC) — Phase 17.1
 - ~~**Over-splicing**~~ ✅ FIXED in Phase 16.1 — splice rate 2.2% matches STAR
 - **Sparse seed search dormant** — infrastructure ready (seedSearchStartLmax, MmpResult) but DP needs dense seeds — Phase 16.6
-- **rDNA MAPQ inflation** (~157 reads, MAPQ 255 vs STAR 1-3) — MAPQ formula fixed (Phase 16.5), cluster-level fix needed (Phase 16.5b)
+- **rDNA MAPQ inflation** (~157 reads, MAPQ 255 vs STAR 1-3) — MAPQ formula fixed (Phase 16.5), bin-counting investigated & failed (Phase 16.5b), needs ~65kb sub-window splitting
 - **No --outReadsUnmapped Fastx** — Phase 17.4
 - **No --outStd SAM/BAM** (stdout output) — Phase 17.6
 - **No --quantMode GeneCounts** — Phase 17.8

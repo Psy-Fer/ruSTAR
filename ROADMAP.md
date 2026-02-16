@@ -1671,11 +1671,21 @@ Key findings:
 **Metrics**: Unchanged — 94.5% position, 97.8% CIGAR, 2.1% splice rate, 42 shared junctions.
 **Files**: `src/mapq.rs`, `src/align/read_align.rs`, `src/io/sam.rs`, `src/io/bam.rs`, `src/lib.rs`
 
-### Phase 16.5b: rDNA Window-Model Fix
+### Phase 16.5b: rDNA Window-Model Fix — INVESTIGATED, DEFERRED
 
-**Problem**: ~157 chrXII rDNA reads still get MAPQ=255 vs STAR 1-3. Root cause: large clusters (589kb) merge seeds from different tandem repeat copies (9kb spacing). STAR's smaller windows keep them separate.
+**Problem**: ~157 chrXII rDNA reads still get MAPQ=255 vs STAR 1-3. Root cause: large clusters (589kb) merge seeds from all tandem repeat copies (9kb spacing) into ONE cluster. DP produces ONE transcript; coordinate dedup has nothing to collapse → `n_for_mapq = 1` → MAPQ=255.
 
-**Fix**: Sub-cluster splitting within large clusters to detect tandem repeat copies, or SA-based locus counting for MAPQ inflation.
+**Investigation (2026-02-16)**: Attempted anchor-bin counting approach — `anchor_bin = anchor_pos >> winBinNbits` per cluster, counting distinct bins among clusters producing competitive transcripts. Three iterations:
+
+1. **Raw bin count** (any non-empty cluster): ALL reads get MAPQ=0 because even "wrong" clusters (at distant genomic positions) produce some transcript.
+2. **Competitive bin count** (clusters with best score within score_range of global best): Still 6721/8311 unique reads deflated — "wrong" clusters share seeds with correct cluster (due to 589kb max_cluster_dist) and produce identical high-scoring transcripts.
+3. **Quality-filtered competitive bins** (also checking mismatch/match thresholds): Same result — the quality filter doesn't help because "wrong" clusters inherit the same seeds and produce literally the same transcript at the same position.
+
+**Root cause of all failures**: With 589kb max_cluster_dist, ALL clusters for a read contain the same seeds (any seed that maps within 589kb of any anchor gets recruited). The DP in every cluster finds the same optimal path → same transcript position → same score → bins appear "competitive" but actually represent the same alignment discovered from different starting anchors.
+
+**Infrastructure kept**: `SeedCluster.anchor_bin` field and `win_bin_nbits` parameter added to `cluster_seeds()` for future cluster-splitting implementation.
+
+**Correct fix (future)**: Split clusters into ~65kb sub-windows before DP, running independent DP per sub-window. This matches STAR's window-based architecture where each 65kb window independently discovers alignments. For rDNA, different sub-windows would contain seeds from different repeat copies and produce transcripts at different positions → `n_for_mapq > 1` → MAPQ low. Requires significant refactoring of the cluster→DP pipeline.
 
 ### Phase 16.6: Sparse Seed Search Activation (DP Adaptation)
 

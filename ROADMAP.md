@@ -1549,7 +1549,7 @@ BySJout mode (`--outFilterType BySJout`):
 
 ## Phase 16: Accuracy + Algorithm Parity
 
-**Status**: In Progress (Phase 16.1-16.4 complete)
+**Status**: In Progress (Phase 16.1-16.5 complete)
 
 **Goal**: Close remaining accuracy gaps vs STAR. Fix over-splicing, rDNA MAPQ, missing seed parameters, and DP junction optimization.
 
@@ -1650,11 +1650,32 @@ Key findings:
 **Tests**: 241/241 passing (unchanged from Phase 16.3 baseline)
 **Metrics**: Unchanged from Phase 16.3 — 94.5% position, 97.8% CIGAR, 2.1% splice rate, 42 shared junctions
 
-### Phase 16.5: SAindex Hint Usage (rDNA MAPQ Fix)
+### Phase 16.5: MAPQ Formula Fix ✅ COMPLETE (2026-02-16)
 
-**Problem**: ~157 chrXII rDNA reads get MAPQ=255 (ruSTAR) vs MAPQ 1-3 (STAR). SA binary search ignores hint_pos.
+**Problem**: Two issues with MAPQ calculation:
+1. Formula mismatch: ruSTAR used `-10*log10(1-1/n)`, but STAR uses a hardcoded lookup table
+2. ~157 chrXII rDNA reads get MAPQ=255 (ruSTAR) vs MAPQ 1-3 (STAR)
 
-**Fix**: Use hint_pos to set initial binary search bounds, finding more repeat copies.
+**Fix (Part A — MAPQ formula)**: Replaced mathematical formula with STAR's exact lookup table from `ReadAlign_outputTranscriptSAM.cpp`:
+- n=1 → `outSAMmapqUnique` (255), n=2 → 3, n=3-4 → 1, n≥5 → 0
+
+**Fix (Part B — n_for_mapq infrastructure)**: Threaded `n_for_mapq` through the pipeline:
+- `align_read()` returns 3-tuple `(transcripts, chimeric_alns, n_for_mapq)`
+- `align_paired_read()` returns `(paired_alns, n_for_mapq)` using max of both mates
+- SAM builder functions take `n_for_mapq` param, compute `effective_n = n_alignments.max(n_for_mapq)`
+- Currently `n_for_mapq = transcripts.len()` (no inflation) — infrastructure ready for Phase 16.5b
+
+**Root cause analysis (rDNA)**: 589kb `max_cluster_dist` merges seeds from different rDNA copies (9kb spacing) into ONE cluster → DP produces ONE transcript. STAR's smaller windows keep copies separate → nTr>1 → lower MAPQ. Attempted approaches (valid-cluster count, pre-dedup count, dedup-delta) all failed because overlapping clusters independently discover the same alignment, inflating counts for non-repeat reads too.
+
+**Tests**: 241/241 passing. MAPQ: 255 (8311), 3 (966), 1 (90), 0 (274).
+**Metrics**: Unchanged — 94.5% position, 97.8% CIGAR, 2.1% splice rate, 42 shared junctions.
+**Files**: `src/mapq.rs`, `src/align/read_align.rs`, `src/io/sam.rs`, `src/io/bam.rs`, `src/lib.rs`
+
+### Phase 16.5b: rDNA Window-Model Fix
+
+**Problem**: ~157 chrXII rDNA reads still get MAPQ=255 vs STAR 1-3. Root cause: large clusters (589kb) merge seeds from different tandem repeat copies (9kb spacing). STAR's smaller windows keep them separate.
+
+**Fix**: Sub-cluster splitting within large clusters to detect tandem repeat copies, or SA-based locus counting for MAPQ inflation.
 
 ### Phase 16.6: Sparse Seed Search Activation (DP Adaptation)
 

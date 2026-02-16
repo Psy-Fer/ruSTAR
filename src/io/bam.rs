@@ -179,6 +179,7 @@ mod tests {
             &[transcript],
             &genome,
             &params,
+            1,
         )
         .unwrap();
 

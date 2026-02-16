@@ -41,20 +41,31 @@ pub struct PairedAlignment {
 /// * `params` - User parameters
 ///
 /// # Returns
-/// Tuple of (transcripts, chimeric alignments), both sorted by score (best first)
+/// Tuple of (transcripts, chimeric alignments, n_for_mapq):
+/// - transcripts: sorted by score (best first)
+/// - chimeric alignments: sorted by score (best first)
+/// - n_for_mapq: effective alignment count for MAPQ calculation (max of transcript count
+///   and valid cluster count, to avoid undercounting from coordinate dedup on tandem repeats)
 pub fn align_read(
     read_seq: &[u8],
     read_name: &str,
     index: &GenomeIndex,
     params: &Parameters,
-) -> Result<(Vec<Transcript>, Vec<crate::chimeric::ChimericAlignment>), Error> {
+) -> Result<
+    (
+        Vec<Transcript>,
+        Vec<crate::chimeric::ChimericAlignment>,
+        usize,
+    ),
+    Error,
+> {
     // Step 1: Find seeds
     // Use a reasonable default min seed length (typically 8-20bp)
     let min_seed_length = 8;
     let seeds = Seed::find_seeds(read_seq, index, min_seed_length, params)?;
 
     if seeds.is_empty() {
-        return Ok((Vec::new(), Vec::new())); // No seeds found
+        return Ok((Vec::new(), Vec::new(), 0)); // No seeds found
     }
 
     // Step 2: Cluster seeds
@@ -70,7 +81,7 @@ pub fn align_read(
     );
 
     if clusters.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), 0));
     }
 
     // Cap total clusters (alignWindowsPerReadNmax)
@@ -107,7 +118,7 @@ pub fn align_read(
         .collect();
 
     if clusters.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), 0));
     }
 
     // Step 2b: Detect chimeric alignments from multi-cluster seeds (Tier 2)
@@ -325,7 +336,13 @@ pub fn align_read(
         });
     }
 
-    Ok((transcripts, chimeric_alignments))
+    // n_for_mapq: currently same as transcripts.len().
+    // NOTE: rDNA reads still get MAPQ=255 instead of STAR's 1-3 because our large clusters
+    // (589kb) merge seeds from different tandem repeat copies (9kb spacing), while STAR's
+    // smaller windows keep them separate. Fixing this requires window-model changes (Phase 16.5b).
+    let n_for_mapq = transcripts.len();
+
+    Ok((transcripts, chimeric_alignments, n_for_mapq))
 }
 
 /// Align paired-end reads by aligning each mate independently, then pairing results.
@@ -347,21 +364,25 @@ pub fn align_read(
 /// * `params` - Parameters (includes alignMatesGapMax)
 ///
 /// # Returns
-/// Vector of paired alignments, sorted by combined score (best first)
+/// Tuple of (paired alignments, n_for_mapq):
+/// - paired alignments: sorted by combined score (best first)
+/// - n_for_mapq: effective alignment count for MAPQ (max of both mates' cluster counts)
 pub fn align_paired_read(
     mate1_seq: &[u8],
     mate2_seq: &[u8],
     index: &GenomeIndex,
     params: &Parameters,
-) -> Result<Vec<PairedAlignment>, Error> {
+) -> Result<(Vec<PairedAlignment>, usize), Error> {
     // Step 1: Align each mate independently using the proven SE path
-    let (mate1_transcripts, _) = align_read(mate1_seq, "", index, params)?;
-    let (mate2_transcripts, _) = align_read(mate2_seq, "", index, params)?;
+    let (mate1_transcripts, _, mate1_mapq_n) = align_read(mate1_seq, "", index, params)?;
+    let (mate2_transcripts, _, mate2_mapq_n) = align_read(mate2_seq, "", index, params)?;
 
     // If either mate has no alignments, return empty (both unmapped)
     if mate1_transcripts.is_empty() || mate2_transcripts.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
+
+    let pe_mapq_n = mate1_mapq_n.max(mate2_mapq_n);
 
     // Step 2: Pair transcripts by chromosome + distance
     let mut paired_alignments = Vec::new();
@@ -455,7 +476,7 @@ pub fn align_paired_read(
     // Step 6: Apply quality filters and truncate
     filter_paired_transcripts(&mut paired_alignments, params);
 
-    Ok(paired_alignments)
+    Ok((paired_alignments, pe_mapq_n))
 }
 
 /// Check if paired alignment is a proper pair
@@ -620,9 +641,10 @@ mod tests {
         let result = align_read(&read_seq, "READ_001", &index, &params);
         assert!(result.is_ok());
 
-        let (transcripts, chimeras) = result.unwrap();
+        let (transcripts, chimeras, n_for_mapq) = result.unwrap();
         assert_eq!(transcripts.len(), 0); // No alignment
         assert_eq!(chimeras.len(), 0); // No chimeric alignments
+        assert_eq!(n_for_mapq, 0);
     }
 
     #[test]
@@ -659,7 +681,7 @@ mod tests {
         let result = align_read(&read_seq, "READ_004", &index, &params);
         assert!(result.is_ok());
 
-        let (transcripts, _chimeras) = result.unwrap();
+        let (transcripts, _chimeras, _n_for_mapq) = result.unwrap();
         assert!(transcripts.len() <= 5);
     }
 
@@ -674,7 +696,9 @@ mod tests {
 
         let result = align_paired_read(&mate1, &mate2, &index, &params);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().len(), 0);
+        let (paired_alns, n_for_mapq) = result.unwrap();
+        assert_eq!(paired_alns.len(), 0);
+        assert_eq!(n_for_mapq, 0);
     }
 
     #[test]

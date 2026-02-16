@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.6 + 16.1-16.4 + PE alignment fix complete. SE: 94.5% position agreement, 97.8% CIGAR agreement, 2.1% splice rate (matches STAR 2.2%). With GTF: 94.5% position, 97.6% CIGAR (STAR detects more annotated junctions via index insertion). PE: 87.1% mapped (was 0%), 95.7% per-mate position agreement, 97.1% CIGAR agreement. SAM tags: NH/HI/AS/NM/nM/XS/jM/jI/MD all implemented + --outSAMattributes enforcement. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement. jR scanning: post-DP junction boundary optimization. Phase 16.4: seed search params added (seedSearchStartLmax/seedSearchLmax/seedMapMin), sparse search infrastructure ready but dormant (DP needs dense seeds).**
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.6 + 16.1-16.5 + PE alignment fix complete. SE: 94.5% position agreement, 97.8% CIGAR agreement, 2.1% splice rate (matches STAR 2.2%). With GTF: 94.5% position, 97.6% CIGAR (STAR detects more annotated junctions via index insertion). PE: 87.1% mapped (was 0%), 95.7% per-mate position agreement, 97.1% CIGAR agreement. SAM tags: NH/HI/AS/NM/nM/XS/jM/jI/MD all implemented + --outSAMattributes enforcement. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement. Phase 16.5: MAPQ formula replaced with STAR's exact lookup table; n_for_mapq infrastructure for future rDNA window-model fix.**
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -70,9 +70,10 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 16.2 (RemoveNoncanonicalUnannotated + GTF testing) ← **Filter fix: only reject unannotated non-canonical junctions. GTF differential testing baseline established. 238 tests**
 - Phase 16.3 (jR scanning) ← **Post-DP junction boundary optimization. Neutral on yeast (95.8% pos, 97.8% CIGAR unchanged). +1 shared junction. 241 tests**
 - Phase 16.4 (Seed search params) ← **seedSearchStartLmax/seedSearchLmax/seedMapMin params + MmpResult refactoring. Sparse search infrastructure ready but dormant — DP needs dense seeds. 241 tests**
+- Phase 16.5 (MAPQ formula fix) ← **STAR lookup table (n≥5→0, n=3-4→1, n=2→3). n_for_mapq infrastructure threaded through align→SAM. rDNA MAPQ=255 remains (needs window-model fix). 241 tests**
 
 **Planned**:
-- Phase 16.5 (rDNA MAPQ fix) ← SAindex hint usage for tandem repeat detection
+- Phase 16.5b (rDNA window-model fix) ← Sub-cluster splitting for tandem repeats within large clusters
 - Phase 16.6 (Sparse seed search activation) ← Adapt DP stitcher for sparse seeds, then activate search_direction_sparse()
 - Phase 16.7 (PE joint DP) ← Mate-aware DP stitching for mate rescue (12.9% → ~0% unmapped)
 - Phase 17 (Features + polish) ← Log.final.out, sorted BAM, PE chimeric, quantMode, stdout output
@@ -194,7 +195,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 241/241 unit tests passing, non-critical clippy warnings (too_many_arguments × 4, manual_contains × 2)
+**Current test status**: 241/241 unit tests passing, non-critical clippy warnings (too_many_arguments × 5, manual_contains × 2)
 
 **Note**: Phase 9 integration tests fail due to pathologically repetitive test genomes (50 exact copies of 20bp). These tests need realistic genomes (deferred to Phase 13).
 
@@ -251,7 +252,7 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 8. ~~**Over-splicing in Normal mode**~~ ✅ FIXED in Phase 16.1 — splice rate now 2.2% (matches STAR exactly). max_cluster_dist 100kb→589kb.
 8b. ~~**RemoveNoncanonicalUnannotated filter incorrect**~~ ✅ FIXED in Phase 16.2 — now properly checks annotation status via `junction_annotated` Vec.
 8c. ~~**No seedSearchStartLmax/seedSearchLmax/seedMapMin params**~~ ✅ ADDED in Phase 16.4 — params parsed; sparse search infrastructure ready but dormant (DP needs dense seeds).
-9. **rDNA multi-mapping** (~157 same-chr >500bp in BySJout): chrXII rDNA repeats — STAR=MAPQ 1-3, ruSTAR=MAPQ 255.
+9. **rDNA multi-mapping** (~157 same-chr >500bp in BySJout): chrXII rDNA repeats — STAR=MAPQ 1-3, ruSTAR=MAPQ 255. Root cause: 589kb clusters merge 9kb-spaced tandem repeats into one cluster; STAR's smaller windows keep them separate. MAPQ formula fixed (lookup table), but cluster-level fix needed (Phase 16.5b).
 10. **113 diff-chr disagreements** (SE): Multi-mappers (harmless tie-breaking).
 11. **98 STAR-only mapped reads** (SE Normal): Stable.
 12. **PE 12.9% unmapped** (STAR: 0%): Requires both mates to align independently. Needs PE joint DP stitching (Phase 16.6) for mate rescue.
@@ -273,7 +274,7 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 - **No Log.final.out** statistics file (MultiQC/RNA-SeQC) — Phase 17.1
 - ~~**Over-splicing**~~ ✅ FIXED in Phase 16.1 — splice rate 2.2% matches STAR
 - **Sparse seed search dormant** — infrastructure ready (seedSearchStartLmax, MmpResult) but DP needs dense seeds — Phase 16.6
-- **rDNA MAPQ inflation** (~157 reads, MAPQ 255 vs STAR 1-3) — Phase 16.5
+- **rDNA MAPQ inflation** (~157 reads, MAPQ 255 vs STAR 1-3) — MAPQ formula fixed (Phase 16.5), cluster-level fix needed (Phase 16.5b)
 - **No --outReadsUnmapped Fastx** — Phase 17.4
 - **No --outStd SAM/BAM** (stdout output) — Phase 17.6
 - **No --quantMode GeneCounts** — Phase 17.8

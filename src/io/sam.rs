@@ -85,6 +85,7 @@ impl SamWriter {
         transcripts: &[Transcript],
         genome: &Genome,
         params: &Parameters,
+        n_for_mapq: usize,
     ) -> Result<(), Error> {
         if transcripts.is_empty() {
             return Ok(());
@@ -96,7 +97,8 @@ impl SamWriter {
         } else {
             (params.out_sam_mult_nmax as usize).min(n_alignments)
         };
-        let mapq = calculate_mapq(n_alignments, params.out_sam_mapq_unique);
+        let effective_n = n_alignments.max(n_for_mapq);
+        let mapq = calculate_mapq(effective_n, params.out_sam_mapq_unique);
         let mut attrs = params.sam_attribute_set();
         if params.out_sam_strand_field != "intronMotif" {
             attrs.remove("XS");
@@ -195,6 +197,7 @@ impl SamWriter {
         transcripts: &[Transcript],
         genome: &Genome,
         params: &Parameters,
+        n_for_mapq: usize,
     ) -> Result<Vec<RecordBuf>, Error> {
         if transcripts.is_empty() {
             return Ok(Vec::new());
@@ -206,7 +209,8 @@ impl SamWriter {
         } else {
             (params.out_sam_mult_nmax as usize).min(n_alignments)
         };
-        let mapq = calculate_mapq(n_alignments, params.out_sam_mapq_unique);
+        let effective_n = n_alignments.max(n_for_mapq);
+        let mapq = calculate_mapq(effective_n, params.out_sam_mapq_unique);
         let mut attrs = params.sam_attribute_set();
         if params.out_sam_strand_field != "intronMotif" {
             attrs.remove("XS");
@@ -254,6 +258,7 @@ impl SamWriter {
         paired_alignments: &[PairedAlignment],
         genome: &Genome,
         params: &Parameters,
+        n_for_mapq: usize,
     ) -> Result<Vec<RecordBuf>, Error> {
         if paired_alignments.is_empty() {
             // Both mates unmapped
@@ -268,7 +273,8 @@ impl SamWriter {
         } else {
             (params.out_sam_mult_nmax as usize).min(n_alignments)
         };
-        let mapq = calculate_mapq(n_alignments, params.out_sam_mapq_unique);
+        let effective_n = n_alignments.max(n_for_mapq);
+        let mapq = calculate_mapq(effective_n, params.out_sam_mapq_unique);
         let mut attrs = params.sam_attribute_set();
         if params.out_sam_strand_field != "intronMotif" {
             attrs.remove("XS");
@@ -1496,6 +1502,7 @@ mod tests {
             &transcripts,
             &genome,
             &params,
+            1,
         )
         .unwrap();
 
@@ -1787,6 +1794,7 @@ mod tests {
             &transcripts,
             &genome,
             &params,
+            1,
         )
         .unwrap();
 

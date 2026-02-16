@@ -482,7 +482,7 @@ fn align_reads_single_end<W: AlignmentWriter>(
                 }
 
                 // Align read (CPU-intensive, pure function)
-                let (transcripts, chimeric_results) =
+                let (transcripts, chimeric_results, n_for_mapq) =
                     align_read(&clipped_seq, &read.name, &index, params)?;
 
                 // Collect chimeric alignments if enabled
@@ -527,6 +527,7 @@ fn align_reads_single_end<W: AlignmentWriter>(
                         &transcripts,
                         &index.genome,
                         params,
+                        n_for_mapq,
                     )?;
                     for record in records {
                         buffer.push(record);
@@ -766,7 +767,8 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                 }
 
                 // Align paired read (CPU-intensive)
-                let paired_alns = align_paired_read(&m1_seq, &m2_seq, &index, params)?;
+                let (paired_alns, n_for_mapq) =
+                    align_paired_read(&m1_seq, &m2_seq, &index, params)?;
 
                 // Record stats (count pairs, not individual reads)
                 stats.record_alignment(paired_alns.len(), max_multimaps);
@@ -834,6 +836,7 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                         &paired_alns,
                         &index.genome,
                         params,
+                        n_for_mapq,
                     )?;
                     for record in records {
                         buffer.push(record);

@@ -40,7 +40,8 @@ Phase 1 (CLI) ✅
                                                                                                                           └→ Phase 16.5 (MAPQ formula fix) ✅
                                                                                                                                └→ Phase 16.6 (sparse seed bugs) ✅
                                                                                                                                     └→ Phase 16.7+ (accuracy parity) ← Next
-                                                                                                                └→ Phase 17 (features + polish)
+                                                                                                                └→ Phase 17.1 (Log.final.out) ✅
+                                                                                                                     └→ Phase 17.2+ (features + polish)
                                                                                                                 └→ Phase 14 (STARsolo) [DEFERRED]
 ```
 
@@ -1737,25 +1738,107 @@ Once DP is adapted, switch `find_seeds()` from every-position to `search_directi
 
 ## Phase 17: Features + Polish
 
-**Status**: Not Started
+**Status**: In Progress (17.1 complete)
 
 **Goal**: Production-ready features and quality-of-life improvements.
 
-| Sub-phase | Description |
-|-----------|-------------|
-| 17.1 | Log.final.out statistics file (MultiQC/RNA-SeQC compatibility) |
-| 17.2 | Coordinate-sorted BAM output (`--outSAMtype BAM SortedByCoordinate`) |
-| 17.3 | Paired-end chimeric detection |
-| 17.4 | `--outReadsUnmapped Fastx` |
-| 17.5 | Fix clippy warnings (config structs for too_many_arguments) |
-| 17.6 | `--outStd SAM/BAM` (stdout output for piping) |
-| 17.7 | GTF tag parameters (`sjdbGTFchrPrefix`, `sjdbGTFtagExonParentTranscript/Gene`) |
-| 17.8 | `--quantMode GeneCounts` |
-| 17.9 | `--outBAMcompression` / `--limitBAMsortRAM` |
-| 17.10 | Chimeric Tier 3 (re-map soft-clipped regions) |
-| 17.11 | `--chimOutType WithinBAM` (supplementary FLAG 0x800) |
-| 17.12 | BySJout memory optimization (disk buffering for 100M+ reads) |
-| 17.13 | Phase 9 integration test fixes (realistic test genomes) |
+| Sub-phase | Description | Status |
+|-----------|-------------|--------|
+| 17.1 | Log.final.out statistics file (MultiQC/RNA-SeQC compatibility) | ✅ Complete |
+| 17.2 | Coordinate-sorted BAM output (`--outSAMtype BAM SortedByCoordinate`) | |
+| 17.3 | Paired-end chimeric detection | |
+| 17.4 | `--outReadsUnmapped Fastx` | |
+| 17.5 | Fix clippy warnings (config structs for too_many_arguments) | |
+| 17.6 | `--outStd SAM/BAM` (stdout output for piping) | |
+| 17.7 | GTF tag parameters (`sjdbGTFchrPrefix`, `sjdbGTFtagExonParentTranscript/Gene`) | |
+| 17.8 | `--quantMode GeneCounts` | |
+| 17.9 | `--outBAMcompression` / `--limitBAMsortRAM` | |
+| 17.10 | Chimeric Tier 3 (re-map soft-clipped regions) | |
+| 17.11 | `--chimOutType WithinBAM` (supplementary FLAG 0x800) | |
+| 17.12 | BySJout memory optimization (disk buffering for 100M+ reads) | |
+| 17.13 | Phase 9 integration test fixes (realistic test genomes) | |
+
+### Phase 17.1: Log.final.out ✅
+
+**Problem**: ruSTAR had no `Log.final.out` file, so MultiQC and RNA-SeQC could not parse alignment results. This is one of the most user-visible gaps for production use.
+
+**Solution**: Write a STAR-compatible `Log.final.out` to `{outFileNamePrefix}/Log.final.out` with all 37 fields that STAR outputs and MultiQC parses.
+
+**Implementation**:
+
+1. **`Cargo.toml`** — Added `chrono = "0.4"` for timestamp formatting
+
+2. **`src/stats.rs`** — Major expansion:
+   - Added `UnmappedReason` enum (`Other`, `TooShort`, `TooManyMismatches`)
+   - Added 15 new `AtomicU64` counters to `AlignmentStats`:
+     - `read_bases` — sum of input read lengths
+     - `mapped_bases` — sum of Match/Equal/Diff lengths (unique mappers only)
+     - `mapped_mismatches` — sum of n_mismatch (unique mappers only)
+     - `mapped_ins_count/bases` — insertion op count and total bases
+     - `mapped_del_count/bases` — deletion op count and total bases
+     - `splices_by_motif[7]` — per-motif splice event counts (encode_motif index)
+     - `splices_annotated` — annotated junction event count
+     - `unmapped_mismatches/short/other` — unmapped reason breakdown
+     - `chimeric_reads` — chimeric read count
+   - Added methods:
+     - `record_read_bases(len)` — add input read length
+     - `record_transcript_stats(&Transcript)` — walk CIGAR for mapped bases, ins/del, splice motifs
+     - `record_unmapped_reason(UnmappedReason)` — increment appropriate unmapped counter
+     - `record_chimeric()` — increment chimeric counter
+     - `write_log_final(path, time_start, time_map_start, time_finish)` — format and write file
+   - 6 new unit tests
+
+3. **`src/align/read_align.rs`** — Updated return types:
+   - `align_read()` returns 4-tuple: `(Vec<Transcript>, Vec<ChimericAlignment>, usize, Option<UnmappedReason>)`
+   - `align_paired_read()` returns 3-tuple: `(Vec<PairedAlignment>, usize, Option<UnmappedReason>)`
+   - Classification: `seeds.is_empty()` or `clusters.is_empty()` → `Other`; all transcripts filtered → `TooShort`
+
+4. **`src/lib.rs`** — Timing and stats wiring:
+   - `align_reads()` captures `time_start`, `time_map_start`, `time_finish` via `chrono::Local::now()`
+   - `run_single_pass()` and `run_two_pass()` return `Arc<AlignmentStats>` (was `()`)
+   - SE loop: `record_read_bases()` before alignment, `record_transcript_stats()` for unique mappers, `record_unmapped_reason()` for unmapped, `record_chimeric()` after chimeric detection
+   - PE loop: same pattern, `read_bases` = mate1 + mate2 lengths, both mate transcripts recorded for unique pairs
+   - Stats collected before BySJout filtering (matches STAR behavior)
+   - Writes `Log.final.out` after alignment completes
+
+**Log.final.out Format**:
+- 47-char right-justified field names + ` |\t` separator (matches STAR exactly)
+- 49-char right-justified section headers (UNIQUE READS:, MULTI-MAPPING READS:, UNMAPPED READS:, CHIMERIC READS:)
+- Timestamps: `%b %d %H:%M:%S` format
+- Splice count aggregation: GT/AG = motif[1]+[2], GC/AG = motif[3]+[4], AT/AC = motif[5]+[6]
+- Field name diff vs STAR: **empty** (all 37 fields match exactly)
+
+**Files Modified**:
+- `Cargo.toml` — +1 line (chrono dependency)
+- `src/stats.rs` — +673 lines (from 346 → 1019): new fields, methods, `write_log_final()`, 6 new tests
+- `src/align/read_align.rs` — ~20 lines: import, return type changes, unmapped reason classification
+- `src/lib.rs` — ~40 lines: chrono timing, stats wiring, return type changes, Log.final.out write
+
+**Tests**: 250/250 passing (was 244 — 6 new tests):
+- `test_record_transcript_stats` — known CIGAR → verify mapped_bases, ins/del, splice counts
+- `test_record_unmapped_reason` — each reason increments correct counter
+- `test_splice_motif_aggregation` — GT/AG = motif[1]+[2], etc.
+- `test_write_log_final_format` — verify field formatting, values, separators
+- `test_log_final_multiqc_fields` — all 23 MultiQC-required fields present
+- `test_record_chimeric` — chimeric counter increment
+
+**Differential Test** (10k yeast reads, SE Normal mode):
+
+| Field | ruSTAR | STAR | Match? |
+|-------|--------|------|--------|
+| Number of input reads | 10000 | 10000 | exact |
+| Average input read length | 150 | 150 | exact |
+| Uniquely mapped reads % | 83.11% | 82.65% | close |
+| Average mapped length | 146.99 | 146.99 | exact |
+| Number of splices: Total | 141 | 178 | expected (different junction counts) |
+| Mismatch rate per base, % | 0.40% | 0.40% | exact |
+| Deletion rate per base | 0.01% | 0.02% | close |
+| Insertion rate per base | 0.00% | 0.01% | close |
+| % of reads mapped to multiple loci | 5.43% | 6.61% | known gap |
+| Number of reads unmapped: too short | 1146 | 1047 | close |
+| Number of chimeric reads | 0 | 0 | exact |
+
+No regression in SAM output: 94.5% position agreement, 97.8% CIGAR agreement, 42 shared junctions (unchanged).
 
 ---
 

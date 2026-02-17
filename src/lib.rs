@@ -98,6 +98,8 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
 
     use std::sync::Arc;
 
+    let time_start = chrono::Local::now();
+
     info!("Starting read alignment...");
 
     // Configure Rayon thread pool based on --runThreadN
@@ -126,17 +128,29 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
         index.genome.n_chr_real, index.genome.n_genome
     );
 
+    let time_map_start = chrono::Local::now();
+
     // 2. Dispatch based on two-pass mode
-    match params.twopass_mode {
+    let stats = match params.twopass_mode {
         TwopassMode::None => {
             info!("Running single-pass alignment");
-            run_single_pass(&index, params)?;
+            run_single_pass(&index, params)?
         }
         TwopassMode::Basic => {
             info!("Running two-pass alignment mode");
-            run_two_pass(&index, params)?;
+            run_two_pass(&index, params)?
         }
+    };
+
+    let time_finish = chrono::Local::now();
+
+    // Write Log.final.out
+    let log_path = params.out_file_name_prefix.join("Log.final.out");
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
+    stats.write_log_final(&log_path, time_start, time_map_start, time_finish)?;
+    info!("Wrote {}", log_path.display());
 
     info!("Alignment complete!");
     Ok(())
@@ -146,7 +160,7 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
 fn run_single_pass(
     index: &std::sync::Arc<crate::index::GenomeIndex>,
     params: &Parameters,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<std::sync::Arc<crate::stats::AlignmentStats>> {
     use crate::io::bam::BamWriter;
     use crate::io::sam::SamWriter;
     use crate::params::OutSamFormat;
@@ -220,14 +234,14 @@ fn run_single_pass(
     // 6. Print summary
     stats.print_summary();
 
-    Ok(())
+    Ok(stats)
 }
 
 /// Run two-pass alignment mode
 fn run_two_pass(
     index: &std::sync::Arc<crate::index::GenomeIndex>,
     params: &Parameters,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<std::sync::Arc<crate::stats::AlignmentStats>> {
     use std::sync::Arc;
 
     // PASS 1: Junction discovery
@@ -261,9 +275,9 @@ fn run_two_pass(
 
     // PASS 2: Re-alignment with merged DB
     info!("Two-pass mode: Pass 2 - Re-alignment");
-    run_single_pass(&Arc::new(merged_index), params)?;
+    let stats = run_single_pass(&Arc::new(merged_index), params)?;
 
-    Ok(())
+    Ok(stats)
 }
 
 /// Run pass 1 of two-pass mode (junction discovery)
@@ -463,9 +477,13 @@ fn align_reads_single_end<W: AlignmentWriter>(
                 let mut buffer = BufferedSamRecords::new();
                 let mut chimeric_alns = Vec::new();
 
+                // Record read bases for Log.final.out
+                stats.record_read_bases(clipped_seq.len() as u64);
+
                 // Skip if read is too short after clipping
                 if clipped_seq.is_empty() {
                     stats.record_alignment(0, max_multimaps);
+                    stats.record_unmapped_reason(crate::stats::UnmappedReason::Other);
                     if output_unmapped {
                         let record = SamWriter::build_unmapped_record(
                             &read.name,
@@ -482,16 +500,27 @@ fn align_reads_single_end<W: AlignmentWriter>(
                 }
 
                 // Align read (CPU-intensive, pure function)
-                let (transcripts, chimeric_results, n_for_mapq) =
+                let (transcripts, chimeric_results, n_for_mapq, unmapped_reason) =
                     align_read(&clipped_seq, &read.name, &index, params)?;
 
                 // Collect chimeric alignments if enabled
                 if params.chim_segment_min > 0 {
                     chimeric_alns.extend(chimeric_results);
+                    if !chimeric_alns.is_empty() {
+                        stats.record_chimeric();
+                    }
                 }
 
                 // Record stats (atomic, lock-free)
-                stats.record_alignment(transcripts.len(), max_multimaps);
+                let n = transcripts.len();
+                stats.record_alignment(n, max_multimaps);
+                if n == 0 {
+                    stats.record_unmapped_reason(
+                        unmapped_reason.unwrap_or(crate::stats::UnmappedReason::Other),
+                    );
+                } else if n == 1 {
+                    stats.record_transcript_stats(&transcripts[0]);
+                }
 
                 // Record junction statistics
                 let is_unique = transcripts.len() == 1;
@@ -744,9 +773,13 @@ fn align_reads_paired_end<W: AlignmentWriter>(
 
                 let mut buffer = BufferedSamRecords::new();
 
+                // Record read bases for Log.final.out (both mates)
+                stats.record_read_bases(m1_seq.len() as u64 + m2_seq.len() as u64);
+
                 // Skip if either mate is too short after clipping
                 if m1_seq.is_empty() || m2_seq.is_empty() {
                     stats.record_alignment(0, max_multimaps);
+                    stats.record_unmapped_reason(crate::stats::UnmappedReason::Other);
                     if output_unmapped {
                         let records = SamWriter::build_paired_unmapped_records(
                             &paired_read.name,
@@ -767,11 +800,21 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                 }
 
                 // Align paired read (CPU-intensive)
-                let (paired_alns, n_for_mapq) =
+                let (paired_alns, n_for_mapq, unmapped_reason) =
                     align_paired_read(&m1_seq, &m2_seq, &index, params)?;
 
                 // Record stats (count pairs, not individual reads)
-                stats.record_alignment(paired_alns.len(), max_multimaps);
+                let n = paired_alns.len();
+                stats.record_alignment(n, max_multimaps);
+                if n == 0 {
+                    stats.record_unmapped_reason(
+                        unmapped_reason.unwrap_or(crate::stats::UnmappedReason::Other),
+                    );
+                } else if n == 1 {
+                    // Record transcript stats from both mates of the unique pair
+                    stats.record_transcript_stats(&paired_alns[0].mate1_transcript);
+                    stats.record_transcript_stats(&paired_alns[0].mate2_transcript);
+                }
 
                 // Record junction statistics from both mates
                 let is_unique = paired_alns.len() == 1;

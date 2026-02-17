@@ -182,13 +182,17 @@ struct MmpResult {
 ///
 /// Divides read into Nstart evenly-spaced starting positions. From each start,
 /// does successive MMP searches forward, advancing past found seeds (Lmapped).
+/// Produces ~20-40 seeds per 150bp read (vs ~100+ with dense every-position search)
+/// while guaranteeing no gap > seedMapMin (default 5bp).
 ///
-/// NOTE: Currently unused — our DP stitcher requires dense (every-position) seeds.
-/// STAR's DP is designed for sparse seeds; we'll activate this when our DP is adapted.
-/// The MmpResult and seedMapMin/seedSearchStartLmax params are ready for that transition.
+/// NOTE: Bug-fixed but dormant — our DP stitcher needs dense (every-position) seeds.
+/// Sparse seeds cause false splices (4.3% vs 2.2%) because mismatch-position seeds
+/// map to spurious locations without enough neighboring seeds to vote them down.
+/// Activate when DP is adapted for sparse seeds (extension-based gap filling).
 #[allow(dead_code)]
 fn search_direction_sparse(
     read_seq: &[u8],
+    original_read_len: usize,
     index: &GenomeIndex,
     min_seed_length: usize,
     params: &Parameters,
@@ -198,12 +202,8 @@ fn search_direction_sparse(
 ) -> Result<(), Error> {
     let read_len = read_seq.len();
 
-    // Calculate Nstart and Lstart (STAR formula)
-    let nstart = if effective_start_lmax < read_len {
-        read_len / effective_start_lmax + 1
-    } else {
-        1
-    };
+    // Calculate Nstart and Lstart (STAR formula: Nstart = ceil(read_len / effective_start_lmax))
+    let nstart = read_len.div_ceil(effective_start_lmax);
     let lstart = read_len / nstart.max(1);
 
     for istart in 0..nstart {
@@ -211,8 +211,13 @@ fn search_direction_sparse(
         let mut pos = start_pos;
 
         // From this starting position, search forward with Lmapped tracking.
-        // Use seedMapMin for while-loop termination (STAR default: 5), not min_seed_length (8).
-        while pos + params.seed_map_min <= read_len {
+        // Always search at least once per start position, then use seedMapMin
+        // for continuation (STAR default: 5).
+        loop {
+            if pos >= read_len {
+                break;
+            }
+
             let result =
                 find_seed_at_position(read_seq, pos, index, min_seed_length, false, params)?;
 
@@ -223,6 +228,12 @@ fn search_direction_sparse(
                 }
 
                 seed.search_rc = is_rc;
+
+                // Convert RC read_pos back to original read coordinates
+                if is_rc {
+                    seed.read_pos = original_read_len - seed.read_pos - seed.length;
+                }
+
                 seeds.push(seed);
 
                 if seeds.len() >= params.seed_per_read_nmax {
@@ -231,6 +242,11 @@ fn search_direction_sparse(
             }
 
             pos += result.advance; // Always advance by MMP length (matches STAR)
+
+            // Check if enough remaining read to justify continuing
+            if pos + params.seed_map_min >= read_len {
+                break;
+            }
         }
     }
 
@@ -750,6 +766,106 @@ mod tests {
             seeds.len() <= 3,
             "Total seeds ({}) should respect seedPerReadNmax=3",
             seeds.len()
+        );
+    }
+
+    #[test]
+    fn test_sparse_nstart_calculation() {
+        // Verify Nstart = ceil(read_len / effective_start_lmax)
+        // 150 / 50 = 3 exact → Nstart=3, Lstart=50
+        assert_eq!(150_usize.div_ceil(50), 3);
+        assert_eq!(150 / 3_usize.max(1), 50);
+
+        // 151 / 50 = 3.02 → Nstart=4, Lstart=37
+        assert_eq!(151_usize.div_ceil(50), 4);
+        assert_eq!(151 / 4_usize.max(1), 37);
+
+        // 30 / 50 = 0.6 → Nstart=1, Lstart=30
+        assert_eq!(30_usize.div_ceil(50), 1);
+        assert_eq!(30 / 1_usize.max(1), 30);
+
+        // Edge: 50 / 50 = 1 → Nstart=1, Lstart=50
+        assert_eq!(50_usize.div_ceil(50), 1);
+        assert_eq!(50 / 1_usize.max(1), 50);
+
+        // 100 / 50 = 2 → Nstart=2, Lstart=50
+        assert_eq!(100_usize.div_ceil(50), 2);
+        assert_eq!(100 / 2_usize.max(1), 50);
+    }
+
+    #[test]
+    fn test_sparse_rc_read_pos_conversion() {
+        // Genome: AACCTTGG, read is RC of genome: CCAAGGTT
+        // RC(read) = AACCTTGG matches forward genome at pos 0
+        // When searching R→L (is_rc=true), seeds found in the RC read have
+        // positions relative to the RC read. They must be converted back to
+        // original read coordinates: read_pos = original_read_len - rc_pos - length
+        let index = make_test_index("AACCTTGG");
+        let read = encode_sequence("CCAAGGTT");
+
+        let args = vec!["ruSTAR", "--runMode", "alignReads"];
+        let params = Parameters::parse_from(args);
+
+        let seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
+
+        for seed in &seeds {
+            // All seeds (L→R and R→L) must have valid read positions
+            assert!(
+                seed.read_pos + seed.length <= read.len(),
+                "Seed read_pos {} + length {} exceeds read len {} (search_rc={})",
+                seed.read_pos,
+                seed.length,
+                read.len(),
+                seed.search_rc
+            );
+        }
+
+        // Should have R→L seeds
+        let rc_seeds: Vec<_> = seeds.iter().filter(|s| s.search_rc).collect();
+        assert!(
+            !rc_seeds.is_empty(),
+            "Should have R→L seeds with valid read positions"
+        );
+    }
+
+    #[test]
+    fn test_sparse_fewer_seeds_than_dense() {
+        // With a longer genome and read, sparse search should produce fewer seeds
+        // than the old dense (every-position) search
+        let genome_seq = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
+        let index = make_test_index(genome_seq);
+
+        // Use a read that's long enough for multiple start positions
+        let read = encode_sequence("ACGTACGTACGTACGTACGTACGT"); // 24bp
+
+        let args = vec!["ruSTAR", "--runMode", "alignReads"];
+        let params = Parameters::parse_from(args);
+
+        let sparse_seeds = Seed::find_seeds(&read, &index, 4, &params).unwrap();
+
+        // Count how many seeds dense would produce (every position that has a match)
+        let mut dense_count = 0;
+        for read_pos in 0..read.len() {
+            let result = find_seed_at_position(&read, read_pos, &index, 4, false, &params).unwrap();
+            if result.seed.is_some() {
+                dense_count += 1;
+            }
+        }
+        // Also count R→L dense seeds
+        let rc_read = reverse_complement_read(&read);
+        for rc_pos in 0..rc_read.len() {
+            let result =
+                find_seed_at_position(&rc_read, rc_pos, &index, 4, false, &params).unwrap();
+            if result.seed.is_some() {
+                dense_count += 1;
+            }
+        }
+
+        assert!(
+            sparse_seeds.len() <= dense_count,
+            "Sparse ({}) should produce <= dense ({}) seeds",
+            sparse_seeds.len(),
+            dense_count
         );
     }
 

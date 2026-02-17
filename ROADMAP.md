@@ -37,7 +37,9 @@ Phase 1 (CLI) ✅
                                                                                                            └→ Phase 16.2 (NoncanonicalUnannotated + GTF testing) ✅
                                                                                                                 └→ Phase 16.3 (jR scanning) ✅
                                                                                                                      └→ Phase 16.4 (seed search params) ✅
-                                                                                                                          └→ Phase 16.5+ (accuracy parity) ← Next
+                                                                                                                          └→ Phase 16.5 (MAPQ formula fix) ✅
+                                                                                                                               └→ Phase 16.6 (sparse seed bugs) ✅
+                                                                                                                                    └→ Phase 16.7+ (accuracy parity) ← Next
                                                                                                                 └→ Phase 17 (features + polish)
                                                                                                                 └→ Phase 14 (STARsolo) [DEFERRED]
 ```
@@ -1549,7 +1551,7 @@ BySJout mode (`--outFilterType BySJout`):
 
 ## Phase 16: Accuracy + Algorithm Parity
 
-**Status**: In Progress (Phase 16.1-16.5 complete)
+**Status**: In Progress (Phase 16.1-16.6 complete)
 
 **Goal**: Close remaining accuracy gaps vs STAR. Fix over-splicing, rDNA MAPQ, missing seed parameters, and DP junction optimization.
 
@@ -1687,21 +1689,45 @@ Key findings:
 
 **Correct fix (future)**: Split clusters into ~65kb sub-windows before DP, running independent DP per sub-window. This matches STAR's window-based architecture where each 65kb window independently discovers alignments. For rDNA, different sub-windows would contain seeds from different repeat copies and produce transcripts at different positions → `n_for_mapq > 1` → MAPQ low. Requires significant refactoring of the cluster→DP pipeline.
 
-### Phase 16.6: Sparse Seed Search Activation (DP Adaptation)
+### Phase 16.6: Sparse Seed Search Bug Fixes ✅ COMPLETE (2026-02-17)
 
-**Problem**: Phase 16.4 added sparse seed search infrastructure (`search_direction_sparse()`, `MmpResult`, STAR-compatible params) but it's dormant because our DP stitcher was designed for dense (every-position) seeds. STAR uses sparse seeds (Nstart≈3-4 starting positions, MMP advancement) and gets excellent results because its DP is designed for it. With sparse seeds, our DP creates false RefSkips to bridge gaps between distant seeds (splice rate 2.1%→4.6%, position 95.8%→91.9%).
+**Problem**: `search_direction_sparse()` (added in Phase 16.4) had 3 bugs preventing correct operation, and had never been tested against STAR.
 
-**Root cause**: Our DP clustering and stitching relies on having seeds at nearly every read position to determine window boundaries and anchor points. With sparse seeds (~6-10 per read vs ~100+), windows are under-populated and the DP makes poor bridging decisions.
+**Bug fixes**:
+1. **While loop condition**: `pos + seed_map_min <= read_len` → `pos + seed_map_min >= read_len` as loop-exit (changed to do-while pattern to always search at least once per start position)
+2. **Nstart calculation**: `read_len / effective_start_lmax + 1` → `read_len.div_ceil(effective_start_lmax)` (ceiling division, matches STAR: 150/50 → 3, not 4)
+3. **Missing RC read_pos conversion**: R→L seeds had `read_pos` relative to the RC read, not the original. Added `original_read_len` parameter and `read_pos = original_read_len - read_pos - length` conversion for `is_rc` seeds.
 
-**Fix**: Study STAR's `stitchAlignToTranscript` and clustering to understand how it works with sparse seeds. Key areas to investigate and adapt:
-1. Window/cluster formation with sparse anchors
-2. DP gap scoring when seed gaps are large
-3. extendAlign behavior with fewer anchor points
+**Activation tested and reverted**: Activated `search_direction_sparse()` in `find_seeds()`, replacing the dense every-position loops. Results showed major regression across ALL acceptance criteria:
+
+| Metric | Dense (current) | Sparse (seedSearchStartLmax=50) | Sparse (=15) | Threshold |
+|--------|--------|--------|--------|--------|
+| Position agreement | **94.5%** | 91.1% | 92.1% | ≥ 94% |
+| CIGAR agreement | **97.8%** | 96.5% | 96.2% | ≥ 97% |
+| Splice rate | **2.1%** | 4.3% | — | ~2.2% |
+| Shared junctions | 42 | 37 | — | — |
+
+**Root cause confirmed**: At mismatch positions in a read, MMP finds spurious genome locations. Dense search has ~148 correct seeds neighboring the mismatch to outvote ~2 spurious seeds. Sparse search has only ~4 correct + ~2 spurious → DP picks wrong chain → false splices (4.3% vs 2.2%). This confirms the Phase 16.4 finding: our DP fundamentally needs dense seeds.
+
+**Outcome**: `find_seeds()` reverted to dense search. Bug-fixed `search_direction_sparse()` kept as dormant infrastructure with `#[allow(dead_code)]` and explanatory doc comment. All 3 bug fixes preserved for future activation when DP is adapted.
+
+**Files**: `src/align/seed.rs`
+**Tests**: 244/244 passing (3 new: `test_sparse_nstart_calculation`, `test_sparse_rc_read_pos_conversion`, `test_sparse_fewer_seeds_than_dense`)
+**Metrics**: Unchanged — 94.5% position, 97.8% CIGAR, 2.1% splice rate, 42 shared junctions (dense search preserved)
+
+### Phase 16.7: Sparse Seed Activation (DP Adaptation)
+
+**Problem**: `search_direction_sparse()` is bug-fixed and ready but dormant because our DP stitcher requires dense seeds. STAR uses sparse seeds (Nstart≈3-4 starting positions, MMP advancement) with a DP designed for extension-based gap filling. Our DP creates false RefSkips at mismatch positions when seed density is low.
+
+**Fix**: Study STAR's `stitchAlignToTranscript` to understand how it handles sparse seeds. Key areas:
+1. Extension-based gap filling between sparse seeds (vs our bridging approach)
+2. Window/cluster formation with sparse anchors
+3. DP gap scoring when seed gaps are large (30-50bp)
 4. Whether STAR uses additional seed sources (e.g., junction-aware seeds) to compensate
 
 Once DP is adapted, switch `find_seeds()` from every-position to `search_direction_sparse()`.
 
-### Phase 16.7: Paired-End Joint DP Stitching
+### Phase 16.8: Paired-End Joint DP Stitching
 
 **Problem**: Mates aligned independently then paired by chr+distance (PE alignment fix). This works (87.1% mapped, 95.7% per-mate position agreement) but leaves 12.9% unmapped (STAR: 0%) because it requires both mates to independently produce alignments. STAR uses joint mate-aware DP where seeds from both mates participate in a unified DP that bridges the inter-mate gap, enabling mate rescue.
 

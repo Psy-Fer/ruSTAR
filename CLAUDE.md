@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Implementation Status
 
-See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.6 + 16.1-16.5 + PE alignment fix complete. SE: 94.5% position agreement, 97.8% CIGAR agreement, 2.1% splice rate (matches STAR 2.2%). With GTF: 94.5% position, 97.6% CIGAR (STAR detects more annotated junctions via index insertion). PE: 87.1% mapped (was 0%), 95.7% per-mate position agreement, 97.1% CIGAR agreement. SAM tags: NH/HI/AS/NM/nM/XS/jM/jI/MD all implemented + --outSAMattributes enforcement. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement. Phase 16.5: MAPQ formula replaced with STAR's exact lookup table; n_for_mapq infrastructure for future rDNA window-model fix.**
+See [ROADMAP.md](ROADMAP.md) for detailed phase tracking. **Phases 1-13.14 + 15.1-15.6 + 16.1-16.6 + PE alignment fix complete. SE: 94.5% position agreement, 97.8% CIGAR agreement, 2.1% splice rate (matches STAR 2.2%). With GTF: 94.5% position, 97.6% CIGAR (STAR detects more annotated junctions via index insertion). PE: 87.1% mapped (was 0%), 95.7% per-mate position agreement, 97.1% CIGAR agreement. SAM tags: NH/HI/AS/NM/nM/XS/jM/jI/MD all implemented + --outSAMattributes enforcement. SECONDARY flag + outSAMmultNmax: 99.8% FLAG agreement, 96.2% NH agreement. Phase 16.6: sparse seed search bug-fixed (3 bugs) but activation reverted — DP needs dense seeds (91.1% pos, 4.3% splice with sparse vs 94.5%/2.1% dense). 244 tests.**
 
 **Phase order change**: Phases reordered to 9 → 8 → 7 to establish parallel architecture foundation
 before adding complex features. Threading affects the entire execution model and is harder to retrofit later.
@@ -71,11 +71,12 @@ before adding complex features. Threading affects the entire execution model and
 - Phase 16.3 (jR scanning) ← **Post-DP junction boundary optimization. Neutral on yeast (95.8% pos, 97.8% CIGAR unchanged). +1 shared junction. 241 tests**
 - Phase 16.4 (Seed search params) ← **seedSearchStartLmax/seedSearchLmax/seedMapMin params + MmpResult refactoring. Sparse search infrastructure ready but dormant — DP needs dense seeds. 241 tests**
 - Phase 16.5 (MAPQ formula fix) ← **STAR lookup table (n≥5→0, n=3-4→1, n=2→3). n_for_mapq infrastructure threaded through align→SAM. rDNA MAPQ=255 remains (needs window-model fix). 241 tests**
+- Phase 16.6 (Sparse seed bug fixes) ← **3 bugs fixed (while condition, nstart div_ceil, RC read_pos). Activation tested: 91.1% pos / 4.3% splice → reverted to dense. Bug-fixed function dormant. 244 tests**
 
 **Planned**:
 - Phase 16.5b (rDNA window-model fix) ← DEFERRED: bin-counting approach investigated & failed (589kb clusters share seeds); needs ~65kb sub-window splitting
-- Phase 16.6 (Sparse seed search activation) ← Adapt DP stitcher for sparse seeds, then activate search_direction_sparse()
-- Phase 16.7 (PE joint DP) ← Mate-aware DP stitching for mate rescue (12.9% → ~0% unmapped)
+- Phase 16.7 (Sparse seed activation) ← Adapt DP stitcher for sparse seeds (extension-based gap filling), then activate search_direction_sparse()
+- Phase 16.8 (PE joint DP) ← Mate-aware DP stitching for mate rescue (12.9% → ~0% unmapped)
 - Phase 17 (Features + polish) ← Log.final.out, sorted BAM, PE chimeric, quantMode, stdout output
 
 **Current Status** (10k yeast reads):
@@ -93,12 +94,12 @@ Paired-end (10k yeast read pairs):
 - ✅ **97.1% per-mate CIGAR agreement** among position-matching mates
 - ✅ 81.3% unique mapped, 5.9% multi-mapped
 - ✅ **72 shared junctions** with STAR (STAR: 90 total), **100% motif agreement**
-- ⚠️ 12.9% unmapped pairs (STAR: 0%) — needs PE joint DP stitching (Phase 16.6)
+- ⚠️ 12.9% unmapped pairs (STAR: 0%) — needs PE joint DP stitching (Phase 16.8)
 
 All modes:
 - ✅ **100% motif agreement** on shared junctions
 - ✅ SAM SEQ properly reverse-complemented for reverse-strand reads
-- ✅ 241 unit tests passing
+- ✅ 244 unit tests passing
 - ✅ Deterministic output (identical SAM across runs)
 - ✅ Bidirectional seed search (L→R + R→L)
 - ✅ Annotation-aware DP scoring (sjdbScore bonus during stitching)
@@ -195,7 +196,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 241/241 unit tests passing, non-critical clippy warnings (too_many_arguments × 5, manual_contains × 2)
+**Current test status**: 244/244 unit tests passing, non-critical clippy warnings (too_many_arguments × 6, manual_contains × 1, implicit_saturating_sub × 1)
 
 **Note**: Phase 9 integration tests fail due to pathologically repetitive test genomes (50 exact copies of 20bp). These tests need realistic genomes (deferred to Phase 13).
 
@@ -251,11 +252,11 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 7e. ~~**PE 0% mapped**~~ ✅ FIXED — Rewrote `align_paired_read()` to use independent SE alignment per mate then pair by chr+distance. 0% → 87.1% mapped, 95.7% per-mate position agreement.
 8. ~~**Over-splicing in Normal mode**~~ ✅ FIXED in Phase 16.1 — splice rate now 2.2% (matches STAR exactly). max_cluster_dist 100kb→589kb.
 8b. ~~**RemoveNoncanonicalUnannotated filter incorrect**~~ ✅ FIXED in Phase 16.2 — now properly checks annotation status via `junction_annotated` Vec.
-8c. ~~**No seedSearchStartLmax/seedSearchLmax/seedMapMin params**~~ ✅ ADDED in Phase 16.4 — params parsed; sparse search infrastructure ready but dormant (DP needs dense seeds).
+8c. ~~**No seedSearchStartLmax/seedSearchLmax/seedMapMin params**~~ ✅ ADDED in Phase 16.4 — params parsed; sparse search bug-fixed in Phase 16.6 (3 bugs: while condition, nstart div_ceil, RC read_pos) but activation reverted (91.1% pos, 4.3% splice rate with sparse vs 94.5%/2.1% dense). DP needs dense seeds.
 9. **rDNA multi-mapping** (~157 same-chr >500bp in BySJout): chrXII rDNA repeats — STAR=MAPQ 1-3, ruSTAR=MAPQ 255. Root cause: 589kb clusters merge all repeat copy seeds into one cluster; DP produces one transcript. Bin-counting approaches fail because shared seeds make all clusters produce identical transcripts. Needs ~65kb sub-window splitting (Phase 16.5b deferred).
 10. **113 diff-chr disagreements** (SE): Multi-mappers (harmless tie-breaking).
 11. **98 STAR-only mapped reads** (SE Normal): Stable.
-12. **PE 12.9% unmapped** (STAR: 0%): Requires both mates to align independently. Needs PE joint DP stitching (Phase 16.6) for mate rescue.
+12. **PE 12.9% unmapped** (STAR: 0%): Requires both mates to align independently. Needs PE joint DP stitching (Phase 16.8) for mate rescue.
 12b. ~~**SJ motif strand disagreement**~~ ✅ FIXED in Phase 13.12 — strand now derived from splice motif (`implied_strand()`), not read alignment strand.
 
 ## Limitations (to be addressed in future phases)
@@ -268,12 +269,12 @@ ruSTAR can now perform **end-to-end RNA-seq alignment with two-pass mode and chi
 - ~~**jM/jI/MD tags**~~ ✅ DONE in Phase 15.3 — jM (junction motifs, B:c), jI (intron coords, B:i), MD (mismatch descriptor, Z:) on all records; 448 spliced records get jM/jI
 - ~~**Paired-end FLAG/PNEXT bugs**~~ ✅ DONE in Phase 15.4 — FLAG 0x20 from mate's actual strand, PNEXT per-chr coords, RNEXT from mate, per-mate AS/NM/XS/jM/jI/MD
 - ~~**PE 0% mapped**~~ ✅ FIXED — Independent mate alignment + pairing: 87.1% mapped, 95.7% per-mate position agreement
-- **PE 12.9% unmapped** (STAR: 0%) — needs PE joint DP stitching for mate rescue — Phase 16.7
+- **PE 12.9% unmapped** (STAR: 0%) — needs PE joint DP stitching for mate rescue — Phase 16.8
 - ~~**--outSAMattributes**~~ ✅ DONE in Phase 15.5 — Standard/All/None/explicit tag control enforced
 - **No coordinate-sorted BAM output** (unsorted only; use `samtools sort`) — Phase 17.2
 - **No Log.final.out** statistics file (MultiQC/RNA-SeQC) — Phase 17.1
 - ~~**Over-splicing**~~ ✅ FIXED in Phase 16.1 — splice rate 2.2% matches STAR
-- **Sparse seed search dormant** — infrastructure ready (seedSearchStartLmax, MmpResult) but DP needs dense seeds — Phase 16.6
+- **Sparse seed search dormant** — bug-fixed in Phase 16.6 (3 bugs), activation tested and reverted (91.1% pos, 4.3% splice). DP needs dense seeds; requires extension-based gap filling — Phase 16.7
 - **rDNA MAPQ inflation** (~157 reads, MAPQ 255 vs STAR 1-3) — MAPQ formula fixed (Phase 16.5), bin-counting investigated & failed (Phase 16.5b), needs ~65kb sub-window splitting
 - **No --outReadsUnmapped Fastx** — Phase 17.4
 - **No --outStd SAM/BAM** (stdout output) — Phase 17.6

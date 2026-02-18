@@ -6,7 +6,7 @@ A Rust reimplementation of [STAR](https://github.com/alexdobin/STAR) (Spliced Tr
 
 ruSTAR aims to be a faithful port of STAR, matching the original behavior as closely as possible. It uses the same genome index format, accepts the same `--camelCase` command-line parameters, and produces compatible SAM/BAM output.
 
-**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection, and multi-threaded parallel processing.
+**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection, and multi-threaded parallel processing. 257 tests passing.
 
 ## Quick Start
 
@@ -82,7 +82,7 @@ target/release/ruSTAR \
 
 | Mode | Position agree | CIGAR agree | Splice rate |
 |------|---------------|-------------|-------------|
-| Normal (default) | 95.8% | 97.8% | 2.2% |
+| Normal (default) | 94.5% | 97.8% | 2.1% |
 
 #### SAM Tag Agreement (position-matching reads)
 
@@ -109,57 +109,60 @@ target/release/ruSTAR \
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Unique mapped | 81.3% | 78.6% |
-| Multi-mapped | 5.9% | 5.3% |
-| Total mapped | 87.1% | 100% |
-| Unmapped pairs | 12.9% | 0% |
+| Unique mapped | 84.9% | 78.6% |
+| Multi-mapped | 5.2% | 5.3% |
+| Both mates mapped | 8706 (96.6%) | 8390 (100%) |
+| Half-mapped pairs | 311 (3.4%) | 0 |
+| Unmapped pairs | 0 | 0 |
 
 #### Per-Mate Agreement
 
 | Metric | Value |
 |--------|-------|
-| Per-mate position agree | 95.7% |
-| Per-mate CIGAR agree | 97.1% |
-| Per-pair both mates correct | 93.3% |
+| Per-mate position agree | 95.6% |
+| Per-mate CIGAR agree | 93.1% |
+| STAR-only mapped mates | 98 |
 
 #### Junction Statistics (PE)
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Shared junctions | 72 | 90 total |
-| ruSTAR-only junctions | 6 | -- |
+| Shared junctions | 76 | 90 total |
 | Motif agreement (shared) | 100% | -- |
 
-> **Note**: PE unmapped rate (12.9%) is because each mate must align independently before pairing. STAR uses joint DP stitching with mate rescue, which recovers pairs where only one mate has a clear alignment. Joint DP is planned for Phase 16.6.
+> **Note**: 311 half-mapped pairs (3.4%) are cases where one mate maps but the other fails even with mate rescue. STAR uses joint DP stitching which recovers these. Joint DP is planned for Phase 16.9.
 
 ## Supported Features
 
-- Single-end and paired-end alignment
-- SAM and unsorted BAM output
+- Single-end and paired-end alignment with mate rescue
+- SAM and unsorted BAM output (`--outSAMtype SAM` or `BAM Unsorted`)
 - Multi-threaded parallel alignment (`--runThreadN`)
-- GTF-based junction annotation with scoring bonus
+- GTF-based junction annotation with scoring bonus (`--sjdbGTFfile`)
 - Two-pass mode for novel junction discovery (`--twopassMode Basic`)
 - Chimeric alignment detection for single-end reads (`--chimSegmentMin`)
 - Post-alignment read filtering (`--outFilterType BySJout`)
 - Splice junction output (SJ.out.tab)
 - Gzip-compressed FASTQ input (`--readFilesCommand zcat`)
-- SAM optional tags: NH, HI, AS, NM, XS, jM, jI, MD
+- SAM optional tags: NH, HI, AS, NM, nM, XS, jM, jI, MD
+- `--outSAMattributes` control (Standard/All/None/explicit)
 - SECONDARY flag (0x100) on multi-mapper alignments
 - Configurable output limits (`--outSAMmultNmax`)
 - Bidirectional seed search (L-to-R and R-to-L)
-- Junction boundary optimization (jR scanning for optimal splice motifs)
+- Junction boundary optimization (jR scanning)
 - Deterministic output (identical SAM across runs)
+- Log.final.out statistics file (STAR-compatible, MultiQC-parseable)
 
 ## Known Limitations
 
-- PE unmapped rate higher than STAR (12.9% vs 0%) -- needs joint DP stitching for mate rescue
 - No coordinate-sorted BAM output (use `samtools sort` post-alignment)
-- No `Log.final.out` statistics file (MultiQC/RNA-SeQC)
 - No paired-end chimeric detection
 - No `--quantMode GeneCounts`
 - No `--outReadsUnmapped Fastx`
 - No `--outStd SAM/BAM` (stdout output)
-- STAR uses `nM` (mismatches only); ruSTAR emits both `NM` (edit distance) and `nM` (mismatches only)
+- rDNA MAPQ inflation (~157 reads MAPQ 255 vs STAR 1-3) — needs sub-window splitting
+- No STARsolo single-cell features
+
+See [ROADMAP.md](ROADMAP.md) for detailed implementation tracking.
 
 ## Building from Source
 

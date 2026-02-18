@@ -674,7 +674,7 @@ fn align_reads_paired_end<W: AlignmentWriter>(
     stats: &std::sync::Arc<crate::stats::AlignmentStats>,
     sj_stats: &std::sync::Arc<crate::junction::SpliceJunctionStats>,
 ) -> anyhow::Result<()> {
-    use crate::align::read_align::align_paired_read;
+    use crate::align::read_align::{PairedAlignment, PairedAlignmentResult, align_paired_read};
     use crate::io::fastq::{PairedFastqReader, clip_read};
     use crate::io::sam::{BufferedSamRecords, SamWriter};
     use crate::params::OutFilterType;
@@ -800,61 +800,109 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                 }
 
                 // Align paired read (CPU-intensive)
-                let (paired_alns, n_for_mapq, unmapped_reason) =
+                let (results, n_for_mapq, unmapped_reason) =
                     align_paired_read(&m1_seq, &m2_seq, &index, params)?;
 
-                // Record stats (count pairs, not individual reads)
-                let n = paired_alns.len();
-                stats.record_alignment(n, max_multimaps);
-                if n == 0 {
+                // Classify the result for stats and SAM output
+                let has_half_mapped = results
+                    .iter()
+                    .any(|r| matches!(r, PairedAlignmentResult::HalfMapped { .. }));
+                let both_mapped: Vec<_> = results
+                    .iter()
+                    .filter_map(|r| {
+                        if let PairedAlignmentResult::BothMapped(pa) = r {
+                            Some(pa)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if results.is_empty() {
+                    // Both mates unmapped
+                    stats.record_alignment(0, max_multimaps);
                     stats.record_unmapped_reason(
                         unmapped_reason.unwrap_or(crate::stats::UnmappedReason::Other),
                     );
-                } else if n == 1 {
-                    // Record transcript stats from both mates of the unique pair
-                    stats.record_transcript_stats(&paired_alns[0].mate1_transcript);
-                    stats.record_transcript_stats(&paired_alns[0].mate2_transcript);
-                }
-
-                // Record junction statistics from both mates
-                let is_unique = paired_alns.len() == 1;
-                for pair in &paired_alns {
-                    record_transcript_junctions(
-                        &pair.mate1_transcript,
-                        &index,
-                        &sj_stats,
-                        is_unique,
-                    );
-                    record_transcript_junctions(
-                        &pair.mate2_transcript,
-                        &index,
-                        &sj_stats,
-                        is_unique,
-                    );
-                }
-
-                // Extract junction keys from primary alignment for BySJout (both mates)
-                let primary_junction_keys = if by_sjout && !paired_alns.is_empty() {
-                    let mut keys = Vec::new();
-                    if paired_alns[0].mate1_transcript.n_junction > 0 {
-                        keys.extend(extract_junction_keys(
-                            &paired_alns[0].mate1_transcript,
-                            &index,
-                        ));
+                } else if has_half_mapped {
+                    // Half-mapped: count as mapped for the mapped mate
+                    stats.record_alignment(1, max_multimaps);
+                    stats.record_half_mapped();
+                    // Record transcript stats from the mapped mate only
+                    if let Some(PairedAlignmentResult::HalfMapped {
+                        mapped_transcript, ..
+                    }) = results.first()
+                    {
+                        stats.record_transcript_stats(mapped_transcript);
                     }
-                    if paired_alns[0].mate2_transcript.n_junction > 0 {
-                        keys.extend(extract_junction_keys(
-                            &paired_alns[0].mate2_transcript,
-                            &index,
-                        ));
+                } else {
+                    // Both-mapped pairs
+                    let n = both_mapped.len();
+                    stats.record_alignment(n, max_multimaps);
+                    if n == 1 {
+                        stats.record_transcript_stats(&both_mapped[0].mate1_transcript);
+                        stats.record_transcript_stats(&both_mapped[0].mate2_transcript);
+                    }
+                }
+
+                // Record junction statistics
+                let is_unique = both_mapped.len() == 1 || (has_half_mapped && results.len() == 1);
+                for result in &results {
+                    match result {
+                        PairedAlignmentResult::BothMapped(pair) => {
+                            record_transcript_junctions(
+                                &pair.mate1_transcript,
+                                &index,
+                                &sj_stats,
+                                is_unique,
+                            );
+                            record_transcript_junctions(
+                                &pair.mate2_transcript,
+                                &index,
+                                &sj_stats,
+                                is_unique,
+                            );
+                        }
+                        PairedAlignmentResult::HalfMapped {
+                            mapped_transcript, ..
+                        } => {
+                            record_transcript_junctions(
+                                mapped_transcript,
+                                &index,
+                                &sj_stats,
+                                is_unique,
+                            );
+                        }
+                    }
+                }
+
+                // Extract junction keys from primary alignment for BySJout
+                let primary_junction_keys = if by_sjout && !results.is_empty() {
+                    let mut keys = Vec::new();
+                    match &results[0] {
+                        PairedAlignmentResult::BothMapped(pair) => {
+                            if pair.mate1_transcript.n_junction > 0 {
+                                keys.extend(extract_junction_keys(&pair.mate1_transcript, &index));
+                            }
+                            if pair.mate2_transcript.n_junction > 0 {
+                                keys.extend(extract_junction_keys(&pair.mate2_transcript, &index));
+                            }
+                        }
+                        PairedAlignmentResult::HalfMapped {
+                            mapped_transcript, ..
+                        } => {
+                            if mapped_transcript.n_junction > 0 {
+                                keys.extend(extract_junction_keys(mapped_transcript, &index));
+                            }
+                        }
                     }
                     keys
                 } else {
                     Vec::new()
                 };
 
-                // Build SAM records (2 per pair)
-                if paired_alns.is_empty() {
+                // Build SAM records
+                if results.is_empty() {
                     // Unmapped pair
                     if output_unmapped {
                         let records = SamWriter::build_paired_unmapped_records(
@@ -868,8 +916,36 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                             buffer.push(record);
                         }
                     }
-                } else if paired_alns.len() <= max_multimaps {
-                    // Mapped pair (within multimap limit)
+                } else if has_half_mapped {
+                    // Half-mapped pair
+                    if let Some(PairedAlignmentResult::HalfMapped {
+                        mapped_transcript,
+                        mate1_is_mapped,
+                    }) = results.first()
+                    {
+                        let records = SamWriter::build_half_mapped_records(
+                            &paired_read.name,
+                            &m1_seq,
+                            &m1_qual,
+                            &m2_seq,
+                            &m2_qual,
+                            mapped_transcript,
+                            *mate1_is_mapped,
+                            &index.genome,
+                            params,
+                            n_for_mapq,
+                        )?;
+                        for record in records {
+                            buffer.push(record);
+                        }
+                    }
+                } else if both_mapped.len() <= max_multimaps {
+                    // Both-mapped pairs (within multimap limit)
+                    // Extract PairedAlignments for the existing build_paired_records
+                    let paired_alns: Vec<PairedAlignment> = both_mapped
+                        .iter()
+                        .map(|pa| PairedAlignment::clone(pa))
+                        .collect();
                     let records = SamWriter::build_paired_records(
                         &paired_read.name,
                         &m1_seq,

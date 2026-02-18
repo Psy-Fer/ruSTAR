@@ -25,6 +25,20 @@ pub struct PairedAlignment {
     pub insert_size: i32,
 }
 
+/// Result of paired-end alignment, covering all mapping outcomes.
+#[derive(Debug, Clone)]
+pub enum PairedAlignmentResult {
+    /// Both mates mapped and paired successfully
+    BothMapped(Box<PairedAlignment>),
+    /// Only one mate mapped; rescue failed or was not attempted for the other
+    HalfMapped {
+        /// Transcript of the mapped mate
+        mapped_transcript: Transcript,
+        /// true = mate1 is the mapped mate, false = mate2 is mapped
+        mate1_is_mapped: bool,
+    },
+}
+
 /// Align a read to the genome.
 ///
 /// # Algorithm
@@ -364,6 +378,149 @@ pub fn align_read(
     ))
 }
 
+/// Attempt to rescue an unmapped mate using the mapped mate's position as anchor.
+///
+/// # Algorithm
+/// 1. Find seeds for the unmapped mate (genome-wide, same as SE path)
+/// 2. Filter seeds to keep only those within the rescue window on the mapped mate's chromosome
+/// 3. Cluster the filtered seeds
+/// 4. Stitch seeds within each cluster via DP
+/// 5. Apply the same quality filters as align_read()
+/// 6. Return the best transcript if any passes filters
+///
+/// # Arguments
+/// * `unmapped_seq` - Sequence of the unmapped mate (encoded)
+/// * `mapped_transcript` - Best transcript from the mapped mate (anchor)
+/// * `index` - Genome index
+/// * `params` - Parameters
+///
+/// # Returns
+/// `Some(transcript)` if rescue succeeds, `None` otherwise
+fn rescue_unmapped_mate(
+    unmapped_seq: &[u8],
+    mapped_transcript: &Transcript,
+    index: &GenomeIndex,
+    params: &Parameters,
+) -> Result<Option<Transcript>, Error> {
+    // Step 1: Find seeds for unmapped mate (genome-wide search)
+    let min_seed_length = 8;
+    let seeds = Seed::find_seeds(unmapped_seq, index, min_seed_length, params)?;
+
+    if seeds.is_empty() {
+        return Ok(None);
+    }
+
+    // Step 2: Determine rescue window
+    // Use alignMatesGapMax if set, otherwise default 1Mb
+    let rescue_range: u64 = if params.align_mates_gap_max > 0 {
+        params.align_mates_gap_max as u64
+    } else {
+        1_000_000
+    };
+    let anchor_chr = mapped_transcript.chr_idx;
+    let anchor_start = mapped_transcript.genome_start;
+    let anchor_end = mapped_transcript.genome_end;
+    let window_start = anchor_start.saturating_sub(rescue_range);
+    let window_end = anchor_end.saturating_add(rescue_range);
+
+    // Step 3: Filter seeds — keep only those with at least one genome position
+    // on the same chromosome and within the rescue window
+    let filtered_seed_indices: Vec<usize> = seeds
+        .iter()
+        .enumerate()
+        .filter(|(_, seed)| {
+            seed.genome_positions(index).any(|(pos, is_rev)| {
+                // Convert SA position to forward genome coordinate
+                let fwd_pos = index.sa_pos_to_forward(pos, is_rev, seed.length);
+                // Check if this position is on the anchor chromosome and within window
+                if let Some((chr_idx, _)) = index.genome.position_to_chr(fwd_pos) {
+                    chr_idx == anchor_chr && fwd_pos >= window_start && fwd_pos <= window_end
+                } else {
+                    false
+                }
+            })
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    if filtered_seed_indices.is_empty() {
+        return Ok(None);
+    }
+
+    // Step 4: Build a filtered seed list for clustering
+    let filtered_seeds: Vec<Seed> = filtered_seed_indices
+        .iter()
+        .map(|&i| seeds[i].clone())
+        .collect();
+
+    // Step 5: Cluster and stitch the filtered seeds
+    let max_cluster_dist = params.win_bin_window_dist();
+    let max_loci_for_anchor = 10;
+    let clusters = cluster_seeds(
+        &filtered_seeds,
+        index,
+        max_cluster_dist,
+        max_loci_for_anchor,
+        params.win_anchor_multimap_nmax,
+        params.seed_none_loci_per_window,
+        params.win_bin_nbits,
+    );
+
+    if clusters.is_empty() {
+        return Ok(None);
+    }
+
+    let scorer = AlignmentScorer::from_params(params);
+    let junction_db = if index.junction_db.is_empty() {
+        None
+    } else {
+        Some(&index.junction_db)
+    };
+
+    let mut transcripts = Vec::new();
+    for cluster in clusters.iter().take(params.align_windows_per_read_nmax) {
+        let cluster_transcripts = stitch_seeds_with_jdb(
+            cluster,
+            &filtered_seeds,
+            unmapped_seq,
+            index,
+            &scorer,
+            junction_db,
+        )?;
+        transcripts.extend(cluster_transcripts);
+    }
+
+    // Step 6: Apply quality filters (same as align_read)
+    let read_length = unmapped_seq.len() as f64;
+    transcripts.retain(|t| {
+        if t.score < params.out_filter_score_min {
+            return false;
+        }
+        if (t.score as f64) < params.out_filter_score_min_over_lread * read_length {
+            return false;
+        }
+        if t.n_mismatch > params.out_filter_mismatch_nmax {
+            return false;
+        }
+        let mismatch_rate = t.n_mismatch as f64 / read_length;
+        if mismatch_rate > params.out_filter_mismatch_nover_lmax {
+            return false;
+        }
+        let n_matched = t.n_matched();
+        if n_matched < params.out_filter_match_nmin {
+            return false;
+        }
+        if (n_matched as f64) < params.out_filter_match_nmin_over_lread * read_length {
+            return false;
+        }
+        true
+    });
+
+    // Sort by score (best first) and return the best
+    transcripts.sort_by(|a, b| b.score.cmp(&a.score));
+    Ok(transcripts.into_iter().next())
+}
+
 /// Align paired-end reads by aligning each mate independently, then pairing results.
 ///
 /// # Algorithm
@@ -383,31 +540,96 @@ pub fn align_read(
 /// * `params` - Parameters (includes alignMatesGapMax)
 ///
 /// # Returns
-/// Tuple of (paired alignments, n_for_mapq, unmapped_reason):
-/// - paired alignments: sorted by combined score (best first)
+/// Tuple of (paired alignment results, n_for_mapq, unmapped_reason):
+/// - results: `PairedAlignmentResult` variants (BothMapped or HalfMapped)
 /// - n_for_mapq: effective alignment count for MAPQ (max of both mates' cluster counts)
-/// - unmapped_reason: `Some(reason)` if no paired alignments, `None` if mapped
+/// - unmapped_reason: `Some(reason)` if no alignments at all, `None` if any mate mapped
 pub fn align_paired_read(
     mate1_seq: &[u8],
     mate2_seq: &[u8],
     index: &GenomeIndex,
     params: &Parameters,
-) -> Result<(Vec<PairedAlignment>, usize, Option<UnmappedReason>), Error> {
+) -> Result<(Vec<PairedAlignmentResult>, usize, Option<UnmappedReason>), Error> {
     // Step 1: Align each mate independently using the proven SE path
     let (mate1_transcripts, _, mate1_mapq_n, mate1_unmapped) =
         align_read(mate1_seq, "", index, params)?;
     let (mate2_transcripts, _, mate2_mapq_n, mate2_unmapped) =
         align_read(mate2_seq, "", index, params)?;
 
-    // If either mate has no alignments, return empty (both unmapped)
-    if mate1_transcripts.is_empty() || mate2_transcripts.is_empty() {
-        // Use the first mate's unmapped reason, or Other
+    // Tier 2 & 3: Handle cases where one or both mates fail to align
+    let mate1_empty = mate1_transcripts.is_empty();
+    let mate2_empty = mate2_transcripts.is_empty();
+
+    if mate1_empty && mate2_empty {
+        // Both mates unmapped — no rescue possible
         let reason = mate1_unmapped
             .or(mate2_unmapped)
             .unwrap_or(UnmappedReason::Other);
         return Ok((Vec::new(), 0, Some(reason)));
     }
 
+    if mate1_empty || mate2_empty {
+        // One mate mapped, one didn't — attempt rescue
+        let (mapped_transcripts, unmapped_seq, mate1_is_mapped) = if mate2_empty {
+            (&mate1_transcripts, mate2_seq, true)
+        } else {
+            (&mate2_transcripts, mate1_seq, false)
+        };
+
+        let mapped_best = &mapped_transcripts[0];
+
+        // Tier 2: Try to rescue the unmapped mate
+        if let Some(rescued) = rescue_unmapped_mate(unmapped_seq, mapped_best, index, params)? {
+            // Rescue succeeded — build a proper pair
+            let (t1, t2) = if mate1_is_mapped {
+                (mapped_best.clone(), rescued)
+            } else {
+                (rescued, mapped_best.clone())
+            };
+
+            let is_proper_pair = check_proper_pair(&t1, &t2, params);
+            let insert_size = calculate_insert_size(&t1, &t2);
+
+            let pe_mapq_n = if mate1_is_mapped {
+                mate1_mapq_n.max(1)
+            } else {
+                mate2_mapq_n.max(1)
+            };
+
+            return Ok((
+                vec![PairedAlignmentResult::BothMapped(Box::new(
+                    PairedAlignment {
+                        mate1_transcript: t1,
+                        mate2_transcript: t2,
+                        mate1_region: (0, mate1_seq.len()),
+                        mate2_region: (0, mate2_seq.len()),
+                        is_proper_pair,
+                        insert_size,
+                    },
+                ))],
+                pe_mapq_n,
+                None,
+            ));
+        }
+
+        // Tier 3: Rescue failed — return HalfMapped
+        let pe_mapq_n = if mate1_is_mapped {
+            mate1_mapq_n
+        } else {
+            mate2_mapq_n
+        };
+
+        return Ok((
+            vec![PairedAlignmentResult::HalfMapped {
+                mapped_transcript: mapped_best.clone(),
+                mate1_is_mapped,
+            }],
+            pe_mapq_n,
+            None, // Not fully unmapped — one mate mapped
+        ));
+    }
+
+    // Tier 1: Both mates aligned independently — pair them
     let pe_mapq_n = mate1_mapq_n.max(mate2_mapq_n);
 
     // Step 2: Pair transcripts by chromosome + distance
@@ -502,13 +724,32 @@ pub fn align_paired_read(
     // Step 6: Apply quality filters and truncate
     filter_paired_transcripts(&mut paired_alignments, params);
 
-    let unmapped_reason = if paired_alignments.is_empty() {
-        Some(UnmappedReason::TooShort)
-    } else {
-        None
-    };
+    if paired_alignments.is_empty() {
+        // Both mates mapped independently but no valid pairing found
+        // Return the best mate as HalfMapped (prefer mate1)
+        let (best_transcript, mate1_is_mapped) =
+            if mate1_transcripts[0].score >= mate2_transcripts[0].score {
+                (mate1_transcripts[0].clone(), true)
+            } else {
+                (mate2_transcripts[0].clone(), false)
+            };
+        return Ok((
+            vec![PairedAlignmentResult::HalfMapped {
+                mapped_transcript: best_transcript,
+                mate1_is_mapped,
+            }],
+            pe_mapq_n,
+            None,
+        ));
+    }
 
-    Ok((paired_alignments, pe_mapq_n, unmapped_reason))
+    // Wrap in PairedAlignmentResult::BothMapped
+    let results = paired_alignments
+        .into_iter()
+        .map(|pa| PairedAlignmentResult::BothMapped(Box::new(pa)))
+        .collect();
+
+    Ok((results, pe_mapq_n, None))
 }
 
 /// Check if paired alignment is a proper pair
@@ -1103,5 +1344,110 @@ mod tests {
             !would_filter(&t5),
             "Mixed with annotated non-canonical should be kept"
         );
+    }
+
+    #[test]
+    fn test_rescue_unmapped_mate_no_seeds() {
+        // Unmapped mate has all N's (no seeds possible), should return None
+        let index = make_test_index();
+        let params = make_test_params();
+
+        use crate::align::transcript::{CigarOp, Exon};
+        let mapped_transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 4,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 0,
+                genome_end: 4,
+                read_start: 0,
+                read_end: 4,
+            }],
+            cigar: vec![CigarOp::Match(4)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 2, 3],
+        };
+
+        let unmapped_seq = vec![4, 4, 4, 4, 4, 4, 4, 4]; // all N's
+        let result = rescue_unmapped_mate(&unmapped_seq, &mapped_transcript, &index, &params);
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap().is_none(),
+            "Should return None when unmapped mate has no seeds"
+        );
+    }
+
+    #[test]
+    fn test_align_paired_both_unmapped() {
+        // Both mates are all N's → both unmapped → empty Vec
+        let index = make_test_index();
+        let params = make_test_params();
+
+        let mate1 = vec![4, 4, 4, 4, 4, 4, 4, 4];
+        let mate2 = vec![4, 4, 4, 4, 4, 4, 4, 4];
+
+        let (results, n_for_mapq, unmapped_reason) =
+            align_paired_read(&mate1, &mate2, &index, &params).unwrap();
+        assert!(results.is_empty(), "Both unmapped should return empty Vec");
+        assert_eq!(n_for_mapq, 0);
+        assert!(unmapped_reason.is_some(), "Should have unmapped reason");
+    }
+
+    #[test]
+    fn test_paired_alignment_result_enum_variants() {
+        use crate::align::transcript::{CigarOp, Exon};
+
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 1000,
+            genome_end: 1100,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 1000,
+                genome_end: 1100,
+                read_start: 0,
+                read_end: 100,
+            }],
+            cigar: vec![CigarOp::Match(100)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0; 100],
+        };
+
+        // Test BothMapped variant
+        let both = PairedAlignmentResult::BothMapped(Box::new(PairedAlignment {
+            mate1_transcript: transcript.clone(),
+            mate2_transcript: transcript.clone(),
+            mate1_region: (0, 100),
+            mate2_region: (0, 100),
+            is_proper_pair: true,
+            insert_size: 200,
+        }));
+        assert!(matches!(both, PairedAlignmentResult::BothMapped(_)));
+
+        // Test HalfMapped variant
+        let half = PairedAlignmentResult::HalfMapped {
+            mapped_transcript: transcript,
+            mate1_is_mapped: true,
+        };
+        assert!(matches!(half, PairedAlignmentResult::HalfMapped { .. }));
+
+        // Verify mate1_is_mapped
+        if let PairedAlignmentResult::HalfMapped {
+            mate1_is_mapped, ..
+        } = half
+        {
+            assert!(mate1_is_mapped);
+        }
     }
 }

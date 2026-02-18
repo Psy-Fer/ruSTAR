@@ -325,6 +325,196 @@ impl SamWriter {
         Ok(records)
     }
 
+    /// Build SAM records for a half-mapped pair (one mate mapped, one unmapped).
+    ///
+    /// Returns 2 records: mate1 first, mate2 second (regardless of which is mapped).
+    ///
+    /// **Mapped mate:** Normal alignment with FLAG 0x8 (mate unmapped).
+    ///   RNEXT = own chr, PNEXT = own pos (STAR convention for unmapped mate).
+    ///
+    /// **Unmapped mate:** FLAG 0x4, co-located at mapped mate's position.
+    ///   SEQ/QUAL in forward orientation (no RC).
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_half_mapped_records(
+        read_name: &str,
+        mate1_seq: &[u8],
+        mate1_qual: &[u8],
+        mate2_seq: &[u8],
+        mate2_qual: &[u8],
+        mapped_transcript: &Transcript,
+        mate1_is_mapped: bool,
+        genome: &Genome,
+        params: &Parameters,
+        n_for_mapq: usize,
+    ) -> Result<Vec<RecordBuf>, Error> {
+        let mut records = Vec::with_capacity(2);
+
+        let n_alignments = 1usize;
+        let effective_n = n_alignments.max(n_for_mapq);
+        let mapq = calculate_mapq(effective_n, params.out_sam_mapq_unique);
+        let mut attrs = params.sam_attribute_set();
+        if params.out_sam_strand_field != "intronMotif" {
+            attrs.remove("XS");
+        }
+
+        // Compute mapped mate's per-chr position for co-location
+        let chr_start = genome.chr_start[mapped_transcript.chr_idx];
+        let mapped_pos = (mapped_transcript.genome_start - chr_start + 1) as usize;
+
+        // Determine which sequences go where
+        let (mapped_seq, mapped_qual, unmapped_seq, unmapped_qual) = if mate1_is_mapped {
+            (mate1_seq, mate1_qual, mate2_seq, mate2_qual)
+        } else {
+            (mate2_seq, mate2_qual, mate1_seq, mate1_qual)
+        };
+
+        // --- Build mapped mate record ---
+        let mut mapped_rec = RecordBuf::default();
+        mapped_rec.name_mut().replace(read_name.into());
+
+        let mut mapped_flags = sam::alignment::record::Flags::SEGMENTED // 0x1
+            | sam::alignment::record::Flags::MATE_UNMAPPED; // 0x8
+        if mapped_transcript.is_reverse {
+            mapped_flags |= sam::alignment::record::Flags::REVERSE_COMPLEMENTED; // 0x10
+        }
+        if mate1_is_mapped {
+            mapped_flags |= sam::alignment::record::Flags::FIRST_SEGMENT; // 0x40
+        } else {
+            mapped_flags |= sam::alignment::record::Flags::LAST_SEGMENT; // 0x80
+        }
+        *mapped_rec.flags_mut() = mapped_flags;
+
+        *mapped_rec.reference_sequence_id_mut() = Some(mapped_transcript.chr_idx);
+        *mapped_rec.alignment_start_mut() =
+            Some(mapped_pos.try_into().map_err(|e| {
+                Error::Alignment(format!("invalid position {}: {}", mapped_pos, e))
+            })?);
+        *mapped_rec.mapping_quality_mut() = MappingQuality::new(mapq);
+        *mapped_rec.cigar_mut() = convert_cigar(&mapped_transcript.cigar)?;
+
+        // RNEXT = own chr, PNEXT = own pos (STAR convention for unmapped mate)
+        *mapped_rec.mate_reference_sequence_id_mut() = Some(mapped_transcript.chr_idx);
+        *mapped_rec.mate_alignment_start_mut() = Some(mapped_pos.try_into().map_err(|e| {
+            Error::Alignment(format!("invalid mate position {}: {}", mapped_pos, e))
+        })?);
+        *mapped_rec.template_length_mut() = 0;
+
+        // SEQ/QUAL
+        if mapped_transcript.is_reverse {
+            let seq_bytes: Vec<u8> = mapped_seq
+                .iter()
+                .rev()
+                .map(|&b| decode_base(complement_base(b)))
+                .collect();
+            *mapped_rec.sequence_mut() = Sequence::from(seq_bytes);
+            let mut qual = mapped_qual.to_vec();
+            qual.reverse();
+            *mapped_rec.quality_scores_mut() = QualityScores::from(qual);
+        } else {
+            let seq_bytes: Vec<u8> = mapped_seq.iter().map(|&b| decode_base(b)).collect();
+            *mapped_rec.sequence_mut() = Sequence::from(seq_bytes);
+            *mapped_rec.quality_scores_mut() = QualityScores::from(mapped_qual.to_vec());
+        }
+
+        // Optional tags on mapped mate
+        let data = mapped_rec.data_mut();
+        if attrs.contains("NH") {
+            data.insert(Tag::ALIGNMENT_HIT_COUNT, Value::from(n_alignments as i32));
+        }
+        if attrs.contains("HI") {
+            data.insert(Tag::HIT_INDEX, Value::from(1i32));
+        }
+        if attrs.contains("AS") {
+            data.insert(Tag::ALIGNMENT_SCORE, Value::from(mapped_transcript.score));
+        }
+        if attrs.contains("NM") {
+            data.insert(
+                Tag::EDIT_DISTANCE,
+                Value::from(compute_edit_distance(mapped_transcript)),
+            );
+        }
+        if attrs.contains("nM") {
+            data.insert(
+                Tag::new(b'n', b'M'),
+                Value::from(mapped_transcript.n_mismatch as i32),
+            );
+        }
+        if attrs.contains("XS") {
+            if let Some(xs_strand) = derive_xs_strand(mapped_transcript) {
+                data.insert(Tag::new(b'X', b'S'), Value::Character(xs_strand as u8));
+            }
+        }
+        if attrs.contains("jM") {
+            if let Some(jm) = build_jm_tag(mapped_transcript) {
+                data.insert(Tag::new(b'j', b'M'), jm);
+            }
+        }
+        if attrs.contains("jI") {
+            if let Some(ji) = build_ji_tag(mapped_transcript, chr_start) {
+                data.insert(Tag::new(b'j', b'I'), ji);
+            }
+        }
+        if attrs.contains("MD") {
+            let md = build_md_tag(
+                mapped_transcript,
+                mapped_seq,
+                genome,
+                mapped_transcript.is_reverse,
+            );
+            data.insert(Tag::new(b'M', b'D'), Value::String(BString::from(md)));
+        }
+
+        // --- Build unmapped mate record ---
+        let mut unmapped_rec = RecordBuf::default();
+        unmapped_rec.name_mut().replace(read_name.into());
+
+        let mut unmapped_flags = sam::alignment::record::Flags::SEGMENTED // 0x1
+            | sam::alignment::record::Flags::UNMAPPED; // 0x4
+        // Mate reverse flag from mapped mate's strand
+        if mapped_transcript.is_reverse {
+            unmapped_flags |= sam::alignment::record::Flags::MATE_REVERSE_COMPLEMENTED; // 0x20
+        }
+        if mate1_is_mapped {
+            // Unmapped is mate2
+            unmapped_flags |= sam::alignment::record::Flags::LAST_SEGMENT; // 0x80
+        } else {
+            // Unmapped is mate1
+            unmapped_flags |= sam::alignment::record::Flags::FIRST_SEGMENT; // 0x40
+        }
+        *unmapped_rec.flags_mut() = unmapped_flags;
+
+        // Co-locate unmapped mate at mapped mate's position
+        *unmapped_rec.reference_sequence_id_mut() = Some(mapped_transcript.chr_idx);
+        *unmapped_rec.alignment_start_mut() =
+            Some(mapped_pos.try_into().map_err(|e| {
+                Error::Alignment(format!("invalid position {}: {}", mapped_pos, e))
+            })?);
+        *unmapped_rec.mapping_quality_mut() = MappingQuality::new(0);
+        // CIGAR = * (default empty cigar)
+        // RNEXT = mapped mate's chr
+        *unmapped_rec.mate_reference_sequence_id_mut() = Some(mapped_transcript.chr_idx);
+        *unmapped_rec.mate_alignment_start_mut() = Some(mapped_pos.try_into().map_err(|e| {
+            Error::Alignment(format!("invalid mate position {}: {}", mapped_pos, e))
+        })?);
+        *unmapped_rec.template_length_mut() = 0;
+
+        // SEQ/QUAL: forward orientation (no RC for unmapped)
+        let unmapped_seq_bytes: Vec<u8> = unmapped_seq.iter().map(|&b| decode_base(b)).collect();
+        *unmapped_rec.sequence_mut() = Sequence::from(unmapped_seq_bytes);
+        *unmapped_rec.quality_scores_mut() = QualityScores::from(unmapped_qual.to_vec());
+
+        // Order: mate1 first, mate2 second
+        if mate1_is_mapped {
+            records.push(mapped_rec);
+            records.push(unmapped_rec);
+        } else {
+            records.push(unmapped_rec);
+            records.push(mapped_rec);
+        }
+
+        Ok(records)
+    }
+
     /// Build unmapped paired records (both mates unmapped)
     pub fn build_paired_unmapped_records(
         read_name: &str,
@@ -2814,5 +3004,222 @@ mod tests {
             Some(&Value::from(2_i32)),
             "nM should be 2 (mismatches only, excluding indels)"
         );
+    }
+
+    #[test]
+    fn test_build_half_mapped_flags() {
+        use crate::align::transcript::Exon;
+
+        let genome = make_test_genome();
+        let params = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "r1.fq", "r2.fq"]);
+
+        let mapped_transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 4,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 0,
+                genome_end: 4,
+                read_start: 0,
+                read_end: 4,
+            }],
+            cigar: vec![CigarOp::Match(4)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 2, 3],
+        };
+
+        let mate1_seq = vec![0, 1, 2, 3]; // ACGT
+        let mate1_qual = vec![30, 30, 30, 30];
+        let mate2_seq = vec![3, 2, 1, 0]; // TGCA
+        let mate2_qual = vec![30, 30, 30, 30];
+
+        // mate1 is mapped
+        let records = SamWriter::build_half_mapped_records(
+            "read1",
+            &mate1_seq,
+            &mate1_qual,
+            &mate2_seq,
+            &mate2_qual,
+            &mapped_transcript,
+            true, // mate1_is_mapped
+            &genome,
+            &params,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 2);
+
+        // Mate1 record (mapped): 0x1 | 0x8 | 0x40 = paired + mate_unmapped + first
+        let rec1 = &records[0];
+        assert!(rec1.flags().is_segmented());
+        assert!(rec1.flags().is_mate_unmapped());
+        assert!(rec1.flags().is_first_segment());
+        assert!(!rec1.flags().is_unmapped());
+        assert!(!rec1.flags().is_last_segment());
+
+        // Mate2 record (unmapped): 0x1 | 0x4 | 0x80 = paired + unmapped + last
+        let rec2 = &records[1];
+        assert!(rec2.flags().is_segmented());
+        assert!(rec2.flags().is_unmapped());
+        assert!(rec2.flags().is_last_segment());
+        assert!(!rec2.flags().is_first_segment());
+        assert!(!rec2.flags().is_mate_unmapped());
+    }
+
+    #[test]
+    fn test_build_half_mapped_rnext_pnext() {
+        use crate::align::transcript::Exon;
+
+        let genome = make_test_genome();
+        let params = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "r1.fq", "r2.fq"]);
+
+        let mapped_transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 2,
+            genome_end: 6,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 2,
+                genome_end: 6,
+                read_start: 0,
+                read_end: 4,
+            }],
+            cigar: vec![CigarOp::Match(4)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 2, 3],
+        };
+
+        let mate1_seq = vec![0, 1, 2, 3];
+        let mate1_qual = vec![30, 30, 30, 30];
+        let mate2_seq = vec![3, 2, 1, 0];
+        let mate2_qual = vec![30, 30, 30, 30];
+
+        let records = SamWriter::build_half_mapped_records(
+            "read1",
+            &mate1_seq,
+            &mate1_qual,
+            &mate2_seq,
+            &mate2_qual,
+            &mapped_transcript,
+            true,
+            &genome,
+            &params,
+            1,
+        )
+        .unwrap();
+
+        // mapped_pos = genome_start(2) - chr_start(0) + 1 = 3
+        let expected_pos = 3usize;
+
+        // Mapped mate: RNAME = chr_idx(0), POS = 3
+        let mapped = &records[0];
+        assert_eq!(mapped.reference_sequence_id(), Some(0));
+        assert_eq!(
+            mapped.alignment_start().map(|p| usize::from(p)),
+            Some(expected_pos)
+        );
+        // RNEXT and PNEXT should point to own position (STAR convention)
+        assert_eq!(mapped.mate_reference_sequence_id(), Some(0));
+        assert_eq!(
+            mapped.mate_alignment_start().map(|p| usize::from(p)),
+            Some(expected_pos)
+        );
+
+        // Unmapped mate: co-located at mapped mate's position
+        let unmapped = &records[1];
+        assert_eq!(unmapped.reference_sequence_id(), Some(0));
+        assert_eq!(
+            unmapped.alignment_start().map(|p| usize::from(p)),
+            Some(expected_pos)
+        );
+        assert_eq!(unmapped.mate_reference_sequence_id(), Some(0));
+        assert_eq!(
+            unmapped.mate_alignment_start().map(|p| usize::from(p)),
+            Some(expected_pos)
+        );
+        // MAPQ = 0 for unmapped
+        assert_eq!(unmapped.mapping_quality().map(u8::from), Some(0));
+    }
+
+    #[test]
+    fn test_build_half_mapped_mate_order() {
+        use crate::align::transcript::Exon;
+
+        let genome = make_test_genome();
+        let params = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "r1.fq", "r2.fq"]);
+
+        let mapped_transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 4,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 0,
+                genome_end: 4,
+                read_start: 0,
+                read_end: 4,
+            }],
+            cigar: vec![CigarOp::Match(4)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 2, 3],
+        };
+
+        let mate1_seq = vec![0, 1, 2, 3];
+        let mate1_qual = vec![30, 30, 30, 30];
+        let mate2_seq = vec![3, 2, 1, 0];
+        let mate2_qual = vec![30, 30, 30, 30];
+
+        // When mate1 is mapped: mate1 comes first, mate2 second
+        let records_m1 = SamWriter::build_half_mapped_records(
+            "read1",
+            &mate1_seq,
+            &mate1_qual,
+            &mate2_seq,
+            &mate2_qual,
+            &mapped_transcript,
+            true,
+            &genome,
+            &params,
+            1,
+        )
+        .unwrap();
+        assert!(records_m1[0].flags().is_first_segment()); // First record = mate1
+        assert!(records_m1[1].flags().is_last_segment()); // Second record = mate2
+
+        // When mate2 is mapped: mate1 still comes first, mate2 second
+        let records_m2 = SamWriter::build_half_mapped_records(
+            "read1",
+            &mate1_seq,
+            &mate1_qual,
+            &mate2_seq,
+            &mate2_qual,
+            &mapped_transcript,
+            false,
+            &genome,
+            &params,
+            1,
+        )
+        .unwrap();
+        assert!(records_m2[0].flags().is_first_segment()); // First record = mate1 (unmapped)
+        assert!(records_m2[1].flags().is_last_segment()); // Second record = mate2 (mapped)
+        assert!(records_m2[0].flags().is_unmapped()); // mate1 is unmapped
+        assert!(!records_m2[1].flags().is_unmapped()); // mate2 is mapped
     }
 }

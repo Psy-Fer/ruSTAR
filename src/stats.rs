@@ -65,6 +65,9 @@ pub struct AlignmentStats {
 
     /// Number of chimeric reads
     pub chimeric_reads: AtomicU64,
+
+    /// Number of half-mapped pairs (one mate mapped, other unmapped/rescue failed)
+    pub half_mapped_pairs: AtomicU64,
 }
 
 impl Default for AlignmentStats {
@@ -96,6 +99,7 @@ impl Default for AlignmentStats {
             unmapped_short: AtomicU64::new(0),
             unmapped_other: AtomicU64::new(0),
             chimeric_reads: AtomicU64::new(0),
+            half_mapped_pairs: AtomicU64::new(0),
         }
     }
 }
@@ -196,6 +200,11 @@ impl AlignmentStats {
         self.chimeric_reads.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record a half-mapped pair (one mate mapped, other unmapped)
+    pub fn record_half_mapped(&self) {
+        self.half_mapped_pairs.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Print summary statistics to log
     pub fn print_summary(&self) {
         // Load all atomics once at start
@@ -227,6 +236,14 @@ impl AlignmentStats {
             unmapped,
             100.0 * unmapped as f64 / total_reads as f64
         );
+        let half_mapped = self.half_mapped_pairs.load(Ordering::Relaxed);
+        if half_mapped > 0 {
+            info!(
+                "Half-mapped pairs: {} ({:.2}%)",
+                half_mapped,
+                100.0 * half_mapped as f64 / total_reads as f64
+            );
+        }
         if too_many_loci > 0 {
             info!(
                 "Reads with too many loci: {} ({:.2}%)",
@@ -986,5 +1003,16 @@ mod tests {
         stats.record_chimeric();
         stats.record_chimeric();
         assert_eq!(stats.chimeric_reads.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_half_mapped_counter() {
+        let stats = AlignmentStats::new();
+        assert_eq!(stats.half_mapped_pairs.load(Ordering::Relaxed), 0);
+        stats.record_half_mapped();
+        assert_eq!(stats.half_mapped_pairs.load(Ordering::Relaxed), 1);
+        stats.record_half_mapped();
+        stats.record_half_mapped();
+        assert_eq!(stats.half_mapped_pairs.load(Ordering::Relaxed), 3);
     }
 }

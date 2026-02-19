@@ -480,6 +480,10 @@ pub struct Parameters {
     #[arg(long = "winAnchorDistNbins", default_value_t = 9)]
     pub win_anchor_dist_nbins: u32,
 
+    /// Number of bins to extend each alignment window by on each side
+    #[arg(long = "winFlankNbins", default_value_t = 4)]
+    pub win_flank_nbins: u32,
+
     /// Max number of loci a seed can map to (seeds with more loci are discarded)
     #[arg(long = "seedMultimapNmax", default_value_t = 10000)]
     pub seed_multimap_nmax: usize,
@@ -725,6 +729,7 @@ mod tests {
         assert!((p.win_read_coverage_relative_min - 0.5).abs() < f64::EPSILON);
         assert_eq!(p.win_bin_nbits, 16);
         assert_eq!(p.win_anchor_dist_nbins, 9);
+        assert_eq!(p.win_flank_nbins, 4);
         assert!(p.sjdb_gtf_file.is_none());
         assert_eq!(p.sjdb_overhang, 100);
         assert_eq!(p.sjdb_score, 2);

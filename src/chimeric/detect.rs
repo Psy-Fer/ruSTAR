@@ -123,7 +123,7 @@ impl<'a> ChimericDetector<'a> {
         read_name: &str,
         index: &GenomeIndex,
     ) -> Result<Option<ChimericAlignment>, Error> {
-        if cluster1.seed_indices.is_empty() || cluster2.seed_indices.is_empty() {
+        if cluster1.pinned_seeds.is_empty() || cluster2.pinned_seeds.is_empty() {
             return Ok(None);
         }
 
@@ -244,27 +244,40 @@ fn transcript_to_segment(transcript: &Transcript) -> Result<ChimericSegment, Err
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::align::PinnedSeed;
     use clap::Parser;
 
     #[test]
     fn test_genomic_distance_same_chr() {
         let c1 = SeedCluster {
-            seed_indices: vec![0],
+            pinned_seeds: vec![PinnedSeed {
+                seed_idx: 0,
+                sa_pos: 0,
+                strand: false,
+            }],
             chr_idx: 0,
             genome_start: 1000,
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 0,
             anchor_bin: 0,
+            window_genome_start: 0,
+            window_genome_end: u64::MAX,
         };
         let c2 = SeedCluster {
-            seed_indices: vec![1],
+            pinned_seeds: vec![PinnedSeed {
+                seed_idx: 1,
+                sa_pos: 0,
+                strand: false,
+            }],
             chr_idx: 0,
             genome_start: 1200,
             genome_end: 1300,
             is_reverse: false,
             anchor_idx: 1,
             anchor_bin: 0,
+            window_genome_start: 0,
+            window_genome_end: u64::MAX,
         };
 
         assert_eq!(genomic_distance(&c1, &c2), 100);
@@ -274,22 +287,34 @@ mod tests {
     #[test]
     fn test_genomic_distance_overlapping() {
         let c1 = SeedCluster {
-            seed_indices: vec![0],
+            pinned_seeds: vec![PinnedSeed {
+                seed_idx: 0,
+                sa_pos: 0,
+                strand: false,
+            }],
             chr_idx: 0,
             genome_start: 1000,
             genome_end: 1200,
             is_reverse: false,
             anchor_idx: 0,
             anchor_bin: 0,
+            window_genome_start: 0,
+            window_genome_end: u64::MAX,
         };
         let c2 = SeedCluster {
-            seed_indices: vec![1],
+            pinned_seeds: vec![PinnedSeed {
+                seed_idx: 1,
+                sa_pos: 0,
+                strand: false,
+            }],
             chr_idx: 0,
             genome_start: 1100,
             genome_end: 1300,
             is_reverse: false,
             anchor_idx: 1,
             anchor_bin: 0,
+            window_genome_start: 0,
+            window_genome_end: u64::MAX,
         };
 
         assert_eq!(genomic_distance(&c1, &c2), 0);
@@ -298,22 +323,34 @@ mod tests {
     #[test]
     fn test_genomic_distance_different_chr() {
         let c1 = SeedCluster {
-            seed_indices: vec![0],
+            pinned_seeds: vec![PinnedSeed {
+                seed_idx: 0,
+                sa_pos: 0,
+                strand: false,
+            }],
             chr_idx: 0,
             genome_start: 1000,
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 0,
             anchor_bin: 0,
+            window_genome_start: 0,
+            window_genome_end: u64::MAX,
         };
         let c2 = SeedCluster {
-            seed_indices: vec![1],
+            pinned_seeds: vec![PinnedSeed {
+                seed_idx: 1,
+                sa_pos: 0,
+                strand: false,
+            }],
             chr_idx: 1,
             genome_start: 1000,
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 1,
             anchor_bin: 0,
+            window_genome_start: 0,
+            window_genome_end: u64::MAX,
         };
 
         assert_eq!(genomic_distance(&c1, &c2), u64::MAX);
@@ -325,22 +362,34 @@ mod tests {
         let detector = ChimericDetector::new(&params);
 
         let c1 = SeedCluster {
-            seed_indices: vec![0],
+            pinned_seeds: vec![PinnedSeed {
+                seed_idx: 0,
+                sa_pos: 0,
+                strand: false,
+            }],
             chr_idx: 0,
             genome_start: 1000,
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 0,
             anchor_bin: 0,
+            window_genome_start: 0,
+            window_genome_end: u64::MAX,
         };
         let c2 = SeedCluster {
-            seed_indices: vec![1],
+            pinned_seeds: vec![PinnedSeed {
+                seed_idx: 1,
+                sa_pos: 0,
+                strand: false,
+            }],
             chr_idx: 1,
             genome_start: 1000,
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 1,
             anchor_bin: 0,
+            window_genome_start: 0,
+            window_genome_end: u64::MAX,
         };
 
         assert!(detector.is_chimeric_signature(&c1, &c2));
@@ -352,22 +401,34 @@ mod tests {
         let detector = ChimericDetector::new(&params);
 
         let c1 = SeedCluster {
-            seed_indices: vec![0],
+            pinned_seeds: vec![PinnedSeed {
+                seed_idx: 0,
+                sa_pos: 0,
+                strand: false,
+            }],
             chr_idx: 0,
             genome_start: 1000,
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 0,
             anchor_bin: 0,
+            window_genome_start: 0,
+            window_genome_end: u64::MAX,
         };
         let c2 = SeedCluster {
-            seed_indices: vec![1],
+            pinned_seeds: vec![PinnedSeed {
+                seed_idx: 1,
+                sa_pos: 0,
+                strand: false,
+            }],
             chr_idx: 0,
             genome_start: 1200,
             genome_end: 1300,
             is_reverse: true,
             anchor_idx: 1,
             anchor_bin: 0,
+            window_genome_start: 0,
+            window_genome_end: u64::MAX,
         };
 
         assert!(detector.is_chimeric_signature(&c1, &c2));
@@ -379,22 +440,34 @@ mod tests {
         let detector = ChimericDetector::new(&params);
 
         let c1 = SeedCluster {
-            seed_indices: vec![0],
+            pinned_seeds: vec![PinnedSeed {
+                seed_idx: 0,
+                sa_pos: 0,
+                strand: false,
+            }],
             chr_idx: 0,
             genome_start: 1000,
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 0,
             anchor_bin: 0,
+            window_genome_start: 0,
+            window_genome_end: u64::MAX,
         };
         let c2 = SeedCluster {
-            seed_indices: vec![1],
+            pinned_seeds: vec![PinnedSeed {
+                seed_idx: 1,
+                sa_pos: 0,
+                strand: false,
+            }],
             chr_idx: 0,
             genome_start: 2_000_000,
             genome_end: 2_000_100,
             is_reverse: false,
             anchor_idx: 1,
             anchor_bin: 0,
+            window_genome_start: 0,
+            window_genome_end: u64::MAX,
         };
 
         assert!(detector.is_chimeric_signature(&c1, &c2));
@@ -406,22 +479,34 @@ mod tests {
         let detector = ChimericDetector::new(&params);
 
         let c1 = SeedCluster {
-            seed_indices: vec![0],
+            pinned_seeds: vec![PinnedSeed {
+                seed_idx: 0,
+                sa_pos: 0,
+                strand: false,
+            }],
             chr_idx: 0,
             genome_start: 1000,
             genome_end: 1100,
             is_reverse: false,
             anchor_idx: 0,
             anchor_bin: 0,
+            window_genome_start: 0,
+            window_genome_end: u64::MAX,
         };
         let c2 = SeedCluster {
-            seed_indices: vec![1],
+            pinned_seeds: vec![PinnedSeed {
+                seed_idx: 1,
+                sa_pos: 0,
+                strand: false,
+            }],
             chr_idx: 0,
             genome_start: 1200,
             genome_end: 1300,
             is_reverse: false,
             anchor_idx: 1,
             anchor_bin: 0,
+            window_genome_start: 0,
+            window_genome_end: u64::MAX,
         };
 
         assert!(!detector.is_chimeric_signature(&c1, &c2));

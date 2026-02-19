@@ -85,17 +85,17 @@ pub fn align_read(
         return Ok((Vec::new(), Vec::new(), 0, Some(UnmappedReason::Other)));
     }
 
-    // Step 2: Cluster seeds
-    let max_cluster_dist = params.win_bin_window_dist();
+    // Step 2: Cluster seeds (STAR's bin-based windowing)
     let max_loci_for_anchor = 10; // Seeds mapping to <=10 loci can be anchors
     let clusters = cluster_seeds(
         &seeds,
         index,
-        max_cluster_dist,
+        params.win_bin_nbits,
+        params.win_anchor_dist_nbins,
+        params.win_flank_nbins,
         max_loci_for_anchor,
         params.win_anchor_multimap_nmax,
         params.seed_none_loci_per_window,
-        params.win_bin_nbits,
     );
 
     if clusters.is_empty() {
@@ -107,8 +107,29 @@ pub fn align_read(
     clusters.truncate(params.align_windows_per_read_nmax);
 
     // Cap seeds per cluster (seedPerWindowNmax)
+    // Count unique seed indices, not total pinned entries — a single seed with multiple
+    // pinned positions should count as 1 toward the limit, matching the old seed_indices behavior.
     for cluster in &mut clusters {
-        cluster.seed_indices.truncate(params.seed_per_window_nmax);
+        let mut unique_count = 0usize;
+        let mut last_seen_limit_idx = None;
+        // Count unique seed_idx values from the front
+        for (i, pinned) in cluster.pinned_seeds.iter().enumerate() {
+            if last_seen_limit_idx.is_none()
+                || !cluster.pinned_seeds[..i]
+                    .iter()
+                    .any(|p| p.seed_idx == pinned.seed_idx)
+            {
+                unique_count += 1;
+                if unique_count > params.seed_per_window_nmax {
+                    // Truncate: keep all entries up to (but not including) this new unique seed
+                    last_seen_limit_idx = Some(i);
+                    break;
+                }
+            }
+        }
+        if let Some(limit_idx) = last_seen_limit_idx {
+            cluster.pinned_seeds.truncate(limit_idx);
+        }
     }
 
     // Step 2a: Filter clusters by seed coverage (winReadCoverageRelativeMin)
@@ -119,8 +140,8 @@ pub fn align_read(
         .filter(|cluster| {
             // Compute total seed coverage for this cluster (union of read ranges)
             let mut covered = vec![false; read_length];
-            for &seed_idx in &cluster.seed_indices {
-                let seed = &seeds[seed_idx];
+            for pinned in &cluster.pinned_seeds {
+                let seed = &seeds[pinned.seed_idx];
                 let end = seed.read_pos + seed.length;
                 for c in covered
                     .iter_mut()
@@ -355,12 +376,10 @@ pub fn align_read(
     }
 
     // n_for_mapq: currently same as transcripts.len().
-    // NOTE: rDNA reads (~157) still get MAPQ=255 instead of STAR's 1-3 because our large
-    // clusters (589kb) merge seeds from all tandem repeat copies. The DP finds one optimal
-    // path shared across all clusters (same seeds due to 589kb distance). Bin-counting
-    // approaches fail because "wrong" clusters also share seeds and produce the same
-    // transcript. The fix requires splitting clusters into ~65kb sub-windows with
-    // independent DP per sub-window (Phase 16.5b → cluster splitting).
+    // NOTE: rDNA reads (~157) still get MAPQ=255 instead of STAR's 1-3 because our
+    // clustering gathers all seeds by proximity (within 589kb), whereas STAR assigns
+    // seeds to windows by bin position. The fix requires implementing STAR's per-window
+    // bin-based seed assignment with winFlankNbins flanking extension.
     let n_for_mapq = transcripts.len();
 
     let unmapped_reason = if transcripts.is_empty() {
@@ -453,17 +472,17 @@ fn rescue_unmapped_mate(
         .map(|&i| seeds[i].clone())
         .collect();
 
-    // Step 5: Cluster and stitch the filtered seeds
-    let max_cluster_dist = params.win_bin_window_dist();
+    // Step 5: Cluster and stitch the filtered seeds (bin-based windowing)
     let max_loci_for_anchor = 10;
     let clusters = cluster_seeds(
         &filtered_seeds,
         index,
-        max_cluster_dist,
+        params.win_bin_nbits,
+        params.win_anchor_dist_nbins,
+        params.win_flank_nbins,
         max_loci_for_anchor,
         params.win_anchor_multimap_nmax,
         params.seed_none_loci_per_window,
-        params.win_bin_nbits,
     );
 
     if clusters.is_empty() {

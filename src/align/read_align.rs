@@ -87,7 +87,7 @@ pub fn align_read(
 
     // Step 2: Cluster seeds (STAR's bin-based windowing)
     // seed_per_window_nmax capacity eviction is handled inside cluster_seeds()
-    let max_loci_for_anchor = 10; // Seeds mapping to <=10 loci can be anchors
+    let max_loci_for_anchor = params.win_anchor_multimap_nmax; // STAR: winAnchorMultimapNmax
     let clusters = cluster_seeds(
         &seeds,
         read_seq,
@@ -447,7 +447,7 @@ fn rescue_unmapped_mate(
         .collect();
 
     // Step 5: Cluster and stitch the filtered seeds (bin-based windowing)
-    let max_loci_for_anchor = 10;
+    let max_loci_for_anchor = params.win_anchor_multimap_nmax;
     let clusters = cluster_seeds(
         &filtered_seeds,
         unmapped_seq,

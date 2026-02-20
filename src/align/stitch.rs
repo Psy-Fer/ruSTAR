@@ -361,6 +361,7 @@ pub fn cluster_seeds(
         .collect();
 
     // Phase 1: Identify anchor seeds (few genomic positions → high specificity)
+    // STAR: only seeds with Nrep <= winAnchorMultimapNmax create windows.
     let mut anchor_indices: Vec<usize> = anchor_set
         .iter()
         .enumerate()
@@ -368,7 +369,11 @@ pub fn cluster_seeds(
         .map(|(i, _)| i)
         .collect();
 
-    // Fallback: if no anchors, use all seeds with non-empty SA ranges (STAR behavior)
+    // Fallback: if no anchors, use all seeds with non-empty SA ranges.
+    // Note: STAR has no fallback (read would be unmapped), but our MMP search
+    // overestimates SA ranges because extend_match() only narrows from sa_start.
+    // This causes seeds to appear more repetitive than they are.
+    // TODO: fix MMP search to narrow SA range from both ends, then remove fallback.
     if anchor_indices.is_empty() {
         anchor_indices = seeds
             .iter()
@@ -376,6 +381,9 @@ pub fn cluster_seeds(
             .filter(|(_, s)| s.sa_end > s.sa_start)
             .map(|(i, _)| i)
             .collect();
+        if anchor_indices.is_empty() {
+            return Vec::new();
+        }
     }
 
     // Phase 2: Create windows from anchor positions
@@ -947,10 +955,11 @@ pub fn stitch_seeds_with_jdb(
     // Deduplicate: keep only the longest seed per (read_pos, genome_pos) pair
     expanded_seeds.dedup_by(|a, b| a.read_pos == b.read_pos && a.genome_pos == b.genome_pos);
 
-    // Cap expanded seeds to prevent pathological O(n²) DP on repetitive regions
+    // Cap expanded seeds to prevent pathological O(n²) DP on repetitive regions.
+    // Note: STAR caps at seedPerWindowNmax=50 during window assignment, but our Phase 1
+    // bypasses that cap. This cap catches overflow from Phase 1.
     const MAX_EXPANDED_SEEDS: usize = 200;
     if expanded_seeds.len() > MAX_EXPANDED_SEEDS {
-        // Keep longest seeds (re-sort by length descending, take top N, re-sort by read_pos)
         expanded_seeds.sort_by(|a, b| b.length.cmp(&a.length));
         expanded_seeds.truncate(MAX_EXPANDED_SEEDS);
         expanded_seeds.sort_by_key(|s| s.read_pos);

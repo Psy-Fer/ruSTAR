@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**257 tests passing.** SE: 94.5% position agreement, 97.8% CIGAR, 2.1% splice rate. PE: 95.6% per-mate position, 9017 pairs (0 unmapped). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**264 tests passing.** SE: 96.2% position agreement, 97.6% CIGAR, 2.7% splice rate. PE: 95.6% per-mate position, 9017 pairs (0 unmapped). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -119,12 +119,12 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 257/257 unit tests passing, non-critical clippy warnings (too_many_arguments x 6, type_complexity x 1, manual_contains x 1, implicit_saturating_sub x 1)
+**Current test status**: 264/264 tests passing (260 unit + 4 integration), non-critical clippy warnings (too_many_arguments x 7, type_complexity x 1, manual_contains x 1, implicit_saturating_sub x 1)
 
 ## Known Issues (Top 3)
 
-1. **rDNA MAPQ inflation** (~157 reads, MAPQ 255 vs STAR 1-3) — needs ~65kb sub-window splitting
-2. **Sparse seed search dormant** — DP needs dense seeds; extension-based gap filling needed
+1. **Splice rate 2.7% vs STAR 2.2%** — remaining false splicing from wide bin-based windows (mostly chrXII rDNA)
+2. **rDNA MAPQ inflation** (~133 reads, MAPQ 255 vs STAR 1-3) — needs ~65kb sub-window splitting
 3. **BySJout too aggressive without GTF** — all junctions novel → strict thresholds
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.

@@ -49,8 +49,8 @@ Paired-end (Phase 8) builds on threaded infrastructure. GTF/junctions (Phase 7) 
 | 12 | Chimeric Detection | ✅ | 170 | SE chimeric, Chimeric.out.junction |
 | [13](docs/phase13_accuracy.md) | Performance + Accuracy | ✅ | 205 | 94.5% pos, 97.8% CIGAR, 2.1% splice |
 | [15](docs/phase15_sam_tags.md) | SAM Tags + PE Fix | ✅ | 235 | NH/HI/AS/NM/nM/XS/jM/jI/MD, PE fix |
-| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 257 | Splice rate match, mate rescue, MAPQ fix |
-| [17](docs/phase17_features.md) | Features + Polish | ✅* | 257 | Log.final.out, sorted BAM planned |
+| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 264 | 96.2% pos, 2.7% splice, mate rescue, MAPQ fix |
+| [17](docs/phase17_features.md) | Features + Polish | ✅* | 264 | Log.final.out, sorted BAM planned |
 | 14 | STARsolo | DEFERRED | — | Waiting for accuracy parity |
 
 *Partially complete — see linked docs for sub-phase status.
@@ -180,7 +180,7 @@ See [docs/phase15_sam_tags.md](docs/phase15_sam_tags.md) for detailed sub-phase 
 
 See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for detailed sub-phase notes (16.1-16.9).
 
-**Summary**: max_cluster_dist fix (splice rate 2.2%), MAPQ lookup table, jR scanning, mate rescue (0 unmapped pairs), sparse seed infrastructure (dormant).
+**Summary**: Bin-based windowing, pre-DP seed extension (96.2% pos, 2.7% splice), MAPQ lookup table, jR scanning, mate rescue (0 unmapped pairs), sparse seed infrastructure (dormant).
 
 ---
 

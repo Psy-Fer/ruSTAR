@@ -2,7 +2,7 @@
 
 # Phase 16: Accuracy + Algorithm Parity
 
-**Status**: In Progress (Phases 16.1-16.8 complete)
+**Status**: In Progress (Phases 16.1-16.8 + 16.7b complete)
 
 **Goal**: Close remaining accuracy gaps vs STAR. Fix over-splicing, rDNA MAPQ, seed parameters, DP junction optimization, and PE mate rescue.
 
@@ -93,12 +93,43 @@ Threaded `n_for_mapq` through pipeline: `align_read()` → `align_paired_read()`
 
 ---
 
-## Phase 16.7: Sparse Seed Activation — PLANNED
+## Phase 16.7: Bin-Based Windowing ✅ (2026-02-18)
 
-Adapt DP stitcher for sparse seeds (extension-based gap filling), then activate `search_direction_sparse()`. Study STAR's `stitchAlignToTranscript` for:
-1. Extension-based gap filling between sparse seeds
-2. Window/cluster formation with sparse anchors
-3. DP gap scoring when seed gaps are 30-50bp
+Replaced proximity-based clustering with STAR's bin-based windowing architecture:
+1. `cluster_seeds()` rewritten: identify anchors → create windows from anchor bins → merge nearby windows (±winAnchorDistNbins) → extend by ±winFlankNbins → assign seeds by bin HashMap lookup
+2. `WindowAlignment` struct with verified (seed_idx, sa_pos, strand, read_pos, length) — no SA range re-expansion
+3. `stitch_seeds_with_jdb()` converts WA entries directly to ExpandedSeeds
+4. Added `--winFlankNbins` param (default 4)
+
+**Performance**: 12× faster (10s vs 120s on 10k reads) — bin HashMap lookup vs O(n²) proximity checks.
+
+**Files**: `src/align/stitch.rs`, `src/align/read_align.rs`, `src/params.rs`
+
+---
+
+## Phase 16.7b: Pre-DP Seed Extension ✅ (2026-02-20)
+
+**Problem**: Bin-based windowing (16.7) caused splice rate regression: 2.1% → 3.6%. Wide ~589KB windows allow coincidental short seed matches to create false splice junctions. STAR prevents this via seed extension during DP initialization.
+
+**STAR's approach** (ReadAlign_stitchWindowSeeds.cpp):
+1. Pass 1: DP base score = `seed_length + left_extend_score` — true positions extend well (+40bp), coincidental extend ~0bp
+2. Pass 2: Right extension for chain endpoint selection — `dp_score + right_ext_score`
+3. Post-DP: authoritative extensions replace approximate pre-DP scores
+
+**Implementation** (all in `stitch_seeds_with_jdb()`):
+1. **Pre-DP left extension**: `left_ext_scores: Vec<i32>` computed via `extend_alignment()` for every expanded seed before DP loop
+2. **DP base case**: `score = seed_length + left_ext_scores[i]` (was `seed_length` only)
+3. **Right extension for chain selection**: Replaced `max_by_key(score)` with loop computing rightward extension per chain endpoint, selecting by `dp[i].score + right_ext_score`
+4. **Post-DP score adjustment**: `adjusted_score = best_state.score - left_ext_scores[chain_start_idx] + left_extend + right_extend`
+
+| Metric | Pre-16.7 | 16.7 (WA-DP) | 16.7b (pre-DP ext) | STAR |
+|--------|----------|--------------|---------------------|------|
+| Position agree | 94.5% | 94.2% | **96.2%** | — |
+| CIGAR agree | 97.8% | 97.1% | **97.6%** | — |
+| Splice rate | 2.1% | 3.6% | **2.7%** | 2.2% |
+| Shared junctions | 42 | 48 | **49** | 72 |
+
+**Files**: `src/align/stitch.rs`
 
 ---
 

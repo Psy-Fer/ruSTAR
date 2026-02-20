@@ -156,8 +156,14 @@ pub fn align_read(
     };
 
     for cluster in clusters.iter() {
-        let cluster_transcripts =
-            stitch_seeds_with_jdb(cluster, read_seq, index, &scorer, junction_db)?;
+        let cluster_transcripts = stitch_seeds_with_jdb(
+            cluster,
+            read_seq,
+            index,
+            &scorer,
+            junction_db,
+            params.align_transcripts_per_window_nmax,
+        )?;
         transcripts.extend(cluster_transcripts);
     }
 
@@ -349,11 +355,9 @@ pub fn align_read(
         });
     }
 
-    // n_for_mapq: currently same as transcripts.len().
-    // NOTE: rDNA reads (~157) still get MAPQ=255 instead of STAR's 1-3 because our
-    // clustering gathers all seeds by proximity (within 589kb), whereas STAR assigns
-    // seeds to windows by bin position. The fix requires implementing STAR's per-window
-    // bin-based seed assignment with winFlankNbins flanking extension.
+    // n_for_mapq = transcripts.len() after dedup and filtering.
+    // Multi-transcript DP (Phase 16.10) produces multiple transcripts per window
+    // for tandem repeats (e.g. rDNA), yielding correct NH → correct MAPQ.
     let n_for_mapq = transcripts.len();
 
     let unmapped_reason = if transcripts.is_empty() {
@@ -473,8 +477,14 @@ fn rescue_unmapped_mate(
 
     let mut transcripts = Vec::new();
     for cluster in clusters.iter().take(params.align_windows_per_read_nmax) {
-        let cluster_transcripts =
-            stitch_seeds_with_jdb(cluster, unmapped_seq, index, &scorer, junction_db)?;
+        let cluster_transcripts = stitch_seeds_with_jdb(
+            cluster,
+            unmapped_seq,
+            index,
+            &scorer,
+            junction_db,
+            params.align_transcripts_per_window_nmax,
+        )?;
         transcripts.extend(cluster_transcripts);
     }
 

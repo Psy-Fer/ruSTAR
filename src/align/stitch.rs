@@ -905,7 +905,7 @@ pub fn stitch_seeds(
     index: &GenomeIndex,
     scorer: &AlignmentScorer,
 ) -> Result<Vec<Transcript>, Error> {
-    stitch_seeds_with_jdb(cluster, read_seq, index, scorer, None)
+    stitch_seeds_with_jdb(cluster, read_seq, index, scorer, None, 1)
 }
 
 /// Stitch seeds with optional junction database for annotation-aware scoring.
@@ -914,12 +914,18 @@ pub fn stitch_seeds(
 /// This matches STAR's architecture where the WA array IS the DP input —
 /// no SA range re-expansion needed. Each WA entry represents one verified
 /// (seed, position) pair assigned during bin-based windowing.
+///
+/// `max_transcripts_per_window` controls how many alternative DP endpoints
+/// are explored (STAR's `alignTranscriptsPerWindowNmax`, default 100).
+/// For rDNA and other tandem repeats, multiple endpoints correspond to
+/// different repeat copies, yielding correct NH/MAPQ values.
 pub fn stitch_seeds_with_jdb(
     cluster: &SeedCluster,
     read_seq: &[u8],
     index: &GenomeIndex,
     scorer: &AlignmentScorer,
     junction_db: Option<&crate::junction::SpliceJunctionDb>,
+    max_transcripts_per_window: usize,
 ) -> Result<Vec<Transcript>, Error> {
     // Convert WindowAlignment entries directly to ExpandedSeeds.
     // Each WA entry has a verified match length and raw SA position.
@@ -1252,10 +1258,9 @@ pub fn stitch_seeds_with_jdb(
         // If no best_j, dp[i] keeps its initial state (single seed)
     }
 
-    // Select best chain endpoint using dp_score + right_extension_score (STAR Pass 2).
+    // Collect endpoint scores: dp_score + right_extension_score (STAR Pass 2).
     // Right extension rewards chains that end at true genome positions.
-    let mut best_final_idx = 0;
-    let mut best_total_score = i32::MIN;
+    let mut endpoint_scores: Vec<(i32, usize)> = Vec::with_capacity(n);
     for i in 0..n {
         let right_ext_score = if expanded_seeds[i].read_end < read_seq.len() {
             extend_alignment(
@@ -1276,16 +1281,71 @@ pub fn stitch_seeds_with_jdb(
             0
         };
         let total = dp[i].score + right_ext_score;
-        if total > best_total_score {
-            best_total_score = total;
-            best_final_idx = i;
+        endpoint_scores.push((total, i));
+    }
+
+    // Sort by score descending
+    endpoint_scores.sort_by(|a, b| b.0.cmp(&a.0));
+
+    // Build transcripts from top-N distinct chain endpoints
+    let mut transcripts: Vec<Transcript> = Vec::new();
+    let mut seen_chain_starts: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let best_score = endpoint_scores[0].0;
+
+    for &(score, endpoint_idx) in &endpoint_scores {
+        // Early termination: skip endpoints much worse than the best
+        // (they won't survive outFilterMultimapScoreRange filtering anyway)
+        if score < best_score - 1 {
+            break;
+        }
+
+        // Dedup by chain start: different endpoints in the same chain produce
+        // the same alignment (just truncated), so skip duplicates
+        let mut chain_start = endpoint_idx;
+        while let Some(prev) = dp[chain_start].prev_seed {
+            chain_start = prev;
+        }
+        if !seen_chain_starts.insert(chain_start) {
+            continue;
+        }
+
+        let transcript = build_transcript_from_endpoint(
+            endpoint_idx,
+            &dp,
+            &expanded_seeds,
+            &left_ext_scores,
+            read_seq,
+            index,
+            scorer,
+            cluster,
+        );
+        transcripts.push(transcript);
+
+        if transcripts.len() >= max_transcripts_per_window {
+            break;
         }
     }
 
-    let best_state = &dp[best_final_idx];
+    Ok(transcripts)
+}
+
+/// Build a single transcript from a DP endpoint by tracing back the chain,
+/// optimizing junctions, extending into flanking regions, and constructing
+/// the final CIGAR and exon structure.
+fn build_transcript_from_endpoint(
+    endpoint_idx: usize,
+    dp: &[DpState],
+    expanded_seeds: &[ExpandedSeed],
+    left_ext_scores: &[i32],
+    read_seq: &[u8],
+    index: &GenomeIndex,
+    scorer: &AlignmentScorer,
+    cluster: &SeedCluster,
+) -> Transcript {
+    let best_state = &dp[endpoint_idx];
 
     // Find the first seed in the DP chain by tracing back through prev_seed
-    let mut chain_start_idx = best_final_idx;
+    let mut chain_start_idx = endpoint_idx;
     while let Some(prev) = dp[chain_start_idx].prev_seed {
         chain_start_idx = prev;
     }
@@ -1532,7 +1592,7 @@ pub fn stitch_seeds_with_jdb(
     let length_penalty = scorer.genomic_length_penalty(genomic_span);
     let final_score = (adjusted_score + length_penalty).max(0);
 
-    let transcript = Transcript {
+    Transcript {
         chr_idx: cluster.chr_idx,
         genome_start: t_genome_start,
         genome_end: t_genome_end,
@@ -1546,9 +1606,7 @@ pub fn stitch_seeds_with_jdb(
         junction_motifs: optimized_motifs,
         junction_annotated: optimized_annotated,
         read_seq: read_seq.to_vec(),
-    };
-
-    Ok(vec![transcript])
+    }
 }
 
 #[cfg(test)]

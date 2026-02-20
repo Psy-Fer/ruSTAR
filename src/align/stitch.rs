@@ -236,25 +236,27 @@ fn extend_alignment(
         }
 
         if read_base == genome_base {
+            // MATCH — only record new max on match (STAR behavior)
             score += 1;
+            if score > max_score {
+                let total_mm = n_mm_prev + n_mm;
+                let record_limit = ((p_mm_max * (len_prev + i + 1) as f64) as u32).min(n_mm_max);
+                if total_mm <= record_limit {
+                    max_score = score;
+                    best_len = i + 1;
+                    best_mm = n_mm;
+                }
+            }
         } else {
-            score -= 1;
+            // MISMATCH — check break BEFORE incrementing nMM (STAR behavior)
+            // Break uses full extension length max_extend, not current position i+1
+            let total_mm = n_mm_prev + n_mm;
+            let break_limit = ((p_mm_max * (len_prev + max_extend) as f64) as u32).min(n_mm_max);
+            if total_mm >= break_limit {
+                break;
+            }
             n_mm += 1;
-        }
-
-        // Check mismatch limits considering the full alignment
-        let total_mm = n_mm_prev + n_mm;
-        let total_len = len_prev + i + 1;
-        let mm_limit = ((p_mm_max * total_len as f64) as u32).min(n_mm_max);
-        if total_mm > mm_limit {
-            break;
-        }
-
-        // Record best extension point (highest score)
-        if score > max_score {
-            max_score = score;
-            best_len = i + 1;
-            best_mm = n_mm;
+            score -= 1;
         }
     }
 
@@ -975,7 +977,7 @@ pub fn stitch_seeds_with_jdb(
                     -1,
                     seed.read_pos, // max = distance to read start
                     0,
-                    seed.length, // seed length for mismatch ratio
+                    100_000, // Lprev=100000 matches STAR
                     scorer.n_mm_max,
                     scorer.p_mm_max,
                     index,
@@ -1270,7 +1272,7 @@ pub fn stitch_seeds_with_jdb(
                 1,
                 read_seq.len() - expanded_seeds[i].read_end,
                 dp[i].n_mismatch,
-                expanded_seeds[i].read_end, // cumulative aligned length
+                100_000, // Lprev=100000 matches STAR
                 scorer.n_mm_max,
                 scorer.p_mm_max,
                 index,
@@ -1404,8 +1406,8 @@ fn build_transcript_from_endpoint(
             chain_start_seed.genome_pos, // genome boundary (exclusive, leftward)
             -1,                          // leftward
             alignment_start,             // max distance to read start
-            best_state.n_mismatch,       // mismatches in aligned portion
-            aligned_read_len,            // length of aligned portion
+            0,                           // nMMprev=0 matches STAR
+            100_000,                     // Lprev=100000 matches STAR
             scorer.n_mm_max,
             scorer.p_mm_max,
             index,
@@ -1427,7 +1429,7 @@ fn build_transcript_from_endpoint(
             1,                              // rightward
             read_seq.len() - alignment_end, // max distance to read end
             best_state.n_mismatch + left_extend.n_mismatch, // cumulative mismatches
-            aligned_read_len + left_extend.extend_len, // cumulative length
+            100_000,                        // Lprev=100000 matches STAR
             scorer.n_mm_max,
             scorer.p_mm_max,
             index,

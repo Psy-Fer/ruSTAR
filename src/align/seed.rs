@@ -327,13 +327,16 @@ fn find_seed_at_position(
         }); // SA range empty
     }
 
-    // Extend match as far as possible — always compute MMP length
-    let match_length = extend_match(read_seq, read_pos, index, sa_start)?;
+    // Find maximum mappable prefix length and narrow SA range (STAR's maxMappableLength).
+    // Binary searches within the SA range, extending match while narrowing both boundaries.
+    let (match_length, narrowed_start, narrowed_end) =
+        max_mappable_length(read_seq, read_pos, index, sa_start, sa_end, lookup_len);
     let advance = match_length.max(1);
 
     // Check seedMultimapNmax: filter seeds that map to too many loci
     // Key fix: still advance by MMP length even when seed is not stored
-    let n_loci = sa_end - sa_start;
+    // Uses narrowed range (accurate loci count, not overestimated k-mer range)
+    let n_loci = narrowed_end - narrowed_start;
     if n_loci > params.seed_multimap_nmax {
         return Ok(MmpResult {
             seed: None,
@@ -346,8 +349,8 @@ fn find_seed_at_position(
             seed: Some(Seed {
                 read_pos,
                 length: match_length,
-                sa_start,
-                sa_end,
+                sa_start: narrowed_start,
+                sa_end: narrowed_end,
                 is_reverse,
                 search_rc: false,
                 mate_id: 2, // Single-end default
@@ -454,13 +457,25 @@ fn compare_suffix_to_query(
     Ok(0) // Equal up to min_match
 }
 
-/// Extend a match as far as possible.
-fn extend_match(
+/// Overflow-safe median of two unsigned integers.
+/// Equivalent to STAR's medianUint2: a/2 + b/2 + (a%2 + b%2)/2
+fn median_uint2(a: usize, b: usize) -> usize {
+    a / 2 + b / 2 + (a % 2 + b % 2) / 2
+}
+
+/// Compare read to genome at a specific SA position, starting from offset l_start.
+/// Returns (total_match_length, is_read_greater_at_mismatch).
+/// Ports STAR's compareSeqToGenome (SuffixArrayFuns.cpp).
+///
+/// Starts comparing from offset `l_start` (bases 0..l_start are assumed to match).
+/// Walks forward until a mismatch, end of read, or genome padding.
+fn compare_seq_to_genome(
     read_seq: &[u8],
     read_pos: usize,
     index: &GenomeIndex,
     sa_idx: usize,
-) -> Result<usize, Error> {
+    l_start: usize,
+) -> (usize, bool) {
     let sa_entry = index.suffix_array.get(sa_idx);
     let (genome_pos, is_reverse) = index.suffix_array.decode(sa_entry);
 
@@ -470,26 +485,176 @@ fn extend_match(
         genome_pos as usize
     };
 
-    let mut length = 0;
-    let max_len = read_seq.len() - read_pos;
+    let remaining = read_seq.len() - read_pos;
+    let mut match_len = l_start;
 
-    for i in 0..max_len {
+    for i in l_start..remaining {
         let genome_idx = genome_start + i;
 
         if genome_idx >= index.genome.sequence.len() {
-            break;
+            // Past end of genome array — treat like padding (STAR: comp_res > 0)
+            return (match_len, true);
         }
 
         let genome_base = index.genome.sequence[genome_idx];
 
-        if genome_base >= 5 || genome_base != read_seq[read_pos + i] {
-            break;
+        if genome_base >= 5 {
+            // Padding character — STAR returns comp_res > 0 (read > genome)
+            return (match_len, true);
         }
 
-        length += 1;
+        let read_base = read_seq[read_pos + i];
+
+        if read_base != genome_base {
+            return (match_len, read_base > genome_base);
+        }
+
+        match_len += 1;
     }
 
-    Ok(length)
+    // Matched all remaining bases — STAR returns comp_res < 0 (genome >= read)
+    (match_len, false)
+}
+
+/// Find maximum mappable prefix length within SA range [sa_start, sa_end).
+/// Binary searches the range while extending match length, then narrows to
+/// all positions matching the maximum length.
+/// Returns (match_length, narrowed_sa_start, narrowed_sa_end_exclusive).
+/// Ports STAR's maxMappableLength (SuffixArrayFuns.cpp).
+fn max_mappable_length(
+    read_seq: &[u8],
+    read_pos: usize,
+    index: &GenomeIndex,
+    sa_start: usize,
+    sa_end: usize,
+    l_initial: usize,
+) -> (usize, usize, usize) {
+    let remaining = read_seq.len() - read_pos;
+
+    // Single element: just compare
+    if sa_start + 1 >= sa_end {
+        let (l, _) = compare_seq_to_genome(read_seq, read_pos, index, sa_start, l_initial);
+        return (l, sa_start, sa_start + 1);
+    }
+
+    // Convert to inclusive range (STAR convention internally)
+    let mut i1 = sa_start;
+    let mut i2 = sa_end - 1;
+
+    let (mut l1, _) = compare_seq_to_genome(read_seq, read_pos, index, i1, l_initial);
+    let (mut l2, _) = compare_seq_to_genome(read_seq, read_pos, index, i2, l_initial);
+
+    let mut l = l1.min(l2);
+    let mut l3 = l;
+    let mut i3 = i1;
+
+    // Track history for find_mult_range
+    let (mut i1a, mut l1a) = (i1, l1);
+    let (mut i1b, mut l1b) = (i1, l1);
+    let (mut i2a, mut l2a) = (i2, l2);
+    let (mut i2b, mut l2b) = (i2, l2);
+
+    // Binary search within SA range
+    while i1 + 1 < i2 {
+        i3 = median_uint2(i1, i2);
+        let comp3;
+        (l3, comp3) = compare_seq_to_genome(read_seq, read_pos, index, i3, l);
+
+        if l3 == remaining {
+            break; // Perfect match found
+        }
+
+        if comp3 {
+            // read > genome at mismatch: move left boundary up
+            i1a = i1b;
+            l1a = l1b;
+            i1b = i1;
+            l1b = l1;
+            i1 = i3;
+            l1 = l3;
+        } else {
+            // read <= genome at mismatch: move right boundary down
+            i2a = i2b;
+            l2a = l2b;
+            i2b = i2;
+            l2b = l2;
+            i2 = i3;
+            l2 = l3;
+        }
+
+        l = l1.min(l2);
+    }
+
+    // Pick the best match length
+    if l3 < remaining {
+        if l1 > l2 {
+            l3 = l1;
+            i3 = i1;
+        } else {
+            l3 = l2;
+            i3 = i2;
+        }
+    }
+
+    // Find narrowed range using find_mult_range
+    let narrowed_start = find_mult_range(
+        read_seq, read_pos, index, remaining, i3, l3, i1, l1, i1a, l1a, i1b, l1b,
+    );
+    let narrowed_end = find_mult_range(
+        read_seq, read_pos, index, remaining, i3, l3, i2, l2, i2a, l2a, i2b, l2b,
+    );
+
+    // Convert back to exclusive end
+    (l3, narrowed_start, narrowed_end + 1)
+}
+
+/// Binary search to find the SA boundary where match length transitions
+/// from >= l3 to < l3. Used to narrow the SA range to only positions
+/// matching the maximum prefix length.
+/// Ports STAR's funFindMultRange.
+#[allow(clippy::too_many_arguments)]
+fn find_mult_range(
+    read_seq: &[u8],
+    read_pos: usize,
+    index: &GenomeIndex,
+    _remaining: usize,
+    mut i3: usize,
+    l3: usize,
+    mut i1: usize,
+    l1: usize,
+    i1a: usize,
+    l1a: usize,
+    i1b: usize,
+    l1b: usize,
+) -> usize {
+    if l1 >= l3 {
+        return i1; // Boundary already at target length
+    }
+
+    // Use closest cached intermediate with L >= l3 to narrow search space
+    if l1b >= l3 {
+        i3 = i1b;
+    } else if l1a >= l3 {
+        i3 = i1a;
+    }
+
+    // Binary search between i3 (L >= l3) and i1 (L < l3)
+    // Start comparison from the minimum known matching length
+    let mut l_start = l1;
+
+    while (i3 + 1 < i1) || (i1 + 1 < i3) {
+        let i4 = median_uint2(i3, i1);
+        let (l4, _) = compare_seq_to_genome(read_seq, read_pos, index, i4, l_start);
+
+        if l4 >= l3 {
+            i3 = i4;
+        } else {
+            i1 = i4;
+            l_start = l4; // Update comparison start to shorter match
+        }
+    }
+
+    i3
 }
 
 #[cfg(test)]

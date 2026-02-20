@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**264 tests passing.** SE: 96.2% position agreement, 97.6% CIGAR, 2.7% splice rate. PE: 95.6% per-mate position, 9017 pairs (0 unmapped). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**264 tests passing.** SE: 97.4% position agreement, 97.6% CIGAR, 3.0% splice rate, 57 shared junctions. PE: 95.6% per-mate position, 9017 pairs (0 unmapped). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -76,6 +76,15 @@ src/
     score.rs       -- Junction type classification, repeat length calculation
     output.rs      -- Chimeric.out.junction writer (14-column format)
 ```
+
+## Development Philosophy — Match STAR Exactly
+
+**Never backtrack on changes that make the method closer to STAR's logic, even if metrics temporarily regress.** A regression in alignment statistics (position agreement, splice rate, etc.) after making the code more STAR-faithful does NOT mean the change was wrong — it means the implementation is incomplete. More STAR-matching changes are needed to close the gap.
+
+- It is better to go backwards in metrics temporarily to eventually reach 100% matching results, than to keep approximate methods that can never get there.
+- Every algorithm, threshold, and code path should match STAR's C++ source exactly. Any deviation — even a small one — should be corrected.
+- Do not revert STAR-faithful changes. Instead, investigate what STAR does differently in the surrounding logic and implement that too.
+- When a STAR-matching change causes regression, the response is: "What else does STAR do that we don't?" — not "revert and try something different."
 
 ## Key Conventions
 
@@ -123,8 +132,8 @@ predicates = "3"
 
 ## Known Issues (Top 3)
 
-1. **Splice rate 2.7% vs STAR 2.2%** — remaining false splicing from wide bin-based windows (mostly chrXII rDNA)
-2. **rDNA MAPQ inflation** (~133 reads, MAPQ 255 vs STAR 1-3) — needs ~65kb sub-window splitting
+1. **Splice rate 3.0% vs STAR 2.2%** — method deviations: MMP SA range overestimation (extend_match only narrows sa_start), 200-seed cap (STAR uses seedPerWindowNmax=50 during window assignment), single transcript per window (STAR's recursive DP produces multiple)
+2. **rDNA MAPQ inflation** (~133 reads, MAPQ 255 vs STAR 1-3) — root cause: single transcript per window → MAPQ=255. STAR's recursive DP produces multiple transcripts → low MAPQ
 3. **BySJout too aggressive without GTF** — all junctions novel → strict thresholds
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.

@@ -362,28 +362,18 @@ pub fn cluster_seeds(
 
     // Phase 1: Identify anchor seeds (few genomic positions → high specificity)
     // STAR: only seeds with Nrep <= winAnchorMultimapNmax create windows.
-    let mut anchor_indices: Vec<usize> = anchor_set
+    let anchor_indices: Vec<usize> = anchor_set
         .iter()
         .enumerate()
         .filter(|(_, is_anchor)| **is_anchor)
         .map(|(i, _)| i)
         .collect();
 
-    // Fallback: if no anchors, use all seeds with non-empty SA ranges.
-    // Note: STAR has no fallback (read would be unmapped), but our MMP search
-    // overestimates SA ranges because extend_match() only narrows from sa_start.
-    // This causes seeds to appear more repetitive than they are.
-    // TODO: fix MMP search to narrow SA range from both ends, then remove fallback.
+    // No fallback: matches STAR behavior where reads with no anchors are unmapped.
+    // MMP search now narrows SA ranges from both ends (max_mappable_length),
+    // so seeds have accurate loci counts and anchor classification is correct.
     if anchor_indices.is_empty() {
-        anchor_indices = seeds
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.sa_end > s.sa_start)
-            .map(|(i, _)| i)
-            .collect();
-        if anchor_indices.is_empty() {
-            return Vec::new();
-        }
+        return Vec::new();
     }
 
     // Phase 2: Create windows from anchor positions

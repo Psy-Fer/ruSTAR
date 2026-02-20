@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**264 tests passing.** SE: 97.4% position agreement, 97.6% CIGAR, 3.0% splice rate, 57 shared junctions. PE: 95.6% per-mate position, 9017 pairs (0 unmapped). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**264 tests passing.** SE: 97.4% position agreement, 98.5% CIGAR, 1.9% splice rate, 62 shared junctions, 99.1% MAPQ agreement. PE: 97.8% per-mate position, 96.0% CIGAR, 85 shared junctions, 9024 pairs (0 unmapped). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -128,12 +128,12 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 264/264 tests passing (260 unit + 4 integration), non-critical clippy warnings (too_many_arguments x 7, type_complexity x 1, manual_contains x 1, implicit_saturating_sub x 1)
+**Current test status**: 264/264 tests passing (260 unit + 4 integration), non-critical clippy warnings (too_many_arguments x 8, type_complexity x 1, manual_contains x 1, implicit_saturating_sub x 1)
 
 ## Known Issues (Top 3)
 
-1. **Splice rate 3.0% vs STAR 2.2%** — method deviations: MMP SA range overestimation (extend_match only narrows sa_start), 200-seed cap (STAR uses seedPerWindowNmax=50 during window assignment), single transcript per window (STAR's recursive DP produces multiple)
-2. **rDNA MAPQ inflation** (~133 reads, MAPQ 255 vs STAR 1-3) — root cause: single transcript per window → MAPQ=255. STAR's recursive DP produces multiple transcripts → low MAPQ
+1. **Splice rate 1.9% vs STAR 2.2%** — 122 reads lost false splices in 16.10 (now match STAR CIGARs), remaining gap is ~29 STAR-only spliced reads
+2. **Residual MAPQ inflation** (~62 reads, MAPQ 255 vs STAR <255) — multi-transcript DP (16.10) fixed 81% of cases (323→62), remainder are multi-mapper tie-breaking differences
 3. **BySJout too aggressive without GTF** — all junctions novel → strict thresholds
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.

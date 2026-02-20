@@ -2,9 +2,9 @@
 
 # Phase 16: Accuracy + Algorithm Parity
 
-**Status**: In Progress (Phases 16.1-16.8 + 16.7b complete)
+**Status**: In Progress (Phases 16.1-16.10 + 16.7b/16.7c complete)
 
-**Goal**: Close remaining accuracy gaps vs STAR. Fix over-splicing, rDNA MAPQ, seed parameters, DP junction optimization, and PE mate rescue.
+**Goal**: Close remaining accuracy gaps vs STAR. Fix over-splicing, rDNA MAPQ, seed parameters, DP junction optimization, PE mate rescue, and multi-transcript DP.
 
 ---
 
@@ -159,6 +159,83 @@ Replaced proximity-based clustering with STAR's bin-based windowing architecture
 
 ---
 
-## Phase 16.9: PE Joint DP Stitching — PLANNED
+## Phase 16.7c: Anchor Threshold Fix ✅ (2026-02-20)
 
-311 pairs (3.4%) are half-mapped. STAR maps both via joint mate-aware DP with fragment length gap penalty. Seeds from both mates in same genomic window participate in DP together.
+**Problem**: `max_loci_for_anchor` was hardcoded to 10. STAR uses `winAnchorMultimapNmax` (default 50).
+
+**Fix**: Changed `max_loci_for_anchor` from hardcoded 10 to `params.win_anchor_multimap_nmax` in `align_read()` and `rescue_unmapped_mate()`.
+
+**Impact**: Position **96.2% → 97.4%**. Shared junctions **49 → 57**. Splice rate 2.7% → 3.0% (slight increase).
+
+**Files**: `src/align/read_align.rs`
+
+---
+
+## Phase 16.9: MMP SA Range Narrowing ✅ (2026-02-20)
+
+**Problem**: `extend_match()` only narrowed `sa_start`, overestimating match lengths for positions at the end of the SA range.
+
+**Fix**: Replaced `extend_match()` with `max_mappable_length()` — binary searches within SA range to narrow both boundaries. Ports STAR's `maxMappableLength` + `compareSeqToGenome` + `findMultRange`.
+
+New functions:
+- `compare_seq_to_genome()` — starts from offset l_start, returns (match_len, is_read_greater)
+- `max_mappable_length()` — binary search within SA range
+- `find_mult_range()` — narrow to exact boundary
+- `median_uint2()` — safe median for binary search
+
+Removed anchor fallback in `cluster_seeds()` (no longer needed with accurate SA ranges).
+
+**Impact**: Position **97.4% → 97.9%**. CIGAR **97.6% → 98.3%**. Splice rate **3.0% → 2.2%** (matches STAR!). Shared junctions **57 → 62**. False-positive junctions **3 → 0**.
+
+**Files**: `src/align/seed.rs`, `src/align/stitch.rs`
+
+---
+
+## Phase 16.10: Multi-Transcript DP (MAPQ Fix) ✅ (2026-02-20)
+
+**Problem**: ruSTAR produced exactly **one transcript per window** from DP stitching. For rDNA reads (chrXII tandem repeats), all ~6 copies landed in a single window. STAR found multiple transcripts → NH=6 → MAPQ=0. ruSTAR found one → NH=1 → MAPQ=255. 323 reads had inflated MAPQ.
+
+**Fix**: Multi-endpoint DP — collect top-N DP endpoints instead of single best:
+
+1. **`build_transcript_from_endpoint()`** — extracted transcript-building logic (chain traceback → junction optimization → extend → CIGAR → exons → Transcript) into helper function
+2. **Top-N endpoint collection** — collect all `(total_score, endpoint_idx)` pairs, sort by score descending
+3. **Chain-start dedup** — different endpoints in the same chain produce the same alignment, so skip duplicates via `seen_chain_starts` HashSet
+4. **Score-range early termination** — `score < best_score - 1` breaks early (worse endpoints won't survive `outFilterMultimapScoreRange` filtering)
+5. **`max_transcripts_per_window`** parameter — `alignTranscriptsPerWindowNmax` (default 100) controls the limit
+6. **Chimeric detection** — `stitch_seeds()` convenience wrapper passes `max_transcripts_per_window=1` (chimeric detection doesn't need multi-transcript)
+
+| Metric | Before (16.9) | After (16.10) | Improvement |
+|--------|---------------|---------------|-------------|
+| MAPQ inflation (ruSTAR=255, STAR<255) | **323** | **62** | -81% |
+| MAPQ agreement | 96.1% | **99.1%** | +3.0pp |
+| Position agreement | 97.9% | **97.4%** | see note |
+| CIGAR agree (of pos-agree) | 98.3% | **98.5%** | +0.2pp |
+| Multi-mapped reads | 355 | **627** | STAR: 661 |
+| Splice rate | 2.2% | **1.9%** | 122 false splices fixed |
+| Disagreements | 190 | **173** | -17 |
+| Shared junctions | 62 | **62** | stable |
+
+**Position agreement note**: The 0.5pp drop is expected — diff-chr disagreements are all MAPQ-tied multi-mappers where both tools pick different locations among equally-valid alternatives. All 100 diff-chr cases show matching MAPQ.
+
+**Splice rate improvement**: 122 reads lost false splices (100kb+ spurious introns from wrong DP endpoint). Their CIGARs now match STAR exactly.
+
+**rDNA MAPQ**: Was 304 reads all MAPQ=255, now 26 at MAPQ=1 + 220 at MAPQ=3 + 65 at MAPQ=255 — closely matches STAR's distribution (29 at 1, 225 at 3, 60 at 255).
+
+**PE impact** (multi-transcript DP improves both SE and PE since each mate uses `align_read()`):
+
+| PE Metric | Before (16.9) | After (16.10) | Improvement |
+|-----------|---------------|---------------|-------------|
+| Per-mate position agree | 95.6% | **97.8%** | +2.2pp |
+| Per-mate CIGAR agree | 93.1% | **96.0%** | +2.9pp |
+| Both mates mapped | 8706 (96.6%) | **8761 (97.1%)** | +55 pairs |
+| Half-mapped pairs | 311 (3.4%) | **263 (2.9%)** | -48 pairs |
+| Shared junctions | 76 | **85** | +9 |
+| ruSTAR-only junctions | — | **3** | — |
+
+**Files**: `src/align/stitch.rs`, `src/align/read_align.rs`
+
+---
+
+## Phase 16.11: PE Joint DP Stitching — PLANNED
+
+263 pairs (2.9%) are half-mapped. STAR maps both via joint mate-aware DP with fragment length gap penalty. Seeds from both mates in same genomic window participate in DP together.

@@ -6,7 +6,7 @@ A Rust reimplementation of [STAR](https://github.com/alexdobin/STAR) (Spliced Tr
 
 ruSTAR aims to be a faithful port of STAR, matching the original behavior as closely as possible. It uses the same genome index format, accepts the same `--camelCase` command-line parameters, and produces compatible SAM/BAM output.
 
-**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection, and multi-threaded parallel processing. 257 tests passing.
+**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection, and multi-threaded parallel processing. 264 tests passing.
 
 ## Quick Start
 
@@ -73,34 +73,30 @@ target/release/ruSTAR \
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Unique mapped | 83.1% | 82.6% |
-| Multi-mapped | 5.4% | 7.4% |
-| Soft-clipped reads | 26.6% | 26.0% |
-| Splice rate | 2.1% | 2.2% |
+| Unique mapped | 93.0% | 92.6% |
+| Multi-mapped | 7.0% | 7.4% |
+| Soft-clipped reads | 26.0% | 26.0% |
+| Splice rate | 1.9% | 2.2% |
 
 #### Position and CIGAR Agreement
 
 | Mode | Position agree | CIGAR agree | Splice rate |
 |------|---------------|-------------|-------------|
-| Normal (default) | 94.5% | 97.8% | 2.1% |
+| Normal (default) | 97.4% | 98.5% | 1.9% |
 
-#### SAM Tag Agreement (position-matching reads)
+#### MAPQ Agreement
 
-| Tag | Agreement | Notes |
-|-----|-----------|-------|
-| NH (hit count) | 98.3% | 144 differ from seeding differences |
-| HI (hit index) | 100% | |
-| AS (alignment score) | 98.7% | 2 same-CIGAR diffs, rest from different CIGARs |
-| NM (edit distance) | 97.7% | 0 unexplained: diffs = indel bases (NM vs nM semantics) |
-| FLAG (primary) | 99.8% | 22 strand flips on multi-mapper ties |
-| NH (with secondary) | 96.2% | 339 differ from different seeding |
+| Metric | Value |
+|--------|-------|
+| MAPQ agreement | 99.1% |
+| MAPQ inflation (ruSTAR=255, STAR<255) | 62 reads (was 323 pre-16.10) |
 
 #### Junction Statistics (SE)
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Shared junctions | 42 | 72 total |
-| ruSTAR-only junctions | 6 | -- |
+| Shared junctions | 62 | 72 total |
+| ruSTAR-only junctions | 0 | -- |
 | Motif agreement (shared) | 100% | -- |
 
 ### Paired-End (10k yeast read pairs, 150bp)
@@ -109,28 +105,26 @@ target/release/ruSTAR \
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Unique mapped | 84.9% | 78.6% |
-| Multi-mapped | 5.2% | 5.3% |
-| Both mates mapped | 8706 (96.6%) | 8390 (100%) |
-| Half-mapped pairs | 311 (3.4%) | 0 |
+| Both mates mapped | 8761 (97.1%) | 8390 (100%) |
+| Half-mapped pairs | 263 (2.9%) | 0 |
 | Unmapped pairs | 0 | 0 |
 
 #### Per-Mate Agreement
 
 | Metric | Value |
 |--------|-------|
-| Per-mate position agree | 95.6% |
-| Per-mate CIGAR agree | 93.1% |
-| STAR-only mapped mates | 98 |
+| Per-mate position agree | 97.8% |
+| Per-mate CIGAR agree | 96.0% |
 
 #### Junction Statistics (PE)
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Shared junctions | 76 | 90 total |
+| Shared junctions | 85 | 90 total |
+| ruSTAR-only junctions | 3 | -- |
 | Motif agreement (shared) | 100% | -- |
 
-> **Note**: 311 half-mapped pairs (3.4%) are cases where one mate maps but the other fails even with mate rescue. STAR uses joint DP stitching which recovers these. Joint DP is planned for Phase 16.9.
+> **Note**: 263 half-mapped pairs (2.9%) are cases where one mate maps but the other fails even with mate rescue. STAR uses joint DP stitching which recovers these.
 
 ## Supported Features
 
@@ -159,7 +153,7 @@ target/release/ruSTAR \
 - No `--quantMode GeneCounts`
 - No `--outReadsUnmapped Fastx`
 - No `--outStd SAM/BAM` (stdout output)
-- rDNA MAPQ inflation (~157 reads MAPQ 255 vs STAR 1-3) — needs sub-window splitting
+- Residual MAPQ inflation (~62 reads MAPQ 255 vs STAR <255) — mostly multi-mapper tie-breaking
 - No STARsolo single-cell features
 
 See [ROADMAP.md](ROADMAP.md) for detailed implementation tracking.

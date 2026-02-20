@@ -62,4 +62,4 @@
 
 ## Phase 14: STARsolo (Single-Cell) — DEFERRED
 
-**Prerequisite**: All accuracy gaps resolved, position agreement >99%.
+**Prerequisite**: All accuracy gaps resolved, position agreement >99%. (Current: 97.4% pos, 99.1% MAPQ agree after Phase 16.10 multi-transcript DP)

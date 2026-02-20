@@ -516,10 +516,6 @@ pub struct Parameters {
     #[arg(long = "winAnchorMultimapNmax", default_value_t = 50)]
     pub win_anchor_multimap_nmax: usize,
 
-    /// Max number of seed loci per window
-    #[arg(long = "seedNoneLociPerWindow", default_value_t = 10)]
-    pub seed_none_loci_per_window: usize,
-
     /// Max number of alignment windows per read
     #[arg(long = "alignWindowsPerReadNmax", default_value_t = 10000)]
     pub align_windows_per_read_nmax: usize,
@@ -723,7 +719,6 @@ mod tests {
         assert_eq!(p.seed_search_lmax, 0);
         assert_eq!(p.seed_map_min, 5);
         assert_eq!(p.win_anchor_multimap_nmax, 50);
-        assert_eq!(p.seed_none_loci_per_window, 10);
         assert_eq!(p.align_windows_per_read_nmax, 10000);
         assert_eq!(p.align_transcripts_per_window_nmax, 100);
         assert!((p.win_read_coverage_relative_min - 0.5).abs() < f64::EPSILON);

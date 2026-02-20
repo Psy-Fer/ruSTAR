@@ -274,27 +274,34 @@ fn extend_alignment(
     }
 }
 
-/// A seed pinned to a specific genome position, avoiding SA range re-expansion in DP.
+/// A Window Alignment entry — equivalent to STAR's WA[iW][iA] array.
 ///
-/// During window assignment, each seed is stored with its specific SA position
-/// rather than re-expanding the full SA range later. This matches STAR's WA array
-/// (one position per Window Alignment entry) and prevents distant repeat copies
-/// from contaminating the DP.
+/// Each entry represents one seed at one specific genome position within a window.
+/// During seed assignment, verify_match_at_position() confirms the actual match length.
+/// The DP reads these entries directly (no SA range re-expansion needed).
 #[derive(Debug, Clone)]
-pub struct PinnedSeed {
-    /// Index into the seeds array
+pub struct WindowAlignment {
+    /// Index into the seeds array (for DP expansion to identify the originating seed)
     pub seed_idx: usize,
-    /// Specific SA position (raw, not forward-converted)
+    /// Read start position (STAR: WA_rStart)
+    pub read_pos: usize,
+    /// Verified match length at this specific position (STAR: WA_Length)
+    pub length: usize,
+    /// Forward-strand genome position (STAR: WA_gStart)
+    pub genome_pos: u64,
+    /// Raw SA position (for genome base access in DP — reverse strand uses sa_pos + n_genome)
     pub sa_pos: u64,
-    /// Strand (false = forward, true = reverse)
-    pub strand: bool,
+    /// SA range size of the originating seed (STAR: WA_Nrep) — for scoring
+    pub n_rep: usize,
+    /// Whether this entry is an anchor (protected from capacity eviction)
+    pub is_anchor: bool,
 }
 
 /// A cluster of seeds mapping to the same genomic region
 #[derive(Debug, Clone)]
 pub struct SeedCluster {
-    /// Seeds pinned to specific genome positions (no re-expansion needed)
-    pub pinned_seeds: Vec<PinnedSeed>,
+    /// Window Alignment entries — seed positions assigned to this window (STAR's WA array)
+    pub alignments: Vec<WindowAlignment>,
     /// Chromosome index
     pub chr_idx: usize,
     /// Genomic start (leftmost position, forward coords, from actual seed positions)
@@ -307,23 +314,18 @@ pub struct SeedCluster {
     pub anchor_idx: usize,
     /// Anchor genomic bin (anchor_pos >> win_bin_nbits) for MAPQ window counting
     pub anchor_bin: u64,
-    /// Window genomic start in forward coords (bin_start << win_bin_nbits)
-    /// Used for DP expansion filtering — tighter than ±1MB, matches bin-based window extent
-    pub window_genome_start: u64,
-    /// Window genomic end in forward coords ((bin_end + 1) << win_bin_nbits)
-    pub window_genome_end: u64,
 }
 
 /// Cluster seeds using STAR's bin-based windowing algorithm.
 ///
-/// # Algorithm (matches STAR's `createExtendWindowsWithAlign` + `assignAlignToWindow`)
+/// # Algorithm (faithful to STAR's `createExtendWindowsWithAlign` + `assignAlignToWindow`)
 /// 1. Identify anchor seeds (SA range ≤ max_loci_for_anchor)
-/// 2. Create windows from anchor positions: each anchor's bin is computed,
-///    nearby anchors (within ±win_anchor_dist_nbins) merge into one window
+/// 2. Create windows from anchor positions using `winBin[(strand, bin)]` lookup:
+///    - If bin already has a window → assign anchor to it, skip creation
+///    - Else scan left/right for nearby windows → merge or create new
 /// 3. Extend windows by ±win_flank_nbins on each side
-/// 4. Build bin→window HashMap lookup
-/// 5. Assign all seeds to windows by bin lookup
-/// 6. Build SeedCluster output with window bin-range bounds
+/// 4. Assign ALL seeds to windows with overlap dedup + capacity eviction
+/// 5. Build SeedCluster output
 ///
 /// # Arguments
 /// * `seeds` - All seeds found in the read
@@ -333,52 +335,68 @@ pub struct SeedCluster {
 /// * `win_flank_nbins` - Bins to extend each window side (STAR default: 4)
 /// * `max_loci_for_anchor` - Max SA range for a seed to be an anchor (e.g., 10)
 /// * `win_anchor_multimap_nmax` - Max loci anchors can map to (STAR default: 50)
-/// * `seed_none_loci_per_window` - Max seed positions to check per seed (STAR default: 10)
+/// * `seed_per_window_nmax` - Max WA entries per window (capacity eviction threshold)
 ///
 /// # Returns
 /// Vector of seed clusters, one per window with assigned seeds
 pub fn cluster_seeds(
     seeds: &[Seed],
+    read_seq: &[u8],
     index: &GenomeIndex,
     win_bin_nbits: u32,
     win_anchor_dist_nbins: u32,
     win_flank_nbins: u32,
     max_loci_for_anchor: usize,
     win_anchor_multimap_nmax: usize,
-    seed_none_loci_per_window: usize,
+    seed_per_window_nmax: usize,
 ) -> Vec<SeedCluster> {
     use std::collections::HashMap;
 
-    // Phase 1: Identify anchor seeds (few genomic positions → high specificity)
-    let mut anchor_indices: Vec<usize> = seeds
+    let anchor_set: Vec<bool> = seeds
         .iter()
-        .enumerate()
-        .filter(|(_, seed)| {
+        .map(|seed| {
             let n_loci = seed.sa_end - seed.sa_start;
             n_loci > 0 && n_loci <= max_loci_for_anchor
         })
+        .collect();
+
+    // Phase 1: Identify anchor seeds (few genomic positions → high specificity)
+    let mut anchor_indices: Vec<usize> = anchor_set
+        .iter()
+        .enumerate()
+        .filter(|(_, is_anchor)| **is_anchor)
         .map(|(i, _)| i)
         .collect();
 
-    // Fallback: if no anchors, use all seeds (STAR behavior)
+    // Fallback: if no anchors, use all seeds with non-empty SA ranges (STAR behavior)
     if anchor_indices.is_empty() {
-        anchor_indices = (0..seeds.len()).collect();
+        anchor_indices = seeds
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.sa_end > s.sa_start)
+            .map(|(i, _)| i)
+            .collect();
     }
 
     // Phase 2: Create windows from anchor positions
+    // (matches STAR's createExtendWindowsWithAlign)
     struct Window {
         bin_start: u64,
         bin_end: u64,
         chr_idx: usize,
         is_reverse: bool,
         anchor_idx: usize,
-        pinned_seeds: Vec<PinnedSeed>,
-        // Tight bounds from actual seed positions (for DP expanded seed filtering)
+        alignments: Vec<WindowAlignment>,
+        // Tight bounds from actual seed positions
         actual_start: u64,
         actual_end: u64,
+        alive: bool, // false = merged into another window (STAR kills merged windows)
     }
 
     let mut windows: Vec<Window> = Vec::new();
+    // winBin: (strand, bin) → window_index
+    // Chromosome is implicit since bins are from absolute forward positions
+    let mut win_bin: HashMap<(bool, u64), usize> = HashMap::new();
 
     for &anchor_idx in &anchor_indices {
         let anchor = &seeds[anchor_idx];
@@ -389,10 +407,20 @@ pub fn cluster_seeds(
             continue;
         }
 
-        let max_positions = seed_none_loci_per_window.min(n_loci);
+        for (sa_pos, strand) in anchor.genome_positions(index) {
+            let actual_length = verify_match_at_position(
+                read_seq,
+                anchor.read_pos,
+                sa_pos,
+                strand,
+                anchor.length,
+                index,
+            );
+            if actual_length < 8 {
+                continue;
+            }
 
-        for (sa_pos, strand) in anchor.genome_positions(index).take(max_positions) {
-            let forward_pos = index.sa_pos_to_forward(sa_pos, strand, anchor.length);
+            let forward_pos = index.sa_pos_to_forward(sa_pos, strand, actual_length);
 
             let chr_idx = match index.genome.position_to_chr(forward_pos) {
                 Some(info) => info.0,
@@ -401,83 +429,166 @@ pub fn cluster_seeds(
 
             let anchor_bin = forward_pos >> win_bin_nbits;
 
-            // Search existing windows for merge (same chr+strand, overlapping bin range)
-            let mut merged = false;
-            for window in &mut windows {
-                if window.chr_idx != chr_idx || window.is_reverse != strand {
-                    continue;
-                }
+            let wa_entry = WindowAlignment {
+                seed_idx: anchor_idx,
+                read_pos: anchor.read_pos,
+                length: actual_length,
+                genome_pos: forward_pos,
+                sa_pos,
+                n_rep: n_loci,
+                is_anchor: true,
+            };
 
-                let merge_start = window
-                    .bin_start
-                    .saturating_sub(win_anchor_dist_nbins as u64);
-                let merge_end = window.bin_end + win_anchor_dist_nbins as u64;
-
-                if anchor_bin >= merge_start && anchor_bin <= merge_end {
-                    // Merge: extend window to include this anchor's bin
-                    window.bin_start = window.bin_start.min(anchor_bin);
-                    window.bin_end = window.bin_end.max(anchor_bin);
+            // Check if this bin already has a window (STAR: skip creation, just assign)
+            if let Some(&win_idx) = win_bin.get(&(strand, anchor_bin)) {
+                let window = &mut windows[win_idx];
+                if window.alive && window.chr_idx == chr_idx {
                     window.actual_start = window.actual_start.min(forward_pos);
-                    window.actual_end = window.actual_end.max(forward_pos + anchor.length as u64);
-                    // Same seed at multiple positions = separate pinned entries (matches STAR)
-                    window.pinned_seeds.push(PinnedSeed {
-                        seed_idx: anchor_idx,
-                        sa_pos,
-                        strand,
-                    });
-                    merged = true;
-                    break;
+                    window.actual_end = window.actual_end.max(forward_pos + actual_length as u64);
+                    window.alignments.push(wa_entry);
+                    continue;
                 }
             }
 
-            if !merged {
-                windows.push(Window {
-                    bin_start: anchor_bin,
-                    bin_end: anchor_bin,
-                    chr_idx,
-                    is_reverse: strand,
-                    anchor_idx,
-                    pinned_seeds: vec![PinnedSeed {
-                        seed_idx: anchor_idx,
-                        sa_pos,
-                        strand,
-                    }],
-                    actual_start: forward_pos,
-                    actual_end: forward_pos + anchor.length as u64,
-                });
+            // Scan LEFT for existing window to merge with
+            let mut merge_left: Option<usize> = None;
+            for scan_bin in
+                (anchor_bin.saturating_sub(win_anchor_dist_nbins as u64)..anchor_bin).rev()
+            {
+                if let Some(&win_idx) = win_bin.get(&(strand, scan_bin)) {
+                    let w = &windows[win_idx];
+                    if w.alive && w.chr_idx == chr_idx {
+                        merge_left = Some(win_idx);
+                        break;
+                    }
+                }
+            }
+
+            // Scan RIGHT for existing window to merge with
+            let mut merge_right: Option<usize> = None;
+            for scan_bin in (anchor_bin + 1)..=(anchor_bin + win_anchor_dist_nbins as u64) {
+                if let Some(&win_idx) = win_bin.get(&(strand, scan_bin)) {
+                    let w = &windows[win_idx];
+                    if w.alive && w.chr_idx == chr_idx {
+                        merge_right = Some(win_idx);
+                        break;
+                    }
+                }
+            }
+
+            match (merge_left, merge_right) {
+                (Some(left_idx), Some(right_idx)) if left_idx != right_idx => {
+                    // Merge both windows: extend left window to cover right + anchor
+                    let right_window = &windows[right_idx];
+                    let new_bin_end = right_window.bin_end.max(anchor_bin);
+                    let new_actual_start = right_window.actual_start.min(forward_pos);
+                    let new_actual_end = right_window
+                        .actual_end
+                        .max(forward_pos + actual_length as u64);
+                    let right_alignments: Vec<WindowAlignment> = right_window.alignments.clone();
+
+                    // Kill right window
+                    windows[right_idx].alive = false;
+
+                    // Extend left window
+                    let left_window = &mut windows[left_idx];
+                    left_window.bin_start = left_window.bin_start.min(anchor_bin);
+                    left_window.bin_end = left_window.bin_end.max(new_bin_end);
+                    left_window.actual_start = left_window.actual_start.min(new_actual_start);
+                    left_window.actual_end = left_window.actual_end.max(new_actual_end);
+                    left_window.alignments.extend(right_alignments);
+                    left_window.alignments.push(wa_entry);
+
+                    // Update winBin for all bins from left to right
+                    for bin in left_window.bin_start..=left_window.bin_end {
+                        win_bin.insert((strand, bin), left_idx);
+                    }
+                }
+                (Some(idx), _) | (_, Some(idx)) => {
+                    // Merge with one existing window
+                    let window = &mut windows[idx];
+                    window.bin_start = window.bin_start.min(anchor_bin);
+                    window.bin_end = window.bin_end.max(anchor_bin);
+                    window.actual_start = window.actual_start.min(forward_pos);
+                    window.actual_end = window.actual_end.max(forward_pos + actual_length as u64);
+                    window.alignments.push(wa_entry);
+
+                    // Update winBin for newly covered bins
+                    for bin in window.bin_start..=window.bin_end {
+                        win_bin.insert((strand, bin), idx);
+                    }
+                }
+                _ => {
+                    // No merge: create new window
+                    let new_idx = windows.len();
+                    win_bin.insert((strand, anchor_bin), new_idx);
+                    windows.push(Window {
+                        bin_start: anchor_bin,
+                        bin_end: anchor_bin,
+                        chr_idx,
+                        is_reverse: strand,
+                        anchor_idx,
+                        alignments: vec![wa_entry],
+                        actual_start: forward_pos,
+                        actual_end: forward_pos + actual_length as u64,
+                        alive: true,
+                    });
+                }
             }
         }
     }
 
-    if windows.is_empty() {
+    if windows.iter().all(|w| !w.alive) {
         return Vec::new();
     }
 
     // Phase 3: Extend windows by ±win_flank_nbins (matches STAR's flanking extension)
-    for window in &mut windows {
-        window.bin_start = window.bin_start.saturating_sub(win_flank_nbins as u64);
-        window.bin_end += win_flank_nbins as u64;
-    }
+    // Update winBin for newly covered bins
+    for (win_idx, window) in windows.iter_mut().enumerate() {
+        if !window.alive {
+            continue;
+        }
+        let old_start = window.bin_start;
+        let old_end = window.bin_end;
+        let new_start = old_start.saturating_sub(win_flank_nbins as u64);
+        let new_end = old_end + win_flank_nbins as u64;
+        window.bin_start = new_start;
+        window.bin_end = new_end;
 
-    // Phase 4: Build bin→window HashMap lookup
-    // Key: (is_reverse, chr_idx, bin) → window_index
-    // Use or_insert to keep first assignment (matches STAR behavior)
-    let mut win_bin_map: HashMap<(bool, usize, u64), usize> = HashMap::new();
-    for (win_idx, window) in windows.iter().enumerate() {
-        for bin in window.bin_start..=window.bin_end {
-            win_bin_map
-                .entry((window.is_reverse, window.chr_idx, bin))
-                .or_insert(win_idx);
+        let strand = window.is_reverse;
+        for bin in new_start..old_start {
+            win_bin.entry((strand, bin)).or_insert(win_idx);
+        }
+        for bin in (old_end + 1)..=new_end {
+            win_bin.entry((strand, bin)).or_insert(win_idx);
         }
     }
 
-    // Phase 5: Assign all seeds to windows by bin lookup
+    // Phase 4: Assign ALL seeds to windows (matches STAR's assignAlignToWindow)
+    // Iterate all SA positions per seed — no per-seed cap. Seeds are already bounded
+    // by seedMultimapNmax (default 10000) from seed finding. Window capacity eviction
+    // (seedPerWindowNmax with anchor protection) handles limiting entries per window.
     for (seed_idx, seed) in seeds.iter().enumerate() {
         let n_loci = seed.sa_end - seed.sa_start;
-        let max_positions = seed_none_loci_per_window.min(n_loci);
+        if n_loci == 0 {
+            continue;
+        }
+        let is_anchor_seed = anchor_set[seed_idx];
 
-        for (sa_pos, strand) in seed.genome_positions(index).take(max_positions) {
-            let forward_pos = index.sa_pos_to_forward(sa_pos, strand, seed.length);
+        for (sa_pos, strand) in seed.genome_positions(index) {
+            let actual_length = verify_match_at_position(
+                read_seq,
+                seed.read_pos,
+                sa_pos,
+                strand,
+                seed.length,
+                index,
+            );
+            if actual_length < 8 {
+                continue;
+            }
+
+            let forward_pos = index.sa_pos_to_forward(sa_pos, strand, actual_length);
 
             let chr_idx = match index.genome.position_to_chr(forward_pos) {
                 Some(info) => info.0,
@@ -486,41 +597,79 @@ pub fn cluster_seeds(
 
             let seed_bin = forward_pos >> win_bin_nbits;
 
-            if let Some(&win_idx) = win_bin_map.get(&(strand, chr_idx, seed_bin)) {
-                let window = &mut windows[win_idx];
-                // Each (seed, position) = separate pinned entry (matches STAR's WA array)
-                window.pinned_seeds.push(PinnedSeed {
-                    seed_idx,
-                    sa_pos,
-                    strand,
-                });
-                // Track tight bounds from actual seed positions
-                window.actual_start = window.actual_start.min(forward_pos);
-                window.actual_end = window.actual_end.max(forward_pos + seed.length as u64);
+            let win_idx = match win_bin.get(&(strand, seed_bin)) {
+                Some(&idx) if windows[idx].alive && windows[idx].chr_idx == chr_idx => idx,
+                _ => continue,
+            };
+
+            let window = &mut windows[win_idx];
+
+            // Exact duplicate dedup: skip if same (read_pos, sa_pos) already exists
+            // (Diagonal overlap dedup deferred to DP — avoids removing valid entries
+            // that contribute different match lengths at different positions)
+            if window
+                .alignments
+                .iter()
+                .any(|wa| wa.read_pos == seed.read_pos && wa.sa_pos == sa_pos)
+            {
+                continue;
             }
+
+            // Capacity check (seedPerWindowNmax) with anchor protection
+            if window.alignments.len() >= seed_per_window_nmax {
+                // Find min length of non-anchor entries
+                let min_non_anchor_len = window
+                    .alignments
+                    .iter()
+                    .filter(|wa| !wa.is_anchor)
+                    .map(|wa| wa.length)
+                    .min()
+                    .unwrap_or(usize::MAX);
+
+                if actual_length <= min_non_anchor_len && !is_anchor_seed {
+                    continue; // New entry too short
+                }
+
+                // Evict shortest non-anchor entries
+                window
+                    .alignments
+                    .retain(|wa| wa.is_anchor || wa.length > min_non_anchor_len);
+
+                if window.alignments.len() >= seed_per_window_nmax {
+                    continue; // Still full after eviction
+                }
+            }
+
+            // Insert the new WA entry
+            window.actual_start = window.actual_start.min(forward_pos);
+            window.actual_end = window.actual_end.max(forward_pos + actual_length as u64);
+            window.alignments.push(WindowAlignment {
+                seed_idx,
+                read_pos: seed.read_pos,
+                length: actual_length,
+                genome_pos: forward_pos,
+                sa_pos,
+                n_rep: n_loci,
+                is_anchor: is_anchor_seed,
+            });
         }
     }
 
-    // Phase 6: Build SeedCluster output
-    // Store both tight bounds (from actual seed positions) and window bin bounds
-    // (from the bin range after flanking). The DP uses window bin bounds for
-    // re-expansion filtering — tighter than ±1MB, prevents cross-window contamination.
+    // Phase 5: Build SeedCluster output
     let mut clusters = Vec::with_capacity(windows.len());
     for window in &windows {
-        if window.pinned_seeds.is_empty() {
+        if !window.alive || window.alignments.is_empty() {
             continue;
         }
 
         clusters.push(SeedCluster {
-            pinned_seeds: window.pinned_seeds.clone(),
+            alignments: window.alignments.clone(),
             chr_idx: window.chr_idx,
             genome_start: window.actual_start,
             genome_end: window.actual_end,
             is_reverse: window.is_reverse,
             anchor_idx: window.anchor_idx,
             anchor_bin: window.bin_start,
-            window_genome_start: window.bin_start << win_bin_nbits,
-            window_genome_end: (window.bin_end + 1) << win_bin_nbits,
         });
     }
 
@@ -745,8 +894,7 @@ fn optimize_junction_positions(
 /// Stitch seeds within a cluster using dynamic programming.
 ///
 /// # Arguments
-/// * `cluster` - Seed cluster
-/// * `seeds` - All seeds
+/// * `cluster` - Seed cluster with WindowAlignment entries (STAR's WA array)
 /// * `read_seq` - Read sequence
 /// * `index` - Genome index
 /// * `scorer` - Alignment scorer
@@ -755,93 +903,39 @@ fn optimize_junction_positions(
 /// Vector of transcripts (may have multiple paths through the cluster)
 pub fn stitch_seeds(
     cluster: &SeedCluster,
-    seeds: &[Seed],
     read_seq: &[u8],
     index: &GenomeIndex,
     scorer: &AlignmentScorer,
 ) -> Result<Vec<Transcript>, Error> {
-    stitch_seeds_with_jdb(cluster, seeds, read_seq, index, scorer, None)
+    stitch_seeds_with_jdb(cluster, read_seq, index, scorer, None)
 }
 
 /// Stitch seeds with optional junction database for annotation-aware scoring.
+///
+/// Converts WindowAlignment entries directly to ExpandedSeeds for the DP.
+/// This matches STAR's architecture where the WA array IS the DP input —
+/// no SA range re-expansion needed. Each WA entry represents one verified
+/// (seed, position) pair assigned during bin-based windowing.
 pub fn stitch_seeds_with_jdb(
     cluster: &SeedCluster,
-    seeds: &[Seed],
     read_seq: &[u8],
     index: &GenomeIndex,
     scorer: &AlignmentScorer,
     junction_db: Option<&crate::junction::SpliceJunctionDb>,
 ) -> Result<Vec<Transcript>, Error> {
-    // Expand seeds assigned to this window to specific genome positions for DP.
-    //
-    // Use pinned seeds to identify WHICH seeds belong to this window (no seed gets
-    // in that wasn't assigned during bin-based windowing), then for each assigned
-    // seed, expand ALL its SA positions filtered to the window's chr/strand and
-    // position bounds. This recovers full SA-range coverage while preventing
-    // cross-window contamination: positions from other chromosomes or distant
-    // genomic locations are excluded.
-    let mut expanded_seeds = Vec::with_capacity(cluster.pinned_seeds.len() * 2);
-
-    // Collect unique seed indices from pinned_seeds
-    let mut unique_seed_indices: Vec<usize> =
-        cluster.pinned_seeds.iter().map(|p| p.seed_idx).collect();
-    unique_seed_indices.sort_unstable();
-    unique_seed_indices.dedup();
-
-    // Use both window bin bounds AND tight position bounds for filtering.
-    // The window bin bounds (from cluster_seeds Phase 6) define the bin-based
-    // window extent. For DP expansion we also allow a buffer beyond the tight
-    // bounds to handle seeds near window edges where discrete bin boundaries
-    // might clip valid positions.
-    let filter_start = cluster
-        .window_genome_start
-        .min(cluster.genome_start.saturating_sub(1_000_000));
-    let filter_end = cluster
-        .window_genome_end
-        .max(cluster.genome_end + 1_000_000);
-
-    for &seed_idx in &unique_seed_indices {
-        let seed = &seeds[seed_idx];
-
-        for (pos, strand) in seed.genome_positions(index) {
-            if strand != cluster.is_reverse {
-                continue;
-            }
-
-            // Re-verify match length at this specific genome position
-            let actual_length =
-                verify_match_at_position(read_seq, seed.read_pos, pos, strand, seed.length, index);
-
-            if actual_length < 8 {
-                continue;
-            }
-
-            // Convert to forward genome coordinates for filtering
-            let forward_pos = index.sa_pos_to_forward(pos, strand, actual_length);
-
-            let chr = match index.genome.position_to_chr(forward_pos) {
-                Some(info) => info.0,
-                None => continue,
-            };
-
-            if chr != cluster.chr_idx {
-                continue;
-            }
-
-            // Filter by combined window + tight bounds
-            if forward_pos < filter_start || forward_pos > filter_end {
-                continue;
-            }
-
-            expanded_seeds.push(ExpandedSeed {
-                read_pos: seed.read_pos,
-                read_end: seed.read_pos + actual_length,
-                genome_pos: pos,
-                genome_end: pos + actual_length as u64,
-                length: actual_length,
-            });
-        }
-    }
+    // Convert WindowAlignment entries directly to ExpandedSeeds.
+    // Each WA entry has a verified match length and raw SA position.
+    let mut expanded_seeds: Vec<ExpandedSeed> = cluster
+        .alignments
+        .iter()
+        .map(|wa| ExpandedSeed {
+            read_pos: wa.read_pos,
+            read_end: wa.read_pos + wa.length,
+            genome_pos: wa.sa_pos,
+            genome_end: wa.sa_pos + wa.length as u64,
+            length: wa.length,
+        })
+        .collect();
 
     if expanded_seeds.is_empty() {
         return Ok(Vec::new());
@@ -862,16 +956,42 @@ pub fn stitch_seeds_with_jdb(
         expanded_seeds.sort_by_key(|s| s.read_pos);
     }
 
+    // Pre-DP left extension: compute left extension score for every seed.
+    // STAR uses seed_length + left_extend_score as the DP base case, which gives
+    // seeds at true genome positions a large advantage over coincidental matches.
+    let left_ext_scores: Vec<i32> = expanded_seeds
+        .iter()
+        .map(|seed| {
+            if seed.read_pos > 0 {
+                extend_alignment(
+                    read_seq,
+                    seed.read_pos,
+                    seed.genome_pos,
+                    -1,
+                    seed.read_pos, // max = distance to read start
+                    0,
+                    seed.length, // seed length for mismatch ratio
+                    scorer.n_mm_max,
+                    scorer.p_mm_max,
+                    index,
+                    cluster.is_reverse,
+                )
+                .max_score
+            } else {
+                0
+            }
+        })
+        .collect();
+
     // Initialize DP: one state per expanded seed
     let n = expanded_seeds.len();
     let mut dp: Vec<DpState> = Vec::with_capacity(n);
 
-    // Base case: each seed starts with positive score for matches
-    // STAR uses +1 per matched base as the baseline score
-    for exp_seed in &expanded_seeds {
+    // Base case: seed_length + left_extension_score (STAR Pass 1)
+    for (i, exp_seed) in expanded_seeds.iter().enumerate() {
         let initial_cigar = vec![CigarOp::Match(exp_seed.length as u32)];
         dp.push(DpState {
-            score: exp_seed.length as i32, // Positive score: +1 per matched base
+            score: exp_seed.length as i32 + left_ext_scores[i],
             prev_seed: None,
             genome_pos: exp_seed.genome_pos,
             cigar_ops: initial_cigar,
@@ -1133,13 +1253,35 @@ pub fn stitch_seeds_with_jdb(
         // If no best_j, dp[i] keeps its initial state (single seed)
     }
 
-    // Backtrack from best final state
-    let best_final_idx = dp
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, state)| state.score)
-        .map(|(i, _)| i)
-        .unwrap();
+    // Select best chain endpoint using dp_score + right_extension_score (STAR Pass 2).
+    // Right extension rewards chains that end at true genome positions.
+    let mut best_final_idx = 0;
+    let mut best_total_score = i32::MIN;
+    for i in 0..n {
+        let right_ext_score = if expanded_seeds[i].read_end < read_seq.len() {
+            extend_alignment(
+                read_seq,
+                expanded_seeds[i].read_end,
+                expanded_seeds[i].genome_end,
+                1,
+                read_seq.len() - expanded_seeds[i].read_end,
+                dp[i].n_mismatch,
+                expanded_seeds[i].read_end, // cumulative aligned length
+                scorer.n_mm_max,
+                scorer.p_mm_max,
+                index,
+                cluster.is_reverse,
+            )
+            .max_score
+        } else {
+            0
+        };
+        let total = dp[i].score + right_ext_score;
+        if total > best_total_score {
+            best_total_score = total;
+            best_final_idx = i;
+        }
+    }
 
     let best_state = &dp[best_final_idx];
 
@@ -1283,8 +1425,11 @@ pub fn stitch_seeds_with_jdb(
     // Adjust genome start position for left extension (raw SA coordinates)
     let adjusted_genome_start = chain_start_seed.genome_pos - left_extend.extend_len as u64;
 
-    // Adjust score for extensions
-    let adjusted_score = best_state.score + left_extend.max_score + right_extend.max_score;
+    // Adjust score: remove approximate pre-DP left extension (baked into dp score),
+    // add authoritative post-DP left + right extensions (computed with full chain context)
+    let adjusted_score = best_state.score - left_ext_scores[chain_start_idx]
+        + left_extend.max_score
+        + right_extend.max_score;
 
     use crate::align::transcript::Exon;
 
@@ -1493,7 +1638,8 @@ mod tests {
         ];
 
         // Bin-based windowing: win_bin_nbits=16, win_anchor_dist_nbins=9, win_flank_nbins=4
-        let clusters = cluster_seeds(&seeds, &index, 16, 9, 4, 10, 50, 10);
+        let read_seq = vec![0u8; 20]; // Dummy read for verify_match_at_position
+        let clusters = cluster_seeds(&seeds, &read_seq, &index, 16, 9, 4, 10, 50, 50);
 
         // With empty SA ranges, no clusters will be created
         assert_eq!(clusters.len(), 0);

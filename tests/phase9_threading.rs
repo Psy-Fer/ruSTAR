@@ -6,39 +6,53 @@ use std::io::Write;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-/// Helper to create a simple test genome (larger for proper indexing)
-fn create_test_genome(dir: &TempDir) -> PathBuf {
-    let fasta_path = dir.path().join("genome.fa");
-    let mut file = fs::File::create(&fasta_path).unwrap();
-    writeln!(file, ">chr1").unwrap();
-    // Create a 1000bp chromosome with repetitive pattern
-    for _ in 0..50 {
-        write!(file, "ACGTACGTACGTACGTACGT").unwrap();
+/// Generate a pseudo-random genome sequence using an LCG PRNG.
+/// Avoids repetitive patterns so seeds have manageable SA ranges
+/// (compatible with bin-based windowing's anchor multimap filtering).
+fn generate_genome_seq(seed: u32, length: usize) -> String {
+    let bases = ['A', 'C', 'G', 'T'];
+    let mut state = seed;
+    let mut seq = String::with_capacity(length);
+    for _ in 0..length {
+        state = state.wrapping_mul(1103515245).wrapping_add(12345);
+        seq.push(bases[((state >> 16) & 3) as usize]);
     }
-    writeln!(file).unwrap();
-    writeln!(file, ">chr2").unwrap();
-    for _ in 0..50 {
-        write!(file, "TTGGCCAATTGGCCAATTGG").unwrap();
-    }
-    writeln!(file).unwrap();
-    fasta_path
+    seq
 }
 
-/// Helper to create test FASTQ with known reads
-fn create_test_fastq(dir: &TempDir, n_reads: usize) -> PathBuf {
+/// Helper to create a simple test genome (larger for proper indexing)
+fn create_test_genome(dir: &TempDir) -> (PathBuf, String, String) {
+    let fasta_path = dir.path().join("genome.fa");
+    let mut file = fs::File::create(&fasta_path).unwrap();
+
+    // Generate pseudo-random 1000bp chromosomes (unique 20-mers → SA ranges of 1-2)
+    let chr1_seq = generate_genome_seq(12345, 1000);
+    let chr2_seq = generate_genome_seq(67890, 1000);
+
+    writeln!(file, ">chr1").unwrap();
+    writeln!(file, "{}", chr1_seq).unwrap();
+    writeln!(file, ">chr2").unwrap();
+    writeln!(file, "{}", chr2_seq).unwrap();
+
+    (fasta_path, chr1_seq, chr2_seq)
+}
+
+/// Helper to create test FASTQ with known reads extracted from genome sequences
+fn create_test_fastq(dir: &TempDir, n_reads: usize, chr1_seq: &str, chr2_seq: &str) -> PathBuf {
     let fastq_path = dir.path().join("reads.fq");
     let mut file = fs::File::create(&fastq_path).unwrap();
 
     for i in 0..n_reads {
         writeln!(file, "@read{}", i + 1).unwrap();
-        // Reads that should map to chr1 (first 20bp)
+        // Extract 20bp reads from known positions in the genome
+        let read_start = (i * 7) % 980; // Stagger across the genome
         if i % 2 == 0 {
-            writeln!(file, "ACGTACGTACGTACGTACGT").unwrap(); // Exact match to chr1
+            writeln!(file, "{}", &chr1_seq[read_start..read_start + 20]).unwrap();
         } else {
-            writeln!(file, "TTGGCCAATTGGCCAATTGG").unwrap(); // Exact match to chr2
+            writeln!(file, "{}", &chr2_seq[read_start..read_start + 20]).unwrap();
         }
         writeln!(file, "+").unwrap();
-        writeln!(file, "IIIIIIIIIIIIIIIIIIII").unwrap(); // High quality
+        writeln!(file, "IIIIIIIIIIIIIIIIIIII").unwrap();
     }
 
     fastq_path
@@ -49,7 +63,7 @@ fn test_single_thread_alignment() {
     let tmpdir = TempDir::new().unwrap();
 
     // Create genome
-    let fasta_path = create_test_genome(&tmpdir);
+    let (fasta_path, chr1_seq, chr2_seq) = create_test_genome(&tmpdir);
     let genome_dir = tmpdir.path().join("genome");
 
     // Generate genome index
@@ -62,12 +76,12 @@ fn test_single_thread_alignment() {
         .arg("--genomeFastaFiles")
         .arg(&fasta_path)
         .arg("--genomeSAindexNbases")
-        .arg("3")
+        .arg("5")
         .assert()
         .success();
 
     // Create test reads
-    let fastq_path = create_test_fastq(&tmpdir, 100);
+    let fastq_path = create_test_fastq(&tmpdir, 100, &chr1_seq, &chr2_seq);
     let output_dir = tmpdir.path().join("output_1t");
 
     // Align with 1 thread
@@ -110,7 +124,7 @@ fn test_multi_thread_alignment() {
     let tmpdir = TempDir::new().unwrap();
 
     // Create genome
-    let fasta_path = create_test_genome(&tmpdir);
+    let (fasta_path, chr1_seq, chr2_seq) = create_test_genome(&tmpdir);
     let genome_dir = tmpdir.path().join("genome");
 
     // Generate genome index
@@ -123,12 +137,12 @@ fn test_multi_thread_alignment() {
         .arg("--genomeFastaFiles")
         .arg(&fasta_path)
         .arg("--genomeSAindexNbases")
-        .arg("3")
+        .arg("5")
         .assert()
         .success();
 
     // Create test reads
-    let fastq_path = create_test_fastq(&tmpdir, 100);
+    let fastq_path = create_test_fastq(&tmpdir, 100, &chr1_seq, &chr2_seq);
     let output_dir = tmpdir.path().join("output_4t");
 
     // Align with 4 threads
@@ -168,7 +182,7 @@ fn test_thread_count_consistency() {
     let tmpdir = TempDir::new().unwrap();
 
     // Create genome
-    let fasta_path = create_test_genome(&tmpdir);
+    let (fasta_path, chr1_seq, chr2_seq) = create_test_genome(&tmpdir);
     let genome_dir = tmpdir.path().join("genome");
 
     // Generate genome index
@@ -181,12 +195,12 @@ fn test_thread_count_consistency() {
         .arg("--genomeFastaFiles")
         .arg(&fasta_path)
         .arg("--genomeSAindexNbases")
-        .arg("3")
+        .arg("5")
         .assert()
         .success();
 
     // Create test reads
-    let fastq_path = create_test_fastq(&tmpdir, 200);
+    let fastq_path = create_test_fastq(&tmpdir, 200, &chr1_seq, &chr2_seq);
 
     // Run with 1 thread
     let output_1t = tmpdir.path().join("output_1t");

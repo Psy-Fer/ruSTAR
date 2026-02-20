@@ -86,16 +86,18 @@ pub fn align_read(
     }
 
     // Step 2: Cluster seeds (STAR's bin-based windowing)
+    // seed_per_window_nmax capacity eviction is handled inside cluster_seeds()
     let max_loci_for_anchor = 10; // Seeds mapping to <=10 loci can be anchors
     let clusters = cluster_seeds(
         &seeds,
+        read_seq,
         index,
         params.win_bin_nbits,
         params.win_anchor_dist_nbins,
         params.win_flank_nbins,
         max_loci_for_anchor,
         params.win_anchor_multimap_nmax,
-        params.seed_none_loci_per_window,
+        params.seed_per_window_nmax,
     );
 
     if clusters.is_empty() {
@@ -106,32 +108,6 @@ pub fn align_read(
     let mut clusters = clusters;
     clusters.truncate(params.align_windows_per_read_nmax);
 
-    // Cap seeds per cluster (seedPerWindowNmax)
-    // Count unique seed indices, not total pinned entries — a single seed with multiple
-    // pinned positions should count as 1 toward the limit, matching the old seed_indices behavior.
-    for cluster in &mut clusters {
-        let mut unique_count = 0usize;
-        let mut last_seen_limit_idx = None;
-        // Count unique seed_idx values from the front
-        for (i, pinned) in cluster.pinned_seeds.iter().enumerate() {
-            if last_seen_limit_idx.is_none()
-                || !cluster.pinned_seeds[..i]
-                    .iter()
-                    .any(|p| p.seed_idx == pinned.seed_idx)
-            {
-                unique_count += 1;
-                if unique_count > params.seed_per_window_nmax {
-                    // Truncate: keep all entries up to (but not including) this new unique seed
-                    last_seen_limit_idx = Some(i);
-                    break;
-                }
-            }
-        }
-        if let Some(limit_idx) = last_seen_limit_idx {
-            cluster.pinned_seeds.truncate(limit_idx);
-        }
-    }
-
     // Step 2a: Filter clusters by seed coverage (winReadCoverageRelativeMin)
     let read_length = read_seq.len();
     let min_coverage = params.win_read_coverage_relative_min;
@@ -140,13 +116,12 @@ pub fn align_read(
         .filter(|cluster| {
             // Compute total seed coverage for this cluster (union of read ranges)
             let mut covered = vec![false; read_length];
-            for pinned in &cluster.pinned_seeds {
-                let seed = &seeds[pinned.seed_idx];
-                let end = seed.read_pos + seed.length;
+            for wa in &cluster.alignments {
+                let end = wa.read_pos + wa.length;
                 for c in covered
                     .iter_mut()
                     .take(end.min(read_length))
-                    .skip(seed.read_pos)
+                    .skip(wa.read_pos)
                 {
                     *c = true;
                 }
@@ -165,9 +140,8 @@ pub fn align_read(
     if params.chim_segment_min > 0 && clusters.len() > 1 {
         use crate::chimeric::ChimericDetector;
         let detector = ChimericDetector::new(params);
-        chimeric_alignments.extend(
-            detector.detect_from_multi_clusters(&clusters, &seeds, read_seq, read_name, index)?,
-        );
+        chimeric_alignments
+            .extend(detector.detect_from_multi_clusters(&clusters, read_seq, read_name, index)?);
     }
 
     // Step 3: Stitch seeds within each cluster
@@ -183,7 +157,7 @@ pub fn align_read(
 
     for cluster in clusters.iter() {
         let cluster_transcripts =
-            stitch_seeds_with_jdb(cluster, &seeds, read_seq, index, &scorer, junction_db)?;
+            stitch_seeds_with_jdb(cluster, read_seq, index, &scorer, junction_db)?;
         transcripts.extend(cluster_transcripts);
     }
 
@@ -476,13 +450,14 @@ fn rescue_unmapped_mate(
     let max_loci_for_anchor = 10;
     let clusters = cluster_seeds(
         &filtered_seeds,
+        unmapped_seq,
         index,
         params.win_bin_nbits,
         params.win_anchor_dist_nbins,
         params.win_flank_nbins,
         max_loci_for_anchor,
         params.win_anchor_multimap_nmax,
-        params.seed_none_loci_per_window,
+        params.seed_per_window_nmax,
     );
 
     if clusters.is_empty() {
@@ -498,14 +473,8 @@ fn rescue_unmapped_mate(
 
     let mut transcripts = Vec::new();
     for cluster in clusters.iter().take(params.align_windows_per_read_nmax) {
-        let cluster_transcripts = stitch_seeds_with_jdb(
-            cluster,
-            &filtered_seeds,
-            unmapped_seq,
-            index,
-            &scorer,
-            junction_db,
-        )?;
+        let cluster_transcripts =
+            stitch_seeds_with_jdb(cluster, unmapped_seq, index, &scorer, junction_db)?;
         transcripts.extend(cluster_transcripts);
     }
 

@@ -1,5 +1,5 @@
 /// Seed clustering and stitching via dynamic programming
-use crate::align::score::{AlignmentScorer, GapType};
+use crate::align::score::AlignmentScorer;
 use crate::align::seed::Seed;
 use crate::align::transcript::{CigarOp, Transcript};
 use crate::error::Error;
@@ -676,222 +676,329 @@ pub fn cluster_seeds(
     clusters
 }
 
-/// DP state for seed stitching
+/// Lightweight exon block for in-progress transcript during recursion
 #[derive(Debug, Clone)]
-struct DpState {
+struct ExonBlock {
+    read_start: usize, // 0-based inclusive
+    read_end: usize,   // 0-based exclusive
+    genome_start: u64, // SA coordinate space (raw sa_pos)
+    genome_end: u64,   // SA coordinate space (exclusive)
+}
+
+/// In-progress transcript during recursive search (cheap to clone)
+#[derive(Debug, Clone)]
+struct WorkingTranscript {
+    exons: Vec<ExonBlock>,
     score: i32,
-    prev_seed: Option<usize>,
-    genome_pos: u64,
-    cigar_ops: Vec<CigarOp>,
     n_mismatch: u32,
     n_gap: u32,
     n_junction: u32,
     junction_motifs: Vec<crate::align::score::SpliceMotif>,
     junction_annotated: Vec<bool>,
-}
-
-/// Expanded seed with specific genome position
-#[derive(Debug, Clone)]
-struct ExpandedSeed {
-    read_pos: usize,
+    n_anchor: u32,
+    // Tight bounds for extension at finalization
+    read_start: usize,
     read_end: usize,
-    /// Raw SA position (used for genome base access and internal DP calculations).
-    /// For reverse strand, genome access is at sa_pos + n_genome.
-    genome_pos: u64,
+    genome_start: u64,
     genome_end: u64,
-    length: usize,
 }
 
-/// Post-DP junction optimization: apply jR scanning to each splice junction in the
-/// winning chain's CIGAR. This matches STAR's architecture where stitchAlignToTranscript
-/// is called per adjacent pair in the chosen path, NOT in the O(n²) DP search.
-///
-/// Walks the CIGAR, and for each RefSkip (splice junction), scans all possible boundary
-/// positions to find the one that maximizes read-genome match quality + splice motif score.
-/// Returns an optimized CIGAR with adjusted Match lengths around RefSkips, plus updated
-/// junction motifs and annotation flags.
-#[allow(clippy::too_many_arguments)]
-fn optimize_junction_positions(
-    cigar_ops: &[CigarOp],
-    junction_motifs: &[crate::align::score::SpliceMotif],
-    junction_annotated: &[bool],
-    genome_start: u64,
-    read_seq: &[u8],
-    scorer: &AlignmentScorer,
-    genome: &crate::genome::Genome,
-    is_reverse: bool,
-    n_genome: u64,
-) -> (
-    Vec<CigarOp>,
-    Vec<crate::align::score::SpliceMotif>,
-    Vec<bool>,
-) {
-    // Quick exit: no junctions to optimize
-    if junction_motifs.is_empty() {
-        return (
-            cigar_ops.to_vec(),
-            junction_motifs.to_vec(),
-            junction_annotated.to_vec(),
-        );
-    }
-
-    let mut result_cigar = Vec::with_capacity(cigar_ops.len());
-    let mut result_motifs = Vec::with_capacity(junction_motifs.len());
-    let mut result_annotated = Vec::with_capacity(junction_annotated.len());
-    let mut junction_idx = 0usize;
-
-    // Track positions as we walk the CIGAR (in SA coordinate space)
-    let mut read_pos = 0usize;
-    let mut genome_pos = genome_start;
-
-    let mut i = 0;
-    while i < cigar_ops.len() {
-        match cigar_ops[i] {
-            CigarOp::RefSkip(intron_len) => {
-                // Found a splice junction — apply jR scanning
-                // Get the preceding Match length (donor exon boundary)
-                let prev_match_len = match result_cigar.last() {
-                    Some(CigarOp::Match(len)) => *len,
-                    _ => 0,
-                };
-
-                // Get the following Match length (acceptor exon boundary)
-                let next_match_len = match cigar_ops.get(i + 1) {
-                    Some(CigarOp::Match(len)) => *len,
-                    _ => 0,
-                };
-
-                // Call jR scanning: r_gap = next_match_len (rightward bound),
-                // g_gap = intron_len + next_match_len (so del = g_gap - r_gap = intron_len)
-                let (jr_shift, new_motif, _motif_score) = scorer.find_best_junction_position(
-                    read_seq,
-                    read_pos,
-                    genome_pos,
-                    next_match_len as i64,
-                    intron_len as i64 + next_match_len as i64,
-                    genome,
-                    is_reverse,
-                    n_genome,
-                    prev_match_len as usize,
-                );
-
-                // Clamp jr_shift to valid range: neither flanking Match can go negative
-                let jr_shift = jr_shift
-                    .max(-(prev_match_len as i32))
-                    .min(next_match_len as i32);
-
-                // Apply the shift to surrounding Matches
-                if jr_shift != 0 {
-                    // Adjust donor Match (before RefSkip) — guaranteed >= 0 by clamping
-                    let new_prev = (prev_match_len as i32 + jr_shift) as u32;
-                    if let Some(CigarOp::Match(len)) = result_cigar.last_mut() {
-                        *len = new_prev;
-                        if *len == 0 {
-                            result_cigar.pop();
-                        }
-                    }
-
-                    // Emit RefSkip (intron length unchanged)
-                    result_cigar.push(CigarOp::RefSkip(intron_len));
-
-                    // Adjust acceptor Match (after RefSkip) — will be handled below
-                    let new_next = (next_match_len as i32 - jr_shift).max(0) as u32;
-                    if new_next > 0 {
-                        result_cigar.push(CigarOp::Match(new_next));
-                    }
-
-                    // Update genome/read positions: the shift moved the boundary
-                    // genome_pos was at the junction boundary; now advance past intron + acceptor
-                    genome_pos += intron_len as u64 + next_match_len as u64;
-                    read_pos += next_match_len as usize;
-
-                    // Skip the next Match op since we already handled it
-                    i += 2;
-                } else {
-                    // No shift needed — emit RefSkip as-is
-                    result_cigar.push(CigarOp::RefSkip(intron_len));
-                    genome_pos += intron_len as u64;
-                    i += 1;
-                }
-
-                // Record the (possibly updated) motif
-                result_motifs.push(new_motif);
-                if junction_idx < junction_annotated.len() {
-                    result_annotated.push(junction_annotated[junction_idx]);
-                }
-                junction_idx += 1;
-            }
-            CigarOp::Match(len) => {
-                // Merge with previous Match if possible
-                if let Some(CigarOp::Match(prev_len)) = result_cigar.last_mut() {
-                    *prev_len += len;
-                } else {
-                    result_cigar.push(CigarOp::Match(len));
-                }
-                read_pos += len as usize;
-                genome_pos += len as u64;
-                i += 1;
-            }
-            CigarOp::Ins(len) => {
-                result_cigar.push(CigarOp::Ins(len));
-                read_pos += len as usize;
-                i += 1;
-            }
-            CigarOp::Del(len) => {
-                result_cigar.push(CigarOp::Del(len));
-                genome_pos += len as u64;
-                i += 1;
-            }
-            other => {
-                result_cigar.push(other);
-                match other {
-                    CigarOp::SoftClip(len) | CigarOp::Equal(len) | CigarOp::Diff(len) => {
-                        read_pos += len as usize;
-                        if matches!(other, CigarOp::Equal(_) | CigarOp::Diff(_)) {
-                            genome_pos += len as u64;
-                        }
-                    }
-                    CigarOp::HardClip(_) => {}
-                    _ => {}
-                }
-                i += 1;
-            }
+impl WorkingTranscript {
+    fn new() -> Self {
+        WorkingTranscript {
+            exons: Vec::new(),
+            score: 0,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: Vec::new(),
+            junction_annotated: Vec::new(),
+            n_anchor: 0,
+            read_start: 0,
+            read_end: 0,
+            genome_start: 0,
+            genome_end: 0,
         }
     }
-
-    // Verify: total read-consuming bases must be unchanged
-    let original_read_len: u32 = cigar_ops
-        .iter()
-        .map(|op| match op {
-            CigarOp::Match(n)
-            | CigarOp::Ins(n)
-            | CigarOp::SoftClip(n)
-            | CigarOp::Equal(n)
-            | CigarOp::Diff(n) => *n,
-            _ => 0,
-        })
-        .sum();
-    let optimized_read_len: u32 = result_cigar
-        .iter()
-        .map(|op| match op {
-            CigarOp::Match(n)
-            | CigarOp::Ins(n)
-            | CigarOp::SoftClip(n)
-            | CigarOp::Equal(n)
-            | CigarOp::Diff(n) => *n,
-            _ => 0,
-        })
-        .sum();
-    debug_assert_eq!(
-        original_read_len, optimized_read_len,
-        "jR optimization changed read-consuming CIGAR length: {} -> {}, cigar_ops={:?}, result={:?}",
-        original_read_len, optimized_read_len, cigar_ops, result_cigar
-    );
-
-    (result_cigar, result_motifs, result_annotated)
 }
 
-/// Stitch seeds within a cluster using dynamic programming.
+/// Fill the gap between the last exon in a WorkingTranscript and the next WA entry.
+/// Returns None if stitching fails (mismatch limit, overhang too short, etc.).
+/// Matches STAR's stitchAlignToTranscript.cpp logic.
+#[allow(clippy::too_many_arguments)]
+fn stitch_align_to_transcript(
+    wt: &WorkingTranscript,
+    wa: &WindowAlignment,
+    read_seq: &[u8],
+    index: &GenomeIndex,
+    scorer: &AlignmentScorer,
+    cluster: &SeedCluster,
+    junction_db: Option<&crate::junction::SpliceJunctionDb>,
+) -> Option<WorkingTranscript> {
+    let last_exon = wt.exons.last().unwrap();
+
+    // Overlap trimming: if new WA overlaps previous exon in read coords, shift start right
+    let mut eff_read_pos = wa.read_pos;
+    let mut eff_genome_pos = wa.sa_pos;
+    let mut eff_length = wa.length;
+
+    if last_exon.read_end > eff_read_pos {
+        let overlap = last_exon.read_end - eff_read_pos;
+        if overlap >= eff_length {
+            return None; // Fully consumed
+        }
+        eff_read_pos = last_exon.read_end;
+        eff_genome_pos += overlap as u64;
+        eff_length -= overlap;
+    }
+
+    // Handle genome overlap
+    if last_exon.genome_end > eff_genome_pos && eff_genome_pos > last_exon.genome_start {
+        let g_overlap = (last_exon.genome_end - eff_genome_pos) as usize;
+        if g_overlap >= eff_length {
+            return None; // Fully consumed
+        }
+        eff_read_pos += g_overlap;
+        eff_genome_pos += g_overlap as u64;
+        eff_length -= g_overlap;
+    }
+
+    let read_gap = (eff_read_pos as i64) - (last_exon.read_end as i64);
+    let genome_gap = (eff_genome_pos as i64) - (last_exon.genome_end as i64);
+
+    // Reject negative gaps
+    if read_gap < 0 || genome_gap < 0 {
+        return None;
+    }
+
+    let mut new_wt = wt.clone();
+    let mut d_score: i32 = 0;
+    let mut gap_mm: u32 = 0;
+
+    if read_gap == 0 && genome_gap == 0 {
+        // Adjacent seeds — just extend the last exon
+        if let Some(last) = new_wt.exons.last_mut() {
+            last.read_end = eff_read_pos + eff_length;
+            last.genome_end = eff_genome_pos + eff_length as u64;
+        }
+    } else if read_gap == genome_gap {
+        // Equal gap: base-by-base scoring
+        let shared = read_gap as usize;
+        gap_mm = count_mismatches_in_region(
+            read_seq,
+            last_exon.read_end,
+            last_exon.genome_end,
+            shared,
+            index,
+            cluster.is_reverse,
+        );
+        d_score += shared as i32 - 2 * gap_mm as i32;
+
+        // Extend last exon through the gap and the new seed
+        if let Some(last) = new_wt.exons.last_mut() {
+            last.read_end = eff_read_pos + eff_length;
+            last.genome_end = eff_genome_pos + eff_length as u64;
+        }
+    } else if genome_gap > read_gap {
+        // Deletion or splice junction
+        let del = (genome_gap - read_gap) as u32;
+        let shared = read_gap as usize;
+
+        // Score shared bases on donor side
+        let shared_mm = if shared > 0 {
+            count_mismatches_in_region(
+                read_seq,
+                last_exon.read_end,
+                last_exon.genome_end,
+                shared,
+                index,
+                cluster.is_reverse,
+            )
+        } else {
+            0
+        };
+        gap_mm += shared_mm;
+        d_score += shared as i32 - 2 * shared_mm as i32;
+
+        if del >= scorer.align_intron_min && del <= scorer.align_intron_max {
+            // Splice junction — apply jR scanning
+            let donor_sa = last_exon.genome_end + shared as u64;
+            let (jr_shift, motif, motif_score) = scorer.find_best_junction_position(
+                read_seq,
+                last_exon.read_end + shared,
+                donor_sa,
+                read_gap.max(0),
+                genome_gap,
+                &index.genome,
+                cluster.is_reverse,
+                index.genome.n_genome,
+                last_exon.read_end - last_exon.read_start + shared,
+            );
+
+            // Clamp shift: must not consume entire donor or acceptor
+            let prev_match_len = (last_exon.read_end - last_exon.read_start + shared) as i32;
+            let jr_shift = jr_shift
+                .max(-prev_match_len)
+                .min(read_gap as i32)
+                .min(eff_length as i32);
+
+            // Check stitch mismatch limit
+            if !scorer.stitch_mismatch_allowed(&motif, gap_mm) {
+                return None;
+            }
+
+            // Overhang check (use post-shift values)
+            let left_overhang =
+                ((last_exon.read_end - last_exon.read_start) as i32 + shared as i32 + jr_shift)
+                    .max(0) as usize;
+            let right_overhang = (eff_length as i32 - jr_shift).max(0) as usize;
+
+            // Check annotation
+            let is_annotated = junction_db.is_some_and(|db| {
+                let junc_donor_sa = (donor_sa as i64 + jr_shift as i64) as u64;
+                let donor_fwd =
+                    index.sa_pos_to_forward(junc_donor_sa, cluster.is_reverse, del as usize);
+                let acceptor_fwd = donor_fwd + del as u64;
+                db.is_annotated(cluster.chr_idx, donor_fwd, acceptor_fwd, 0)
+                    || db.is_annotated(cluster.chr_idx, donor_fwd, acceptor_fwd, 1)
+                    || db.is_annotated(cluster.chr_idx, donor_fwd, acceptor_fwd, 2)
+            });
+
+            let min_overhang = if is_annotated {
+                scorer.align_sjdb_overhang_min as usize
+            } else {
+                scorer.align_sj_overhang_min as usize
+            };
+
+            if left_overhang < min_overhang || right_overhang < min_overhang {
+                return None;
+            }
+
+            d_score += motif_score - scorer.score_stitch_sj_shift;
+            if is_annotated {
+                d_score += scorer.sjdb_score;
+            }
+
+            // Adjust last exon for jr_shift
+            if jr_shift != 0 {
+                if let Some(last) = new_wt.exons.last_mut() {
+                    last.read_end =
+                        (last.read_end as i64 + shared as i64 + jr_shift as i64) as usize;
+                    last.genome_end =
+                        (last.genome_end as i64 + shared as i64 + jr_shift as i64) as u64;
+                }
+            } else if shared > 0 {
+                if let Some(last) = new_wt.exons.last_mut() {
+                    last.read_end += shared;
+                    last.genome_end += shared as u64;
+                }
+            }
+
+            // New exon for acceptor side
+            // jr_shift positive = junction moved right → acceptor starts later
+            // jr_shift negative = junction moved left → acceptor starts earlier
+            let acceptor_read_start = (eff_read_pos as i64 + jr_shift as i64) as usize;
+            let acceptor_genome_start = (eff_genome_pos as i64 + jr_shift as i64) as u64;
+            let acceptor_len = (eff_length as i64 - jr_shift as i64).max(0) as usize;
+            new_wt.exons.push(ExonBlock {
+                read_start: acceptor_read_start,
+                read_end: acceptor_read_start + acceptor_len,
+                genome_start: acceptor_genome_start,
+                genome_end: acceptor_genome_start + acceptor_len as u64,
+            });
+
+            new_wt.n_junction += 1;
+            new_wt.junction_motifs.push(motif);
+            new_wt.junction_annotated.push(is_annotated);
+        } else {
+            // Deletion (too short/long for intron)
+            let del_score = scorer.score_del_open + scorer.score_del_base * del as i32;
+            d_score += del_score;
+            new_wt.n_gap += 1;
+
+            // Extend last exon through shared bases
+            if shared > 0 {
+                if let Some(last) = new_wt.exons.last_mut() {
+                    last.read_end += shared;
+                    last.genome_end += shared as u64;
+                }
+            }
+
+            // New exon after deletion
+            new_wt.exons.push(ExonBlock {
+                read_start: eff_read_pos,
+                read_end: eff_read_pos + eff_length,
+                genome_start: eff_genome_pos,
+                genome_end: eff_genome_pos + eff_length as u64,
+            });
+        }
+    } else {
+        // Insertion: read_gap > genome_gap
+        let ins = (read_gap - genome_gap) as u32;
+        let shared = genome_gap as usize;
+
+        let shared_mm = if shared > 0 {
+            count_mismatches_in_region(
+                read_seq,
+                last_exon.read_end,
+                last_exon.genome_end,
+                shared,
+                index,
+                cluster.is_reverse,
+            )
+        } else {
+            0
+        };
+        gap_mm += shared_mm;
+        d_score += shared as i32 - 2 * shared_mm as i32;
+
+        let ins_score = scorer.score_ins_open + scorer.score_ins_base * ins as i32;
+        d_score += ins_score;
+        new_wt.n_gap += 1;
+
+        // Extend last exon through shared genome bases
+        if shared > 0 {
+            if let Some(last) = new_wt.exons.last_mut() {
+                last.read_end += shared;
+                last.genome_end += shared as u64;
+            }
+        }
+
+        // New exon after insertion
+        new_wt.exons.push(ExonBlock {
+            read_start: eff_read_pos,
+            read_end: eff_read_pos + eff_length,
+            genome_start: eff_genome_pos,
+            genome_end: eff_genome_pos + eff_length as u64,
+        });
+    }
+
+    // Mismatch limit check
+    let total_mm = new_wt.n_mismatch + gap_mm;
+    let total_len = new_wt.read_end.max(eff_read_pos + eff_length) - new_wt.read_start;
+    let mm_limit = ((scorer.p_mm_max * total_len as f64) as u32).min(scorer.n_mm_max);
+    if total_mm > mm_limit {
+        return None;
+    }
+
+    // Update working transcript
+    // Seeds from SA are exact matches (0 internal mismatches).
+    // Mismatches are only in gap-fill shared bases (counted in d_score) and extensions.
+    new_wt.score += d_score + eff_length as i32;
+    new_wt.n_mismatch += gap_mm;
+    new_wt.read_end = new_wt.exons.last().map_or(new_wt.read_end, |e| e.read_end);
+    new_wt.genome_end = new_wt
+        .exons
+        .last()
+        .map_or(new_wt.genome_end, |e| e.genome_end);
+    if wa.is_anchor {
+        new_wt.n_anchor += 1;
+    }
+
+    Some(new_wt)
+}
+
+/// Stitch seeds within a cluster using recursive combinatorial stitching.
 ///
 /// # Arguments
 /// * `cluster` - Seed cluster with WindowAlignment entries (STAR's WA array)
@@ -912,15 +1019,12 @@ pub fn stitch_seeds(
 
 /// Stitch seeds with optional junction database for annotation-aware scoring.
 ///
-/// Converts WindowAlignment entries directly to ExpandedSeeds for the DP.
-/// This matches STAR's architecture where the WA array IS the DP input —
-/// no SA range re-expansion needed. Each WA entry represents one verified
-/// (seed, position) pair assigned during bin-based windowing.
+/// Uses STAR's recursive combinatorial stitcher (stitchWindowAligns) which
+/// explores include/exclude branches for each seed, allowing it to skip
+/// spurious short seeds that would create false splices.
 ///
-/// `max_transcripts_per_window` controls how many alternative DP endpoints
-/// are explored (STAR's `alignTranscriptsPerWindowNmax`, default 100).
-/// For rDNA and other tandem repeats, multiple endpoints correspond to
-/// different repeat copies, yielding correct NH/MAPQ values.
+/// `max_transcripts_per_window` controls how many transcripts are collected
+/// (STAR's `alignTranscriptsPerWindowNmax`, default 100).
 pub fn stitch_seeds_with_jdb(
     cluster: &SeedCluster,
     read_seq: &[u8],
@@ -929,485 +1033,78 @@ pub fn stitch_seeds_with_jdb(
     junction_db: Option<&crate::junction::SpliceJunctionDb>,
     max_transcripts_per_window: usize,
 ) -> Result<Vec<Transcript>, Error> {
-    // Convert WindowAlignment entries directly to ExpandedSeeds.
-    // Each WA entry has a verified match length and raw SA position.
-    let mut expanded_seeds: Vec<ExpandedSeed> = cluster
-        .alignments
-        .iter()
-        .map(|wa| ExpandedSeed {
-            read_pos: wa.read_pos,
-            read_end: wa.read_pos + wa.length,
-            genome_pos: wa.sa_pos,
-            genome_end: wa.sa_pos + wa.length as u64,
-            length: wa.length,
-        })
-        .collect();
-
-    if expanded_seeds.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Sort by read position, then by length descending (longest first for dedup)
-    expanded_seeds.sort_by(|a, b| a.read_pos.cmp(&b.read_pos).then(b.length.cmp(&a.length)));
-
-    // Deduplicate: keep only the longest seed per (read_pos, genome_pos) pair
-    expanded_seeds.dedup_by(|a, b| a.read_pos == b.read_pos && a.genome_pos == b.genome_pos);
-
-    // Cap expanded seeds to prevent pathological O(n²) DP on repetitive regions.
-    // Note: STAR caps at seedPerWindowNmax=50 during window assignment, but our Phase 1
-    // bypasses that cap. This cap catches overflow from Phase 1.
-    const MAX_EXPANDED_SEEDS: usize = 200;
-    if expanded_seeds.len() > MAX_EXPANDED_SEEDS {
-        expanded_seeds.sort_by(|a, b| b.length.cmp(&a.length));
-        expanded_seeds.truncate(MAX_EXPANDED_SEEDS);
-        expanded_seeds.sort_by_key(|s| s.read_pos);
-    }
-
-    // Pre-DP left extension: compute left extension score for every seed.
-    // STAR uses seed_length + left_extend_score as the DP base case, which gives
-    // seeds at true genome positions a large advantage over coincidental matches.
-    let left_ext_scores: Vec<i32> = expanded_seeds
-        .iter()
-        .map(|seed| {
-            if seed.read_pos > 0 {
-                extend_alignment(
-                    read_seq,
-                    seed.read_pos,
-                    seed.genome_pos,
-                    -1,
-                    seed.read_pos, // max = distance to read start
-                    0,
-                    100_000, // Lprev=100000 matches STAR
-                    scorer.n_mm_max,
-                    scorer.p_mm_max,
-                    index,
-                    cluster.is_reverse,
-                )
-                .max_score
-            } else {
-                0
-            }
-        })
-        .collect();
-
-    // Initialize DP: one state per expanded seed
-    let n = expanded_seeds.len();
-    let mut dp: Vec<DpState> = Vec::with_capacity(n);
-
-    // Base case: seed_length + left_extension_score (STAR Pass 1)
-    for (i, exp_seed) in expanded_seeds.iter().enumerate() {
-        let initial_cigar = vec![CigarOp::Match(exp_seed.length as u32)];
-        dp.push(DpState {
-            score: exp_seed.length as i32 + left_ext_scores[i],
-            prev_seed: None,
-            genome_pos: exp_seed.genome_pos,
-            cigar_ops: initial_cigar,
-            n_mismatch: 0,
-            n_gap: 0,
-            n_junction: 0,
-            junction_motifs: Vec::new(),
-            junction_annotated: Vec::new(),
-        });
-    }
-
-    // DP: for each seed, try connecting to all compatible previous seeds
-    // Optimization: find best j first, then build CIGAR only once (avoids repeated cloning)
-    for i in 1..n {
-        let curr = &expanded_seeds[i];
-        let mut best_score = dp[i].score;
-        let mut best_j: Option<usize> = None;
-        let mut best_gap_type = GapType::Deletion(0);
-        let mut best_read_gap = 0i64;
-        let mut best_genome_gap = 0i64;
-        let mut best_gap_mismatches = 0u32;
-        let mut best_eff_length = curr.length;
-        let mut best_is_annotated = false;
-
-        for j in 0..i {
-            let prev = &expanded_seeds[j];
-
-            // STAR-style overlap trimming: if seeds overlap in read, trim seed B's start
-            let mut eff_read_pos = curr.read_pos;
-            let mut eff_genome_pos = curr.genome_pos;
-            let mut eff_length = curr.length;
-
-            if prev.read_end > eff_read_pos {
-                let overlap = prev.read_end - eff_read_pos;
-                if overlap >= eff_length {
-                    continue; // Seed B fully consumed by overlap
-                }
-                eff_read_pos = prev.read_end;
-                eff_genome_pos += overlap as u64;
-                eff_length -= overlap;
-            }
-
-            // Similarly handle genome overlap
-            if prev.genome_end > eff_genome_pos && eff_genome_pos > prev.genome_pos {
-                let g_overlap = (prev.genome_end - eff_genome_pos) as usize;
-                if g_overlap >= eff_length {
-                    continue; // Seed B fully consumed by genome overlap
-                }
-                eff_read_pos += g_overlap;
-                eff_genome_pos += g_overlap as u64;
-                eff_length -= g_overlap;
-            }
-
-            // Calculate gaps using effective (trimmed) coordinates
-            let read_gap = (eff_read_pos as i64) - (prev.read_end as i64);
-            let genome_gap = (eff_genome_pos as i64) - (prev.genome_end as i64);
-
-            // Score the gap — pass strand info for correct splice motif detection
-            let (gap_score, gap_type) = scorer.score_gap_with_strand(
-                genome_gap,
-                read_gap,
-                prev.genome_end,
-                &index.genome,
-                cluster.is_reverse,
-                index.genome.n_genome,
-            );
-
-            // Count mismatches in the gap region (shared match portion)
-            let gap_mismatches = if read_gap > 0 && genome_gap > 0 {
-                let shared = (read_gap.min(genome_gap)) as usize;
-                if shared > 0 {
-                    count_mismatches_in_region(
-                        read_seq,
-                        prev.read_end,
-                        prev.genome_end,
-                        shared,
-                        index,
-                        cluster.is_reverse,
-                    )
-                } else {
-                    0
-                }
-            } else {
-                0
-            };
-
-            // Apply alignSJstitchMismatchNmax filter
-            // STAR rejects junction stitches with too many mismatches for the motif type
-            let mut annotation_bonus = 0i32;
-            let mut is_annotated = false;
-            if let GapType::SpliceJunction {
-                ref motif,
-                intron_len,
-            } = gap_type
-            {
-                if !scorer.stitch_mismatch_allowed(motif, gap_mismatches) {
-                    continue; // Reject: too many mismatches at this junction type
-                }
-
-                // Enforce minimum overhang (alignSJoverhangMin / alignSJDBoverhangMin)
-                // Left overhang = length of the preceding seed (immediately flanks the junction)
-                // Right overhang = effective length of current seed after overlap trimming
-                let left_overhang = prev.length;
-                let right_overhang = eff_length;
-
-                // Check if this junction is annotated (for lower overhang threshold + bonus)
-                is_annotated = junction_db.is_some_and(|db| {
-                    // Convert genome positions to forward coordinates for junction lookup
-                    let donor_sa_pos = prev.genome_end;
-                    let donor_fwd = index.sa_pos_to_forward(
-                        donor_sa_pos,
-                        cluster.is_reverse,
-                        intron_len as usize,
-                    );
-                    let acceptor_fwd = donor_fwd + intron_len as u64;
-                    // Lookup with strand 0 (unknown) first, then try both strands
-                    db.is_annotated(cluster.chr_idx, donor_fwd, acceptor_fwd, 0)
-                        || db.is_annotated(cluster.chr_idx, donor_fwd, acceptor_fwd, 1)
-                        || db.is_annotated(cluster.chr_idx, donor_fwd, acceptor_fwd, 2)
-                });
-
-                // Use lower overhang threshold for annotated junctions
-                let base_min_overhang = if is_annotated {
-                    scorer.align_sjdb_overhang_min as usize
-                } else {
-                    scorer.align_sj_overhang_min as usize
-                };
-
-                // Use alignSJoverhangMin (5bp) or alignSJDBoverhangMin (3bp) during DP,
-                // matching STAR. Stricter outSJfilterOverhangMin applied at SJ.out.tab write time.
-                if left_overhang < base_min_overhang || right_overhang < base_min_overhang {
-                    continue;
-                }
-
-                // Apply annotation bonus during DP (STAR's sjdbScore)
-                if is_annotated {
-                    annotation_bonus = scorer.sjdb_score;
-                }
-            }
-
-            // STAR: shared region scores +1 per match, -1 per mismatch
-            // Total = shared_length - 2*mismatches (each mismatch flips from +1 to -1)
-            let shared_bases = if read_gap > 0 && genome_gap > 0 {
-                read_gap.min(genome_gap) as i32
-            } else {
-                0
-            };
-            let shared_score = shared_bases - (2 * gap_mismatches as i32);
-
-            // Transition score = prev_score + gap_penalty + shared_region_score + current_seed_match_score + annotation_bonus
-            let transition_score =
-                dp[j].score + gap_score + shared_score + (eff_length as i32) + annotation_bonus;
-
-            if transition_score > best_score {
-                best_score = transition_score;
-                best_j = Some(j);
-                best_gap_type = gap_type;
-                best_read_gap = read_gap;
-                best_genome_gap = genome_gap;
-                best_gap_mismatches = gap_mismatches;
-                best_eff_length = eff_length;
-                best_is_annotated = is_annotated;
-            }
-        }
-
-        // Build CIGAR only once for the best transition (instead of cloning per candidate)
-        if let Some(j) = best_j {
-            let mut cigar = dp[j].cigar_ops.clone();
-
-            // Emit CIGAR operations for the gap between seeds
-            // Handle negative gaps explicitly to avoid integer overflow
-            if best_read_gap == 0 && best_genome_gap == 0 {
-                // No gap - seeds are adjacent
-            } else if best_read_gap < 0 || best_genome_gap < 0 {
-                // Negative gap indicates overlapping seeds or error
-                // score_gap() already penalized this, but we skip the connection
-                log::trace!(
-                    "Skipping connection with negative gap: read_gap={}, genome_gap={}",
-                    best_read_gap,
-                    best_genome_gap
-                );
-                continue;
-            } else if best_read_gap == 0 && best_genome_gap > 0 {
-                // Pure deletion or splice junction (read doesn't advance, genome does)
-                match best_gap_type {
-                    GapType::SpliceJunction { intron_len, .. } => {
-                        cigar.push(CigarOp::RefSkip(intron_len));
-                    }
-                    _ => {
-                        cigar.push(CigarOp::Del(best_genome_gap as u32));
-                    }
-                }
-            } else if best_read_gap > 0 && best_genome_gap == 0 {
-                // Pure insertion (read advances, genome doesn't)
-                cigar.push(CigarOp::Ins(best_read_gap as u32));
-            } else {
-                // Both gaps positive: combined gap region
-                let rg = best_read_gap as u32;
-                let gg = best_genome_gap as u32;
-
-                let shared = rg.min(gg);
-                let excess_genome = gg.saturating_sub(rg);
-                let excess_read = rg.saturating_sub(gg);
-
-                if shared > 0 {
-                    // Try to merge with previous Match operation
-                    if let Some(CigarOp::Match(prev_len)) = cigar.last_mut() {
-                        *prev_len += shared;
-                    } else {
-                        cigar.push(CigarOp::Match(shared));
-                    }
-                }
-                if excess_genome > 0 {
-                    match best_gap_type {
-                        GapType::SpliceJunction { intron_len, .. } => {
-                            cigar.push(CigarOp::RefSkip(intron_len));
-                        }
-                        _ => {
-                            cigar.push(CigarOp::Del(excess_genome));
-                        }
-                    }
-                }
-                if excess_read > 0 {
-                    cigar.push(CigarOp::Ins(excess_read));
-                }
-            }
-
-            // Add current seed match using effective length (after overlap trimming)
-            if let Some(CigarOp::Match(prev_len)) = cigar.last_mut() {
-                // Merge with previous Match operation
-                *prev_len += best_eff_length as u32;
-            } else {
-                // No previous Match, or previous op was not Match
-                cigar.push(CigarOp::Match(best_eff_length as u32));
-            }
-
-            let mut n_gap = dp[j].n_gap;
-            let mut n_junction = dp[j].n_junction;
-            let mut junction_motifs = dp[j].junction_motifs.clone();
-            let mut junction_annotated = dp[j].junction_annotated.clone();
-            match best_gap_type {
-                GapType::Insertion(_) | GapType::Deletion(_) => n_gap += 1,
-                GapType::SpliceJunction { motif, .. } => {
-                    n_junction += 1;
-                    junction_motifs.push(motif);
-                    junction_annotated.push(best_is_annotated);
-                }
-            }
-            dp[i].score = best_score;
-            dp[i].prev_seed = Some(j);
-            dp[i].genome_pos = curr.genome_pos;
-            dp[i].cigar_ops = cigar;
-            dp[i].n_mismatch = dp[j].n_mismatch + best_gap_mismatches;
-            dp[i].n_gap = n_gap;
-            dp[i].n_junction = n_junction;
-            dp[i].junction_motifs = junction_motifs;
-            dp[i].junction_annotated = junction_annotated;
-        }
-        // If no best_j, dp[i] keeps its initial state (single seed)
-    }
-
-    // Collect endpoint scores: dp_score + right_extension_score (STAR Pass 2).
-    // Right extension rewards chains that end at true genome positions.
-    let mut endpoint_scores: Vec<(i32, usize)> = Vec::with_capacity(n);
-    for i in 0..n {
-        let right_ext_score = if expanded_seeds[i].read_end < read_seq.len() {
-            extend_alignment(
-                read_seq,
-                expanded_seeds[i].read_end,
-                expanded_seeds[i].genome_end,
-                1,
-                read_seq.len() - expanded_seeds[i].read_end,
-                dp[i].n_mismatch,
-                100_000, // Lprev=100000 matches STAR
-                scorer.n_mm_max,
-                scorer.p_mm_max,
-                index,
-                cluster.is_reverse,
-            )
-            .max_score
-        } else {
-            0
-        };
-        let total = dp[i].score + right_ext_score;
-        endpoint_scores.push((total, i));
-    }
-
-    // Sort by score descending
-    endpoint_scores.sort_by(|a, b| b.0.cmp(&a.0));
-
-    // Build transcripts from top-N distinct chain endpoints
-    let mut transcripts: Vec<Transcript> = Vec::new();
-    let mut seen_chain_starts: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let best_score = endpoint_scores[0].0;
-
-    for &(score, endpoint_idx) in &endpoint_scores {
-        // Early termination: skip endpoints much worse than the best
-        // (they won't survive outFilterMultimapScoreRange filtering anyway)
-        if score < best_score - 1 {
-            break;
-        }
-
-        // Dedup by chain start: different endpoints in the same chain produce
-        // the same alignment (just truncated), so skip duplicates
-        let mut chain_start = endpoint_idx;
-        while let Some(prev) = dp[chain_start].prev_seed {
-            chain_start = prev;
-        }
-        if !seen_chain_starts.insert(chain_start) {
-            continue;
-        }
-
-        let transcript = build_transcript_from_endpoint(
-            endpoint_idx,
-            &dp,
-            &expanded_seeds,
-            &left_ext_scores,
-            read_seq,
-            index,
-            scorer,
-            cluster,
-        );
-        transcripts.push(transcript);
-
-        if transcripts.len() >= max_transcripts_per_window {
-            break;
-        }
-    }
-
-    Ok(transcripts)
+    stitch_seeds_with_jdb_debug(
+        cluster,
+        read_seq,
+        index,
+        scorer,
+        junction_db,
+        max_transcripts_per_window,
+        "",
+    )
 }
 
-/// Build a single transcript from a DP endpoint by tracing back the chain,
-/// optimizing junctions, extending into flanking regions, and constructing
-/// the final CIGAR and exon structure.
-fn build_transcript_from_endpoint(
-    endpoint_idx: usize,
-    dp: &[DpState],
-    expanded_seeds: &[ExpandedSeed],
-    left_ext_scores: &[i32],
+/// Check if two transcripts overlap in their exon blocks.
+/// Returns total overlapping bases (where exons share the same read-genome diagonal).
+/// Used for deduplication: if new transcript is a subset of existing, drop it.
+fn blocks_overlap(t1_exons: &[ExonBlock], t2_exons: &[ExonBlock]) -> u32 {
+    let mut overlap = 0u32;
+    let mut i = 0;
+    let mut j = 0;
+
+    while i < t1_exons.len() && j < t2_exons.len() {
+        let e1 = &t1_exons[i];
+        let e2 = &t2_exons[j];
+
+        // Check if exons are on the same read-genome diagonal
+        let diag1 = e1.genome_start as i64 - e1.read_start as i64;
+        let diag2 = e2.genome_start as i64 - e2.read_start as i64;
+
+        if diag1 == diag2 {
+            // Same diagonal — compute read-space overlap
+            let r_start = e1.read_start.max(e2.read_start);
+            let r_end = e1.read_end.min(e2.read_end);
+            if r_start < r_end {
+                overlap += (r_end - r_start) as u32;
+            }
+        }
+
+        // Advance the exon that ends first in read space
+        if e1.read_end <= e2.read_end {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+
+    overlap
+}
+
+/// Convert a WorkingTranscript to a final Transcript by extending flanks,
+/// building CIGAR, counting mismatches, and converting to forward coordinates.
+#[allow(clippy::too_many_arguments)]
+fn finalize_transcript(
+    wt: &WorkingTranscript,
     read_seq: &[u8],
     index: &GenomeIndex,
     scorer: &AlignmentScorer,
     cluster: &SeedCluster,
 ) -> Transcript {
-    let best_state = &dp[endpoint_idx];
+    use crate::align::transcript::Exon;
 
-    // Find the first seed in the DP chain by tracing back through prev_seed
-    let mut chain_start_idx = endpoint_idx;
-    while let Some(prev) = dp[chain_start_idx].prev_seed {
-        chain_start_idx = prev;
-    }
-    let chain_start_seed = &expanded_seeds[chain_start_idx];
-
-    // Post-DP junction optimization: apply jR scanning to each splice junction
-    // in the winning chain. STAR calls stitchAlignToTranscript per adjacent pair
-    // in the chosen path, NOT in the O(n²) DP. We do the same: scan only the
-    // ~1-3 junctions in the final alignment.
-    let (optimized_cigar, optimized_motifs, optimized_annotated) = optimize_junction_positions(
-        &best_state.cigar_ops,
-        &best_state.junction_motifs,
-        &best_state.junction_annotated,
-        chain_start_seed.genome_pos,
-        read_seq,
-        scorer,
-        &index.genome,
-        cluster.is_reverse,
-        index.genome.n_genome,
-    );
-
-    // Calculate the read region covered by the alignment
-    let alignment_start = chain_start_seed.read_pos;
-
-    // Calculate aligned read length from CIGAR operations
-    let mut aligned_read_len = 0usize;
-    for op in &optimized_cigar {
-        match op {
-            CigarOp::Match(len) | CigarOp::Equal(len) | CigarOp::Diff(len) | CigarOp::Ins(len) => {
-                aligned_read_len += *len as usize;
-            }
-            _ => {}
-        }
-    }
-    let alignment_end = alignment_start + aligned_read_len;
-
-    // Compute right-side genome position by walking the optimized CIGAR
-    let mut right_genome_pos = chain_start_seed.genome_pos;
-    for op in &optimized_cigar {
-        match op {
-            CigarOp::Match(len) | CigarOp::Equal(len) | CigarOp::Diff(len) => {
-                right_genome_pos += *len as u64;
-            }
-            CigarOp::Del(len) | CigarOp::RefSkip(len) => {
-                right_genome_pos += *len as u64;
-            }
-            _ => {}
-        }
-    }
+    let alignment_start = wt.read_start;
+    let alignment_end = wt.read_end;
 
     // Extend alignment into flanking regions (STAR-style extendAlign)
     let left_extend = if alignment_start > 0 {
         extend_alignment(
             read_seq,
-            alignment_start,             // read boundary (exclusive, leftward)
-            chain_start_seed.genome_pos, // genome boundary (exclusive, leftward)
-            -1,                          // leftward
-            alignment_start,             // max distance to read start
-            0,                           // nMMprev=0 matches STAR
-            100_000,                     // Lprev=100000 matches STAR
+            alignment_start,
+            wt.genome_start,
+            -1,
+            alignment_start,
+            0,       // nMMprev=0 matches STAR
+            100_000, // Lprev=100000 matches STAR
             scorer.n_mm_max,
             scorer.p_mm_max,
             index,
@@ -1424,12 +1121,12 @@ fn build_transcript_from_endpoint(
     let right_extend = if alignment_end < read_seq.len() {
         extend_alignment(
             read_seq,
-            alignment_end,                  // read boundary (inclusive, rightward)
-            right_genome_pos,               // genome boundary (inclusive, rightward)
-            1,                              // rightward
-            read_seq.len() - alignment_end, // max distance to read end
-            best_state.n_mismatch + left_extend.n_mismatch, // cumulative mismatches
-            100_000,                        // Lprev=100000 matches STAR
+            alignment_end,
+            wt.genome_end,
+            1,
+            read_seq.len() - alignment_end,
+            wt.n_mismatch + left_extend.n_mismatch,
+            100_000,
             scorer.n_mm_max,
             scorer.p_mm_max,
             index,
@@ -1443,32 +1140,71 @@ fn build_transcript_from_endpoint(
         }
     };
 
-    // Build final CIGAR with extensions
-    let mut final_cigar = Vec::new();
+    // Build final CIGAR from exon blocks
+    let mut final_cigar: Vec<CigarOp> = Vec::new();
 
-    // Remaining 5' soft clip after left extension
+    // Left soft clip
     let remaining_left_clip = alignment_start - left_extend.extend_len;
     if remaining_left_clip > 0 {
         final_cigar.push(CigarOp::SoftClip(remaining_left_clip as u32));
     }
 
-    // Left extension Match (merge with first main CIGAR Match if possible)
+    // Left extension match
     if left_extend.extend_len > 0 {
         final_cigar.push(CigarOp::Match(left_extend.extend_len as u32));
     }
 
-    // Main alignment CIGAR (merge first op with left extension Match if both are Match)
-    for op in &optimized_cigar {
-        if let CigarOp::Match(len) = op {
+    // Walk exon blocks to build CIGAR
+    for (idx, exon) in wt.exons.iter().enumerate() {
+        if idx > 0 {
+            let prev = &wt.exons[idx - 1];
+            let read_gap = exon.read_start as i64 - prev.read_end as i64;
+            let genome_gap = exon.genome_start as i64 - prev.genome_end as i64;
+
+            if genome_gap > read_gap && genome_gap > 0 {
+                // Shared match bases before the gap
+                let shared = read_gap.max(0) as u32;
+                if shared > 0 {
+                    if let Some(CigarOp::Match(prev_len)) = final_cigar.last_mut() {
+                        *prev_len += shared;
+                    } else {
+                        final_cigar.push(CigarOp::Match(shared));
+                    }
+                }
+                let del = (genome_gap - read_gap.max(0)) as u32;
+                if del >= scorer.align_intron_min && del <= scorer.align_intron_max {
+                    final_cigar.push(CigarOp::RefSkip(del));
+                } else {
+                    final_cigar.push(CigarOp::Del(del));
+                }
+            } else if read_gap > genome_gap && read_gap > 0 {
+                // Insertion
+                let shared = genome_gap.max(0) as u32;
+                if shared > 0 {
+                    if let Some(CigarOp::Match(prev_len)) = final_cigar.last_mut() {
+                        *prev_len += shared;
+                    } else {
+                        final_cigar.push(CigarOp::Match(shared));
+                    }
+                }
+                let ins = (read_gap - genome_gap.max(0)) as u32;
+                final_cigar.push(CigarOp::Ins(ins));
+            }
+            // Equal gap case is handled by extended exon blocks in stitch_align_to_transcript
+        }
+
+        // This exon's match region
+        let match_len = (exon.read_end - exon.read_start) as u32;
+        if match_len > 0 {
             if let Some(CigarOp::Match(prev_len)) = final_cigar.last_mut() {
-                *prev_len += len;
-                continue;
+                *prev_len += match_len;
+            } else {
+                final_cigar.push(CigarOp::Match(match_len));
             }
         }
-        final_cigar.push(*op);
     }
 
-    // Right extension Match (merge with last main CIGAR Match if possible)
+    // Right extension match
     if right_extend.extend_len > 0 {
         if let Some(CigarOp::Match(prev_len)) = final_cigar.last_mut() {
             *prev_len += right_extend.extend_len as u32;
@@ -1477,37 +1213,66 @@ fn build_transcript_from_endpoint(
         }
     }
 
-    // Remaining 3' soft clip after right extension
+    // Right soft clip
     let remaining_right_clip = (read_seq.len() - alignment_end) - right_extend.extend_len;
     if remaining_right_clip > 0 {
         final_cigar.push(CigarOp::SoftClip(remaining_right_clip as u32));
     }
 
-    // Adjust genome start position for left extension (raw SA coordinates)
-    let adjusted_genome_start = chain_start_seed.genome_pos - left_extend.extend_len as u64;
+    // Validate CIGAR read-consuming length
+    let cigar_read_len: u32 = final_cigar
+        .iter()
+        .filter(|op| op.consumes_query())
+        .map(|op| op.len())
+        .sum();
+    if cigar_read_len != read_seq.len() as u32 {
+        panic!(
+            "[CIGAR-MISMATCH] cigar_read_len={} read_len={} left_ext={} right_ext={} align_start={} align_end={}\n  CIGAR: {}\n  Exon blocks ({}):\n{}",
+            cigar_read_len,
+            read_seq.len(),
+            left_extend.extend_len,
+            right_extend.extend_len,
+            alignment_start,
+            alignment_end,
+            final_cigar
+                .iter()
+                .map(|op| op.to_string())
+                .collect::<String>(),
+            wt.exons.len(),
+            wt.exons
+                .iter()
+                .enumerate()
+                .map(|(i, e)| format!(
+                    "    exon[{}]: read=[{}, {}), genome=[{}, {}), len={}",
+                    i,
+                    e.read_start,
+                    e.read_end,
+                    e.genome_start,
+                    e.genome_end,
+                    e.read_end - e.read_start
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
 
-    // Adjust score: remove approximate pre-DP left extension (baked into dp score),
-    // add authoritative post-DP left + right extensions (computed with full chain context)
-    let adjusted_score = best_state.score - left_ext_scores[chain_start_idx]
-        + left_extend.max_score
-        + right_extend.max_score;
+    // Adjusted genome start for left extension (raw SA coordinates)
+    let adjusted_genome_start = wt.genome_start - left_extend.extend_len as u64;
 
-    use crate::align::transcript::Exon;
+    // Adjust score: only add right extension (left was already added during recursion)
+    let adjusted_score = wt.score + right_extend.max_score;
 
-    // Count mismatches in the final alignment
-    // count_mismatches uses raw SA position + n_genome offset for reverse strand
-    // MUST be called BEFORE CIGAR reversal since it walks in RC genome order
+    // Count mismatches — MUST be called BEFORE CIGAR reversal
     let n_mismatch = count_mismatches(
         read_seq,
         &final_cigar,
-        adjusted_genome_start, // Raw SA position for genome access
-        0,                     // Read starts at position 0 (CIGAR includes soft clips)
+        adjusted_genome_start,
+        0,
         index,
-        cluster.is_reverse, // Pass reverse-strand flag for correct sequence comparison
+        cluster.is_reverse,
     );
 
-    // SAM CIGAR must be in forward genome order (5'→3' reference direction).
-    // The DP builds CIGAR in read/RC-genome order; for reverse strand this is reversed.
+    // Reverse CIGAR for reverse strand
     if cluster.is_reverse {
         final_cigar.reverse();
     }
@@ -1527,12 +1292,12 @@ fn build_transcript_from_endpoint(
         }
     }
 
-    // Convert raw SA position to forward genome coordinates for the transcript
+    // Convert to forward genome coordinates
     let forward_genome_start =
         index.sa_pos_to_forward(adjusted_genome_start, cluster.is_reverse, ref_len as usize);
     let forward_genome_end = forward_genome_start + ref_len;
 
-    // Build exons from CIGAR using forward genome coordinates
+    // Build exons from CIGAR
     let mut exons = Vec::new();
     let mut read_pos_e = 0usize;
     let mut genome_pos_e = forward_genome_start;
@@ -1579,7 +1344,6 @@ fn build_transcript_from_endpoint(
         merged_exons.push(exon);
     }
 
-    // Build transcript
     let t_genome_start = merged_exons
         .first()
         .map(|e| e.genome_start)
@@ -1589,7 +1353,7 @@ fn build_transcript_from_endpoint(
         .map(|e| e.genome_end)
         .unwrap_or(forward_genome_end);
 
-    // Apply STAR's genomic length penalty: penalizes long-spanning alignments
+    // Apply genomic length penalty
     let genomic_span = t_genome_end - t_genome_start;
     let length_penalty = scorer.genomic_length_penalty(genomic_span);
     let final_score = (adjusted_score + length_penalty).max(0);
@@ -1600,15 +1364,352 @@ fn build_transcript_from_endpoint(
         genome_end: t_genome_end,
         is_reverse: cluster.is_reverse,
         exons: merged_exons,
-        cigar: final_cigar, // Use CIGAR with extensions + soft clips
+        cigar: final_cigar,
         score: final_score,
         n_mismatch,
-        n_gap: best_state.n_gap,
-        n_junction: best_state.n_junction,
-        junction_motifs: optimized_motifs,
-        junction_annotated: optimized_annotated,
+        n_gap: wt.n_gap,
+        n_junction: wt.n_junction,
+        junction_motifs: wt.junction_motifs.clone(),
+        junction_annotated: wt.junction_annotated.clone(),
         read_seq: read_seq.to_vec(),
     }
+}
+
+/// Recursive include/exclude stitcher (STAR's stitchWindowAligns).
+///
+/// For each WA entry: try including it (call stitch_align_to_transcript to fill gap),
+/// and try excluding it (subject to anchor constraint). Transcripts are finalized
+/// at the base case when all entries have been considered.
+#[allow(clippy::too_many_arguments)]
+fn stitch_recurse(
+    i_a: usize,
+    wt: WorkingTranscript,
+    wa_entries: &[WindowAlignment],
+    last_anchor_idx: Option<usize>,
+    read_seq: &[u8],
+    index: &GenomeIndex,
+    scorer: &AlignmentScorer,
+    cluster: &SeedCluster,
+    junction_db: Option<&crate::junction::SpliceJunctionDb>,
+    max_transcripts: usize,
+    transcripts: &mut Vec<WorkingTranscript>,
+    recursion_count: &mut u32,
+) {
+    const MAX_RECURSION: u32 = 10_000;
+
+    if *recursion_count >= MAX_RECURSION || transcripts.len() >= max_transcripts {
+        return;
+    }
+    *recursion_count += 1;
+
+    // Base case: all entries considered
+    if i_a >= wa_entries.len() {
+        if !wt.exons.is_empty() {
+            // Dedup via blocks_overlap: drop if subset of existing higher-score transcript
+            let mut dominated = false;
+            let mut remove_indices = Vec::new();
+            for (idx, existing) in transcripts.iter().enumerate() {
+                let overlap = blocks_overlap(&wt.exons, &existing.exons);
+                let wt_len: u32 = wt
+                    .exons
+                    .iter()
+                    .map(|e| (e.read_end - e.read_start) as u32)
+                    .sum();
+                let ex_len: u32 = existing
+                    .exons
+                    .iter()
+                    .map(|e| (e.read_end - e.read_start) as u32)
+                    .sum();
+
+                // Only dedup transcripts with same number of exon blocks (junctions).
+                // A non-spliced path should never be removed because a spliced path
+                // covers the same bases — they may score differently after finalization
+                // (genomic length penalty favors shorter genomic spans).
+                let same_structure = wt.exons.len() == existing.exons.len();
+                if same_structure && overlap >= wt_len && existing.score >= wt.score {
+                    dominated = true;
+                    break;
+                }
+                if same_structure && overlap >= ex_len && wt.score >= existing.score {
+                    remove_indices.push(idx);
+                }
+            }
+
+            if !dominated {
+                // Remove subsets (iterate in reverse to preserve indices)
+                for &idx in remove_indices.iter().rev() {
+                    transcripts.swap_remove(idx);
+                }
+                transcripts.push(wt);
+            }
+        }
+        return;
+    }
+
+    let wa = &wa_entries[i_a];
+
+    // INCLUDE branch: try stitching wa_entries[i_a] to transcript
+    if wt.exons.is_empty() {
+        // First seed: create initial transcript
+        let mut new_wt = wt.clone();
+        new_wt.exons.push(ExonBlock {
+            read_start: wa.read_pos,
+            read_end: wa.read_pos + wa.length,
+            genome_start: wa.sa_pos,
+            genome_end: wa.sa_pos + wa.length as u64,
+        });
+        new_wt.score = wa.length as i32;
+        new_wt.read_start = wa.read_pos;
+        new_wt.read_end = wa.read_pos + wa.length;
+        new_wt.genome_start = wa.sa_pos;
+        new_wt.genome_end = wa.sa_pos + wa.length as u64;
+        if wa.is_anchor {
+            new_wt.n_anchor = 1;
+        }
+
+        // Add pre-DP left extension score (STAR Pass 1)
+        if wa.read_pos > 0 {
+            let left_ext = extend_alignment(
+                read_seq,
+                wa.read_pos,
+                wa.sa_pos,
+                -1,
+                wa.read_pos,
+                0,
+                100_000,
+                scorer.n_mm_max,
+                scorer.p_mm_max,
+                index,
+                cluster.is_reverse,
+            );
+            new_wt.score += left_ext.max_score;
+        }
+
+        stitch_recurse(
+            i_a + 1,
+            new_wt,
+            wa_entries,
+            last_anchor_idx,
+            read_seq,
+            index,
+            scorer,
+            cluster,
+            junction_db,
+            max_transcripts,
+            transcripts,
+            recursion_count,
+        );
+    } else {
+        // Try stitching this seed onto the existing transcript
+        if let Some(new_wt) =
+            stitch_align_to_transcript(&wt, wa, read_seq, index, scorer, cluster, junction_db)
+        {
+            stitch_recurse(
+                i_a + 1,
+                new_wt,
+                wa_entries,
+                last_anchor_idx,
+                read_seq,
+                index,
+                scorer,
+                cluster,
+                junction_db,
+                max_transcripts,
+                transcripts,
+                recursion_count,
+            );
+        }
+    }
+
+    // EXCLUDE branch: skip wa_entries[i_a]
+    // Anchor constraint: can only skip the last anchor if transcript already has one
+    let can_exclude = if let Some(last_anchor) = last_anchor_idx {
+        if wa.is_anchor && i_a == last_anchor {
+            wt.n_anchor > 0 // Already has an anchor → ok to skip
+        } else {
+            true
+        }
+    } else {
+        true
+    };
+
+    if can_exclude {
+        stitch_recurse(
+            i_a + 1,
+            wt,
+            wa_entries,
+            last_anchor_idx,
+            read_seq,
+            index,
+            scorer,
+            cluster,
+            junction_db,
+            max_transcripts,
+            transcripts,
+            recursion_count,
+        );
+    }
+}
+
+/// Inner implementation of stitch_seeds_with_jdb with optional debug logging.
+/// When `debug_read_name` is non-empty, detailed info is logged to stderr.
+///
+/// Uses STAR's recursive combinatorial stitcher (stitchWindowAligns) instead of
+/// forward DP. For each seed, explores include/exclude branches, allowing the
+/// algorithm to skip spurious short seeds that would create false splices.
+pub(crate) fn stitch_seeds_with_jdb_debug(
+    cluster: &SeedCluster,
+    read_seq: &[u8],
+    index: &GenomeIndex,
+    scorer: &AlignmentScorer,
+    junction_db: Option<&crate::junction::SpliceJunctionDb>,
+    max_transcripts_per_window: usize,
+    debug_read_name: &str,
+) -> Result<Vec<Transcript>, Error> {
+    let debug = !debug_read_name.is_empty();
+
+    // Sort WA entries by read_pos, then length descending for dedup
+    let mut wa_entries: Vec<WindowAlignment> = cluster.alignments.clone();
+    wa_entries.sort_by(|a, b| a.read_pos.cmp(&b.read_pos).then(b.length.cmp(&a.length)));
+
+    // Dedup: keep only the longest per (read_pos, sa_pos) pair
+    wa_entries.dedup_by(|a, b| a.read_pos == b.read_pos && a.sa_pos == b.sa_pos);
+
+    // Aggressive diagonal dedup: for each diagonal (sa_pos - read_pos), merge
+    // overlapping seeds into intervals, then keep only 1 seed per merged interval
+    // (the longest). With dense seed search, most seeds are redundant subsets.
+    {
+        use std::collections::HashMap;
+        // For each diagonal, find the longest seed per merged interval
+        let mut diag_seeds: HashMap<i64, Vec<(usize, usize, usize)>> = HashMap::new();
+        for (idx, wa) in wa_entries.iter().enumerate() {
+            let diag = wa.sa_pos as i64 - wa.read_pos as i64;
+            diag_seeds
+                .entry(diag)
+                .or_default()
+                .push((wa.read_pos, wa.read_pos + wa.length, idx));
+        }
+
+        let mut keep_indices = std::collections::HashSet::new();
+        for (_diag, mut seeds) in diag_seeds {
+            // Sort by start position
+            seeds.sort();
+            // Merge intervals, keeping the index of the longest seed in each merged group
+            let mut merged_start = seeds[0].0;
+            let mut merged_end = seeds[0].1;
+            let mut best_idx = seeds[0].2;
+            let mut best_len = seeds[0].1 - seeds[0].0;
+
+            for &(s, e, idx) in &seeds[1..] {
+                if s <= merged_end {
+                    // Overlapping — extend and track longest
+                    merged_end = merged_end.max(e);
+                    let len = e - s;
+                    if len > best_len {
+                        best_len = len;
+                        best_idx = idx;
+                    }
+                } else {
+                    // New interval — commit previous best
+                    keep_indices.insert(best_idx);
+                    merged_start = s;
+                    merged_end = e;
+                    best_len = e - s;
+                    best_idx = idx;
+                }
+            }
+            // Commit last group
+            keep_indices.insert(best_idx);
+            let _ = merged_start; // suppress unused warning
+        }
+
+        // Retain only the kept indices
+        let mut idx = 0usize;
+        wa_entries.retain(|_| {
+            let keep = keep_indices.contains(&idx);
+            idx += 1;
+            keep
+        });
+    }
+
+    // Cap entries to prevent exponential blowup
+    const MAX_WA_ENTRIES: usize = 200;
+    if wa_entries.len() > MAX_WA_ENTRIES {
+        wa_entries.sort_by(|a, b| b.length.cmp(&a.length));
+        wa_entries.truncate(MAX_WA_ENTRIES);
+        wa_entries.sort_by(|a, b| a.read_pos.cmp(&b.read_pos).then(b.length.cmp(&a.length)));
+    }
+
+    if wa_entries.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if debug {
+        eprintln!(
+            "[DEBUG-STITCH {}] {} WA entries (is_reverse={})",
+            debug_read_name,
+            wa_entries.len(),
+            cluster.is_reverse
+        );
+        for (i, wa) in wa_entries.iter().enumerate().take(30) {
+            eprintln!(
+                "  wa[{}]: read_pos={}, sa_pos={}, length={}, anchor={}",
+                i, wa.read_pos, wa.sa_pos, wa.length, wa.is_anchor
+            );
+        }
+        if wa_entries.len() > 30 {
+            eprintln!("  ... ({} more)", wa_entries.len() - 30);
+        }
+    }
+
+    // Find last anchor index for the anchor constraint
+    let last_anchor_idx = wa_entries.iter().rposition(|wa| wa.is_anchor);
+
+    // Run recursive include/exclude stitcher
+    let mut working_transcripts: Vec<WorkingTranscript> = Vec::new();
+    let mut recursion_count: u32 = 0;
+
+    stitch_recurse(
+        0,
+        WorkingTranscript::new(),
+        &wa_entries,
+        last_anchor_idx,
+        read_seq,
+        index,
+        scorer,
+        cluster,
+        junction_db,
+        max_transcripts_per_window,
+        &mut working_transcripts,
+        &mut recursion_count,
+    );
+
+    if debug {
+        eprintln!(
+            "[DEBUG-STITCH {}] Recursion done: {} working transcripts, {} recursions",
+            debug_read_name,
+            working_transcripts.len(),
+            recursion_count
+        );
+    }
+
+    // Finalize working transcripts → Transcript
+    let mut transcripts: Vec<Transcript> = Vec::with_capacity(working_transcripts.len());
+    for wt in &working_transcripts {
+        transcripts.push(finalize_transcript(wt, read_seq, index, scorer, cluster));
+    }
+
+    // Sort by score descending, then fewer junctions (prefer non-spliced on tie),
+    // then fewer mismatches as final tiebreaker
+    transcripts.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then(a.n_junction.cmp(&b.n_junction))
+            .then(a.n_mismatch.cmp(&b.n_mismatch))
+    });
+    transcripts.truncate(max_transcripts_per_window);
+
+    Ok(transcripts)
 }
 
 #[cfg(test)]
@@ -1705,28 +1806,32 @@ mod tests {
     }
 
     #[test]
-    fn test_expanded_seed_sorting() {
-        let mut expanded = [
-            ExpandedSeed {
+    fn test_wa_entry_sorting() {
+        let mut entries = vec![
+            WindowAlignment {
+                seed_idx: 0,
                 read_pos: 10,
-                read_end: 15,
+                length: 5,
                 genome_pos: 100,
-                genome_end: 105,
-                length: 5,
+                sa_pos: 100,
+                n_rep: 1,
+                is_anchor: true,
             },
-            ExpandedSeed {
+            WindowAlignment {
+                seed_idx: 1,
                 read_pos: 5,
-                read_end: 10,
-                genome_pos: 50,
-                genome_end: 55,
                 length: 5,
+                genome_pos: 50,
+                sa_pos: 50,
+                n_rep: 1,
+                is_anchor: true,
             },
         ];
 
-        expanded.sort_by_key(|s| s.read_pos);
+        entries.sort_by(|a, b| a.read_pos.cmp(&b.read_pos).then(b.length.cmp(&a.length)));
 
-        assert_eq!(expanded[0].read_pos, 5);
-        assert_eq!(expanded[1].read_pos, 10);
+        assert_eq!(entries[0].read_pos, 5);
+        assert_eq!(entries[1].read_pos, 10);
     }
 
     /// Helper to build a GenomeIndex with a specific forward sequence

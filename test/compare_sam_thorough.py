@@ -521,6 +521,81 @@ def main():
                 print(f"  >> Same chr, position difference: {diff}bp")
 
     # ============================================================
+    # 6. MAPQ AGREEMENT
+    # ============================================================
+    print("\n" + "=" * 80)
+    print("6. MAPQ AGREEMENT")
+    print("=" * 80)
+
+    mapq_agree = 0
+    mapq_disagree = 0
+    mapq_inflation = 0  # ruSTAR=255, STAR<255
+    mapq_deflation = 0  # ruSTAR<255, STAR=255
+
+    for qname in sorted(all_reads):
+        r_records = rustar_reads.get(qname, [])
+        s_records = star_reads.get(qname, [])
+        r_class = classify_read(r_records) if r_records else "missing"
+        s_class = classify_read(s_records) if s_records else "missing"
+        if r_class in ("unique", "multi") and s_class in ("unique", "multi"):
+            r_pri = get_primary(r_records)
+            s_pri = get_primary(s_records)
+            if r_pri and s_pri:
+                # Only compare MAPQ for reads that agree on position
+                same_chr = r_pri["rname"] == s_pri["rname"]
+                same_pos = same_chr and abs(r_pri["pos"] - s_pri["pos"]) <= 5
+                if same_pos:
+                    if r_pri["mapq"] == s_pri["mapq"]:
+                        mapq_agree += 1
+                    else:
+                        mapq_disagree += 1
+                        if r_pri["mapq"] == 255 and s_pri["mapq"] < 255:
+                            mapq_inflation += 1
+                        elif r_pri["mapq"] < 255 and s_pri["mapq"] == 255:
+                            mapq_deflation += 1
+
+    total_mapq_compared = mapq_agree + mapq_disagree
+    if total_mapq_compared > 0:
+        print(f"\nMAPQ agreement (pos-agreeing reads): {mapq_agree}/{total_mapq_compared} ({100.0*mapq_agree/total_mapq_compared:.1f}%)")
+        print(f"  MAPQ disagree:     {mapq_disagree}")
+        print(f"  Inflation (r=255, S<255): {mapq_inflation}")
+        print(f"  Deflation (r<255, S=255): {mapq_deflation}")
+
+    # ============================================================
+    # 7. ADJUSTED AGREEMENT (excluding diff-chr multi-mapper ties)
+    # ============================================================
+    print("\n" + "=" * 80)
+    print("7. ADJUSTED AGREEMENT (excluding diff-chr multi-mapper ties)")
+    print("=" * 80)
+
+    # Count diff-chr multi-mapper ties: both mapped to different chromosomes,
+    # both with MAPQ < 255 (multi-mappers where primary locus is a tie-break)
+    diff_chr_multimap_ties = 0
+    for qname in sorted(all_reads):
+        r_records = rustar_reads.get(qname, [])
+        s_records = star_reads.get(qname, [])
+        r_class = classify_read(r_records) if r_records else "missing"
+        s_class = classify_read(s_records) if s_records else "missing"
+        if r_class in ("unique", "multi") and s_class in ("unique", "multi"):
+            r_pri = get_primary(r_records)
+            s_pri = get_primary(s_records)
+            if r_pri and s_pri and r_pri["rname"] != s_pri["rname"]:
+                if r_pri["mapq"] < 255 and s_pri["mapq"] < 255:
+                    diff_chr_multimap_ties += 1
+
+    # Adjusted = exclude diff-chr multi-mapper ties from disagreement count
+    adjusted_total = total_both_mapped - diff_chr_multimap_ties
+    adjusted_agree = both_mapped_agree_pos
+    actionable_same_chr = both_mapped_disagree_pos - disagree_diff_chr
+    # Some diff-chr disagreements involve unique mappers (not ties) — count those too
+    actionable_diff_chr = disagree_diff_chr - diff_chr_multimap_ties
+
+    print(f"\nDiff-chr multi-mapper ties:    {diff_chr_multimap_ties}  (unavoidable tie-breaking)")
+    if adjusted_total > 0:
+        print(f"Adjusted position agreement:   {adjusted_agree}/{adjusted_total} ({100.0*adjusted_agree/adjusted_total:.1f}%)")
+    print(f"Actionable disagreements:      {actionable_same_chr} same-chr + {actionable_diff_chr} diff-chr-unique + {star_only_mapped} STAR-only + {rustar_only_mapped} ruSTAR-only = {actionable_same_chr + actionable_diff_chr + star_only_mapped + rustar_only_mapped}")
+
+    # ============================================================
     # SUMMARY
     # ============================================================
     print("\n" + "=" * 80)

@@ -547,6 +547,12 @@ pub struct Parameters {
     pub twopass1_reads_n: i64,
 
     // ── Chimeric ────────────────────────────────────────────────────────
+    // ── Debug ───────────────────────────────────────────────────────
+    /// Filter for debug logging: only log detailed alignment info for reads matching this name
+    #[arg(long = "readNameFilter", default_value = "")]
+    pub read_name_filter: String,
+
+    // ── Chimeric ────────────────────────────────────────────────────────
     /// Min chimeric segment length; 0 = disable chimeric detection
     #[arg(long = "chimSegmentMin", default_value_t = 0)]
     pub chim_segment_min: u32,

@@ -236,6 +236,49 @@ Removed anchor fallback in `cluster_seeds()` (no longer needed with accurate SA 
 
 ---
 
+## Phase 16.11b: Fix extend_alignment() to Match STAR's extendAlign() ✅ (2026-02-20)
+
+**Problem**: ruSTAR's `extend_alignment()` passed actual cumulative alignment length (e.g., seed length ~20) as `len_prev`, activating the proportional mismatch check (`pMMmax * total_length`). STAR always passes `Lprev=100000`, making only the absolute `nMMmax` limit apply.
+
+**Example**: For a seed of length 20 extending leftward with `pMMmax=0.3`, `nMMmax=10`:
+- STAR: allows up to 10 mismatches (proportional check disabled by Lprev=100000)
+- ruSTAR: allows only `min(0.3*(20+i+1), 10)` ≈ 6 mismatches at start
+
+**Fix**:
+1. **All 4 call sites**: Changed `len_prev` to `100_000` (pre-DP left, endpoint right, post-DP left, post-DP right)
+2. **Post-DP left extension**: Changed `n_mm_prev` from `best_state.n_mismatch` to `0` (matches STAR)
+3. **Loop body restructured** to match STAR's `extendAlign()` exactly:
+   - Record max score only on match (was: on every base)
+   - Break only on mismatch, checking limit before incrementing nMM (was: after)
+   - Break condition uses full `max_extend` length (was: current position `i+1`)
+
+**Impact**: Neutral on 10k yeast dataset (all metrics unchanged). The fix ensures correctness for edge cases (very short seeds, high mismatch regions, stricter filter settings) and matches STAR's calling convention exactly.
+
+**Files**: `src/align/stitch.rs`
+
+---
+
+## Phase 16.12: Diagnose and Fix Remaining SE Disagreements ✅ (2026-02-20)
+
+**Problem**: 173 SE disagreements remain. Of these, **100 are diff-chr multi-mapper ties** — reads that map equally well to multiple chromosomes (all MAPQ 1 or 3), where the choice of primary alignment depends on implementation-specific processing order (SA iteration, window sequence). These are unfixable without matching STAR's low-level tie-breaking.
+
+**Adjusted position agreement definition**: Excluding diff-chr multi-mapper ties (both mapped, different chromosome, both MAPQ < 255) from the denominator. These are not meaningful disagreements — both tools report valid alignments, just with different tie-breaking among equally-good locations.
+
+**Infrastructure added**:
+1. **`--readNameFilter` parameter** — when set, produces detailed alignment trace on stderr for a specific read: seed counts, cluster details, DP expanded seeds + endpoints + scores, transcript filtering decisions, final output
+2. **`compare_sam_thorough.py` updated** — new "Adjusted Agreement" section counting diff-chr ties and reporting adjusted metrics
+3. **`extract_disagreement_reads.py`** — parses SAM comparison, categorizes disagreements (false_splice, missed_splice, same_chr_close, same_chr_far, star_only, rustar_only, diff_chr_tie), extracts representative reads for targeted debugging
+
+**Adjusted metrics**:
+- Raw position agreement: 97.4% (8620/8793 both-mapped reads)
+- Diff-chr multi-mapper ties: ~100
+- **Adjusted position agreement: 99.2%** (excluding ties)
+- Actionable disagreements: 73 same-chr + 33 STAR-only + 26 ruSTAR-only = 132
+
+**Files**: `src/params.rs`, `src/align/read_align.rs`, `src/align/stitch.rs`, `test/compare_sam_thorough.py`, `test/extract_disagreement_reads.py`
+
+---
+
 ## Phase 16.11: PE Joint DP Stitching — PLANNED
 
 263 pairs (2.9%) are half-mapped. STAR maps both via joint mate-aware DP with fragment length gap penalty. Seeds from both mates in same genomic window participate in DP together.

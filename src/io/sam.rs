@@ -146,6 +146,33 @@ impl SamWriter {
     /// * `batch` - Slice of records to write
     pub fn write_batch(&mut self, batch: &[RecordBuf]) -> Result<(), Error> {
         for record in batch {
+            // Debug: validate CIGAR vs SEQ length before writing
+            let cigar_ops = record.cigar().as_ref();
+            let cigar_query_len: usize = cigar_ops
+                .iter()
+                .filter(|op| op.kind().consumes_read())
+                .map(|op| op.len())
+                .sum();
+            let seq_len = record.sequence().len();
+            if cigar_query_len != seq_len && !cigar_ops.is_empty() {
+                let name = record
+                    .name()
+                    .map(|n| String::from_utf8_lossy(n.as_ref()).to_string())
+                    .unwrap_or_default();
+                let cigar_str: String = cigar_ops
+                    .iter()
+                    .map(|op| format!("{}{:?}", op.len(), op.kind()))
+                    .collect::<Vec<_>>()
+                    .join("");
+                panic!(
+                    "[SAM-MISMATCH] read={} cigar_query_len={} seq_len={} flags={:?} cigar={}",
+                    name,
+                    cigar_query_len,
+                    seq_len,
+                    record.flags(),
+                    cigar_str
+                );
+            }
             self.writer.write_alignment_record(&self.header, record)?;
         }
         Ok(())

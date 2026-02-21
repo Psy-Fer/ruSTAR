@@ -1,7 +1,7 @@
 /// Read alignment driver function
 use crate::align::score::{AlignmentScorer, SpliceMotif};
 use crate::align::seed::Seed;
-use crate::align::stitch::{cluster_seeds, stitch_seeds_with_jdb};
+use crate::align::stitch::{cluster_seeds, stitch_seeds_with_jdb, stitch_seeds_with_jdb_debug};
 use crate::align::transcript::Transcript;
 use crate::error::Error;
 use crate::index::GenomeIndex;
@@ -76,12 +76,42 @@ pub fn align_read(
     ),
     Error,
 > {
+    let debug_read = !params.read_name_filter.is_empty() && read_name == params.read_name_filter;
+
     // Step 1: Find seeds
     // Use a reasonable default min seed length (typically 8-20bp)
     let min_seed_length = 8;
     let seeds = Seed::find_seeds(read_seq, index, min_seed_length, params)?;
 
+    if debug_read {
+        let total_positions: usize = seeds.iter().map(|s| s.sa_end - s.sa_start).sum();
+        eprintln!(
+            "[DEBUG {}] Seeds: {} seeds, {} total SA positions, read_len={}",
+            read_name,
+            seeds.len(),
+            total_positions,
+            read_seq.len()
+        );
+        for (i, seed) in seeds.iter().enumerate().take(20) {
+            eprintln!(
+                "  seed[{}]: read_pos={}, length={}, sa_range=[{},{}), n_positions={}",
+                i,
+                seed.read_pos,
+                seed.length,
+                seed.sa_start,
+                seed.sa_end,
+                seed.sa_end - seed.sa_start
+            );
+        }
+        if seeds.len() > 20 {
+            eprintln!("  ... ({} more seeds)", seeds.len() - 20);
+        }
+    }
+
     if seeds.is_empty() {
+        if debug_read {
+            eprintln!("[DEBUG {}] No seeds found — unmapped", read_name);
+        }
         return Ok((Vec::new(), Vec::new(), 0, Some(UnmappedReason::Other)));
     }
 
@@ -100,7 +130,37 @@ pub fn align_read(
         params.seed_per_window_nmax,
     );
 
+    if debug_read {
+        eprintln!(
+            "[DEBUG {}] Clusters: {} clusters",
+            read_name,
+            clusters.len()
+        );
+        for (i, cluster) in clusters.iter().enumerate().take(10) {
+            let chr_name = if cluster.chr_idx < index.genome.chr_name.len() {
+                &index.genome.chr_name[cluster.chr_idx]
+            } else {
+                "unknown"
+            };
+            eprintln!(
+                "  cluster[{}]: chr={} (idx={}), is_reverse={}, seeds={}, anchor_bin={}",
+                i,
+                chr_name,
+                cluster.chr_idx,
+                cluster.is_reverse,
+                cluster.alignments.len(),
+                cluster.anchor_bin,
+            );
+        }
+        if clusters.len() > 10 {
+            eprintln!("  ... ({} more clusters)", clusters.len() - 10);
+        }
+    }
+
     if clusters.is_empty() {
+        if debug_read {
+            eprintln!("[DEBUG {}] No clusters — unmapped", read_name);
+        }
         return Ok((Vec::new(), Vec::new(), 0, Some(UnmappedReason::Other)));
     }
 
@@ -131,7 +191,21 @@ pub fn align_read(
         })
         .collect();
 
+    if debug_read {
+        eprintln!(
+            "[DEBUG {}] After coverage filter: {} clusters",
+            read_name,
+            clusters.len()
+        );
+    }
+
     if clusters.is_empty() {
+        if debug_read {
+            eprintln!(
+                "[DEBUG {}] All clusters filtered by coverage — unmapped",
+                read_name
+            );
+        }
         return Ok((Vec::new(), Vec::new(), 0, Some(UnmappedReason::Other)));
     }
 
@@ -155,15 +229,45 @@ pub fn align_read(
         Some(&index.junction_db)
     };
 
-    for cluster in clusters.iter() {
-        let cluster_transcripts = stitch_seeds_with_jdb(
+    for (ci, cluster) in clusters.iter().enumerate() {
+        let debug_name = if debug_read { read_name } else { "" };
+        let cluster_transcripts = stitch_seeds_with_jdb_debug(
             cluster,
             read_seq,
             index,
             &scorer,
             junction_db,
             params.align_transcripts_per_window_nmax,
+            debug_name,
         )?;
+        if debug_read {
+            eprintln!(
+                "[DEBUG {}] Cluster[{}]: {} transcripts from DP",
+                read_name,
+                ci,
+                cluster_transcripts.len()
+            );
+            for (ti, t) in cluster_transcripts.iter().enumerate().take(5) {
+                let chr_name = if t.chr_idx < index.genome.chr_name.len() {
+                    &index.genome.chr_name[t.chr_idx]
+                } else {
+                    "unknown"
+                };
+                let cigar_str: String = t.cigar.iter().map(|op| format!("{}", op)).collect();
+                eprintln!(
+                    "  transcript[{}]: chr={}:{}-{} ({}) score={} mm={} junctions={} cigar={}",
+                    ti,
+                    chr_name,
+                    t.genome_start,
+                    t.genome_end,
+                    if t.is_reverse { "-" } else { "+" },
+                    t.score,
+                    t.n_mismatch,
+                    t.n_junction,
+                    cigar_str
+                );
+            }
+        }
         transcripts.extend(cluster_transcripts);
     }
 
@@ -293,6 +397,16 @@ pub fn align_read(
         );
     }
 
+    if debug_read {
+        eprintln!(
+            "[DEBUG {}] After quality filters: {}/{} transcripts remain (reasons: {:?})",
+            read_name,
+            transcripts.len(),
+            pre_filter_count,
+            filter_reasons
+        );
+    }
+
     // Step 3b: Detect chimeric alignments from soft-clips (Tier 1)
     if params.chim_segment_min > 0 {
         use crate::chimeric::ChimericDetector;
@@ -324,11 +438,12 @@ pub fn align_read(
     });
 
     // Step 5b: Re-sort by score (descending) with deterministic tie-breaking
-    // When scores are equal, prefer: smallest chr index → smallest position → forward strand
-    // This matches STAR's tie-breaking behavior for multi-mappers
+    // When scores are equal, prefer: fewer junctions (non-spliced over spliced) →
+    // smallest chr index → smallest position → forward strand
     transcripts.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
+            .then_with(|| a.n_junction.cmp(&b.n_junction))
             .then_with(|| a.chr_idx.cmp(&b.chr_idx))
             .then_with(|| a.genome_start.cmp(&b.genome_start))
             .then_with(|| a.is_reverse.cmp(&b.is_reverse))
@@ -359,6 +474,35 @@ pub fn align_read(
     // Multi-transcript DP (Phase 16.10) produces multiple transcripts per window
     // for tandem repeats (e.g. rDNA), yielding correct NH → correct MAPQ.
     let n_for_mapq = transcripts.len();
+
+    if debug_read {
+        eprintln!(
+            "[DEBUG {}] Final: {} transcripts, n_for_mapq={}",
+            read_name,
+            transcripts.len(),
+            n_for_mapq
+        );
+        for (i, t) in transcripts.iter().enumerate() {
+            let chr_name = if t.chr_idx < index.genome.chr_name.len() {
+                &index.genome.chr_name[t.chr_idx]
+            } else {
+                "unknown"
+            };
+            let cigar_str: String = t.cigar.iter().map(|op| format!("{}", op)).collect();
+            eprintln!(
+                "  FINAL[{}]: chr={}:{}-{} ({}) score={} mm={} junctions={} cigar={}",
+                i,
+                chr_name,
+                t.genome_start,
+                t.genome_end,
+                if t.is_reverse { "-" } else { "+" },
+                t.score,
+                t.n_mismatch,
+                t.n_junction,
+                cigar_str
+            );
+        }
+    }
 
     let unmapped_reason = if transcripts.is_empty() {
         // Transcripts were generated by DP but all filtered out

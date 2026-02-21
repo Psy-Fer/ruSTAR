@@ -19,7 +19,7 @@ Phase 1 (CLI) ✅
                                                └→ Phase 12 (chimeric) ✅ ← Gene fusion detection
                                                     └→ Phase 13.1-13.14 (perf+accuracy) ✅
                                                          └→ Phase 15.1-15.6 (SAM tags) ✅
-                                                              └→ Phase 16.1-16.10 (algorithm parity) ✅
+                                                              └→ Phase 16.1-16.10+16.11b (algorithm parity) ✅
                                                                    └→ Phase 16.11+ (PE joint DP) ← Next
                                                               └→ Phase 17.1 (Log.final.out) ✅
                                                                    └→ Phase 17.2+ (features + polish)
@@ -49,7 +49,7 @@ Paired-end (Phase 8) builds on threaded infrastructure. GTF/junctions (Phase 7) 
 | 12 | Chimeric Detection | ✅ | 170 | SE chimeric, Chimeric.out.junction |
 | [13](docs/phase13_accuracy.md) | Performance + Accuracy | ✅ | 205 | 94.5% pos, 97.8% CIGAR, 2.1% splice |
 | [15](docs/phase15_sam_tags.md) | SAM Tags + PE Fix | ✅ | 235 | NH/HI/AS/NM/nM/XS/jM/jI/MD, PE fix |
-| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 264 | 97.4% pos, 1.9% splice, 99.1% MAPQ agree, multi-transcript DP |
+| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 264 | 97.4% pos, 1.9% splice, 99.1% MAPQ agree, multi-transcript DP, extendAlign fix |
 | [17](docs/phase17_features.md) | Features + Polish | ✅* | 264 | Log.final.out, sorted BAM planned |
 | 14 | STARsolo | DEFERRED | — | Waiting for accuracy parity |
 

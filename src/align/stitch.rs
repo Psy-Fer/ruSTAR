@@ -1599,12 +1599,12 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
 ) -> Result<Vec<Transcript>, Error> {
     let debug = !debug_read_name.is_empty();
 
-    // Sort WA entries by read_pos, then length descending for dedup
+    // Include ALL seeds (anchor and non-anchor) in the stitcher.
+    // STAR's WA array contains all seeds assigned to the window — non-anchor seeds
+    // (n_rep > winAnchorMultimapNmax) participate in stitching. The anchor constraint
+    // (at least one anchor must be included) prevents transcripts composed entirely
+    // of repetitive seeds, matching STAR's WA_Anchor=2 "last anchor" logic.
     let mut wa_entries: Vec<WindowAlignment> = cluster.alignments.clone();
-    wa_entries.sort_by(|a, b| a.read_pos.cmp(&b.read_pos).then(b.length.cmp(&a.length)));
-
-    // Dedup: keep only the longest per (read_pos, sa_pos) pair
-    wa_entries.dedup_by(|a, b| a.read_pos == b.read_pos && a.sa_pos == b.sa_pos);
 
     // Aggressive diagonal dedup: for each diagonal (sa_pos - read_pos), merge
     // overlapping seeds into intervals, then keep only 1 seed per merged interval
@@ -1663,7 +1663,13 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
         });
     }
 
-    // Cap entries to prevent exponential blowup
+    // Sort ascending by read_pos: the stitcher processes seeds left-to-right in read
+    // coordinates, and genome_gap = new_sa_pos - prev_sa_pos is positive only when
+    // read_pos increases monotonically (forward-strand alignment in SA coordinate space).
+    wa_entries.sort_by(|a, b| a.read_pos.cmp(&b.read_pos).then(b.length.cmp(&a.length)));
+
+    // Cap entries to prevent exponential blowup in the recursive stitcher.
+    // With anchor-only filtering, this limit is rarely hit, but keep as a safety net.
     const MAX_WA_ENTRIES: usize = 200;
     if wa_entries.len() > MAX_WA_ENTRIES {
         wa_entries.sort_by(|a, b| b.length.cmp(&a.length));
@@ -1735,10 +1741,9 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
     // Sort by score descending, then shorter genomic span (STAR's gLength tiebreaker).
     // STAR: if (Score > maxScore || (Score == maxScore && gLength < gLength)) break;
     transcripts.sort_by(|a, b| {
-        b.score.cmp(&a.score).then(
-            (a.genome_end - a.genome_start)
-                .cmp(&(b.genome_end - b.genome_start)),
-        )
+        b.score
+            .cmp(&a.score)
+            .then((a.genome_end - a.genome_start).cmp(&(b.genome_end - b.genome_start)))
     });
     transcripts.truncate(max_transcripts_per_window);
 

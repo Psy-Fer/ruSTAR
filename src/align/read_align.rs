@@ -95,11 +95,18 @@ pub fn align_read(
         let n_lr = seeds.iter().filter(|s| !s.search_rc).count();
         let n_rl = seeds.iter().filter(|s| s.search_rc).count();
         eprintln!(
-            "  {} seeds total: {} L→R (dense), {} R→L (sparse)",
+            "  {} seeds total: {} L→R (sparse), {} R→L (sparse)",
             seeds.len(),
             n_lr,
             n_rl
         );
+        for (i, s) in seeds.iter().enumerate() {
+            let n_loci = s.sa_end - s.sa_start;
+            eprintln!(
+                "  seed[{}]: read_pos={}, len={}, n_loci={}, search_rc={}, sa=[{},{})",
+                i, s.read_pos, s.length, n_loci, s.search_rc, s.sa_start, s.sa_end
+            );
+        }
     }
 
     if seeds.is_empty() {
@@ -145,6 +152,33 @@ pub fn align_read(
                 cluster.alignments.len(),
                 cluster.anchor_bin,
             );
+            for (j, wa) in cluster.alignments.iter().enumerate() {
+                let chr_pos = wa.genome_pos.saturating_sub(
+                    if cluster.chr_idx < index.genome.chr_start.len() {
+                        index.genome.chr_start[cluster.chr_idx]
+                    } else {
+                        0
+                    },
+                ) + 1; // 1-based
+                eprintln!(
+                    "    wa[{}]: read_pos={}, len={}, genome_pos={} ({}:{}), n_rep={}, is_anchor={}",
+                    j,
+                    wa.read_pos,
+                    wa.length,
+                    wa.genome_pos,
+                    chr_name,
+                    chr_pos,
+                    wa.n_rep,
+                    wa.is_anchor
+                );
+                if j >= 5 {
+                    eprintln!(
+                        "    ... ({} more WA entries)",
+                        cluster.alignments.len() - j - 1
+                    );
+                    break;
+                }
+            }
         }
     }
 
@@ -356,6 +390,12 @@ pub fn align_read(
         }
 
         // Intron strand consistency filtering (outFilterIntronStrands)
+        // STAR's RemoveInconsistentStrands removes transcripts that have junctions
+        // with mixed intron strand (some imply + strand, some imply - strand).
+        // This handles chimeric/impossible transcripts spanning both strands.
+        // Note: a reverse-strand read CAN have + strand motifs (antisense reads
+        // from + strand genes in unstranded RNA-seq) — this is valid and STAR
+        // keeps such reads. Only mixed-strand within one transcript is filtered.
         if params.out_filter_intron_strands == IntronStrandFilter::RemoveInconsistentStrands {
             let mut has_plus = false;
             let mut has_minus = false;
@@ -1273,7 +1313,7 @@ mod tests {
         use crate::align::transcript::{CigarOp, Exon, Transcript};
         use crate::params::IntronStrandFilter;
 
-        // Create a transcript with conflicting strand motifs
+        // Create a transcript with conflicting strand motifs (mixed + and - within one transcript)
         let t_inconsistent = Transcript {
             chr_idx: 0,
             genome_start: 1000,
@@ -1295,7 +1335,7 @@ mod tests {
             read_seq: vec![0; 100],
         };
 
-        // Create a transcript with consistent strand motifs
+        // Create a transcript with consistent strand motifs (all + strand)
         let t_consistent = Transcript {
             chr_idx: 0,
             genome_start: 1000,
@@ -1317,7 +1357,12 @@ mod tests {
             read_seq: vec![0; 100],
         };
 
-        // Verify implied_strand detects the conflict
+        // Note: STAR's RemoveInconsistentStrands filters transcripts where
+        // junctions have MIXED implied strand (both + and - within one transcript).
+        // It does NOT compare junction strand vs alignment strand — a reverse-strand
+        // read at a GT/AG junction (antisense of + strand gene) is valid and kept.
+
+        // Verify mixed-strand is detected
         let mut has_plus = false;
         let mut has_minus = false;
         for motif in &t_inconsistent.junction_motifs {
@@ -1327,7 +1372,7 @@ mod tests {
                 _ => {}
             }
         }
-        assert!(has_plus && has_minus); // Inconsistent
+        assert!(has_plus && has_minus); // Inconsistent (mixed strands)
 
         // Verify consistent transcript has no conflict
         has_plus = false;
@@ -1341,11 +1386,20 @@ mod tests {
         }
         assert!(has_plus && !has_minus); // Consistent (all +)
 
+        // Also verify: single CT/AC on forward-strand or single GT/AG on reverse-strand
+        // are NOT filtered (STAR keeps these — antisense reads are valid)
+        let ctac_only = vec![SpliceMotif::CtAc];
+        let (mut hp, mut hm) = (false, false);
+        for m in &ctac_only {
+            match m.implied_strand() {
+                Some('+') => hp = true,
+                Some('-') => hm = true,
+                _ => {}
+            }
+        }
+        assert!(!hp && hm); // Only minus → NOT mixed → NOT filtered
+
         // Verify the filter enum
-        assert_eq!(
-            IntronStrandFilter::RemoveInconsistentStrands,
-            IntronStrandFilter::RemoveInconsistentStrands
-        );
         assert_ne!(
             IntronStrandFilter::None,
             IntronStrandFilter::RemoveInconsistentStrands

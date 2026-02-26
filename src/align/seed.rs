@@ -51,24 +51,31 @@ impl Seed {
         let mut seeds = Vec::new();
         let read_len = read_seq.len();
 
-        // Search L→R (forward direction on read)
-        for read_pos in 0..read_len {
-            let result =
-                find_seed_at_position(read_seq, read_pos, index, min_seed_length, false, params)?;
-            if let Some(seed) = result.seed {
-                seeds.push(seed);
-                // Cap total seeds per read (STAR: seedPerReadNmax)
-                if seeds.len() >= params.seed_per_read_nmax {
-                    return Ok(seeds);
-                }
-            }
+        // STAR uses the SAME sparse chain-based loop for both L→R and R→L directions.
+        // For each direction: Nstart evenly-spaced starting positions, each advancing by
+        // MMP length (Lmapped). Chains continue until only seedMapMin (5) bases remain.
+        // This matches STAR's ReadAlign_mapOneRead.cpp: for(iDir=0;iDir<2;iDir++)
+        //   for(istart=0;istart<Nstart;istart++)
+        //     while(istart*Lstart + Lmapped + seedMapMin < readLen) { ... Lmapped += L; }
+
+        // Search L→R (forward direction on read): sparse chain search
+        search_direction_sparse(
+            read_seq,
+            read_len,
+            index,
+            min_seed_length,
+            params,
+            params.seed_search_start_lmax,
+            false,
+            &mut seeds,
+        )?;
+
+        // Cap check between directions (STAR: seedPerReadNmax applies across both)
+        if seeds.len() >= params.seed_per_read_nmax {
+            return Ok(seeds);
         }
 
-        // Search R→L: SPARSE search matching STAR's seedSearchStartLmax-based Nstart formula.
-        // STAR divides the RC read into Nstart=ceil(readLen/seedSearchStartLmax) evenly-spaced
-        // starting positions, advancing by MMP length (Lmapped) from each start.
-        // This matches STAR's ReadAlign_Seeds.cpp R→L search behavior and avoids creating
-        // false splice anchors from rare short-match seeds near read ends.
+        // Search R→L (reverse direction on read): sparse chain search on RC read
         let rc_read = reverse_complement_read(read_seq);
         search_direction_sparse(
             &rc_read,
@@ -179,16 +186,16 @@ struct MmpResult {
     advance: usize,
 }
 
-/// Search one direction using STAR's sparse starting positions with Lmapped tracking.
+/// Search one direction using STAR's seedSearchNmax-based starting positions with Lmapped tracking.
 ///
-/// Divides read into Nstart evenly-spaced starting positions. From each start,
-/// does successive MMP searches forward, advancing past found seeds (Lmapped).
-/// Produces ~20-40 seeds per 150bp read (vs ~100+ with dense every-position search)
-/// while guaranteeing no gap > seedMapMin (default 5bp).
+/// Uses seedSearchNmax (= seedSearchStartLmax = 50 by default) evenly-spaced starting
+/// positions in [0, seedSearchStartLmax). From each start, does successive MMP searches
+/// forward, advancing past found seeds (Lmapped).
 ///
-/// Now active for R→L direction (keeping L→R dense). This matches STAR's behavior:
-/// dense L→R seeds for DP stitching, sparse R→L seeds to avoid false splice anchors
-/// near read ends caused by rare short matches.
+/// STAR's formula: iStart = seedSearchStartLmax * i / seedSearchNmax
+/// With default seedSearchNmax=seedSearchStartLmax=50: iStart = i → dense {0,1,...,49}.
+///
+/// Used for R→L direction (is_rc=true). L→R uses dense every-position search.
 fn search_direction_sparse(
     read_seq: &[u8],
     original_read_len: usize,
@@ -201,19 +208,38 @@ fn search_direction_sparse(
 ) -> Result<(), Error> {
     let read_len = read_seq.len();
 
-    // Calculate Nstart and Lstart (STAR formula: Nstart = ceil(read_len / effective_start_lmax))
-    let nstart = read_len.div_ceil(effective_start_lmax);
-    let lstart = read_len / nstart.max(1);
+    // STAR: seedSearchStartLmax is the max spacing between starting positions.
+    // Nstart = readLen / seedSearchStartLmax (number of starting positions).
+    // L→R uses floor division, R→L uses ceil division.
+    // For readLen=150, seedSearchStartLmax=50: Nstart=3, Lstart=50, positions=0,50,100.
+    let nstart = if effective_start_lmax == 0 {
+        1
+    } else if is_rc {
+        // R→L: ceil division (STAR: (readLen + seedSearchStartLmax - 1) / seedSearchStartLmax)
+        (read_len + effective_start_lmax - 1) / effective_start_lmax
+    } else {
+        // L→R: floor division with min 1 (STAR: readLen / seedSearchStartLmax)
+        (read_len / effective_start_lmax).max(1)
+    };
+    let lstart = read_len / nstart; // STAR: Lstart = (splitR[1]-splitR[0]) / Nstart
 
     for istart in 0..nstart {
         let start_pos = (istart * lstart).min(read_len);
         let mut pos = start_pos;
 
         // From this starting position, search forward with Lmapped tracking.
-        // Always search at least once per start position, then use seedMapMin
-        // for continuation (STAR default: 5).
+        // Continue while remaining bases >= seedMapMin (STAR: istart*Lstart + Lmapped + seedMapMin < readLen).
+        // Chains advance until only seedMapMin (5) bases remain.
         loop {
             if pos >= read_len {
+                break;
+            }
+            // Stop if remaining bases < seedMapMin (matches STAR's while condition:
+            // istart*Lstart + Lmapped + P.seedMapMin < splitR[1][ip]).
+            // STAR chains continue until only seedMapMin (5) bases remain, NOT
+            // seedSearchStartLmax (50). This allows chains to reach terminal small
+            // exons (e.g. 9M after intron) near the read end.
+            if read_len - pos < min_seed_length {
                 break;
             }
 
@@ -241,11 +267,7 @@ fn search_direction_sparse(
             }
 
             pos += result.advance; // Always advance by MMP length (matches STAR)
-
-            // Check if enough remaining read to justify continuing
-            if pos + params.seed_map_min >= read_len {
-                break;
-            }
+            // Remaining-length check at loop top: stop when < seedMapMin bases remain
         }
     }
 

@@ -204,20 +204,25 @@ fn search_direction_sparse(
     seeds: &mut Vec<Seed>,
 ) -> Result<(), Error> {
     let read_len = read_seq.len();
-    let effective_start_lmax = params.seed_search_start_lmax;
 
-    // STAR: seedSearchStartLmax is the max spacing between starting positions.
-    // Nstart = readLen / seedSearchStartLmax (number of starting positions).
-    // L→R uses floor division, R→L uses ceil division.
-    // For readLen=150, seedSearchStartLmax=50: Nstart=3, Lstart=50, positions=0,50,100.
-    let nstart = if effective_start_lmax == 0 {
-        1
-    } else if is_rc {
-        // R→L: ceil division (STAR: (readLen + seedSearchStartLmax - 1) / seedSearchStartLmax)
-        read_len.div_ceil(effective_start_lmax)
+    // STAR (ReadAlign_mapOneRead.cpp lines 41-42):
+    //   seedSearchStartLmax = min(P.seedSearchStartLmax, seedSearchStartLmaxOverLread*(Lread-1))
+    let effective_start_lmax = if read_len > 0 {
+        let over_lread_limit =
+            (params.seed_search_start_lmax_over_lread * (read_len as f64 - 1.0)) as usize;
+        params.seed_search_start_lmax.min(over_lread_limit)
     } else {
-        // L→R: floor division with min 1 (STAR: readLen / seedSearchStartLmax)
-        (read_len / effective_start_lmax).max(1)
+        params.seed_search_start_lmax
+    };
+
+    // STAR (line 48): Nstart = seedSearchStartLmax>0 && seedSearchStartLmax<readLen
+    //                          ? readLen/seedSearchStartLmax + 1 : 1
+    // Same formula for both L→R and R→L (computed once before the iDir loop).
+    // For readLen=150, seedSearchStartLmax=50: Nstart=150/50+1=4, Lstart=37.
+    let nstart = if effective_start_lmax > 0 && effective_start_lmax < read_len {
+        read_len / effective_start_lmax + 1
+    } else {
+        1
     };
     let lstart = read_len / nstart; // STAR: Lstart = (splitR[1]-splitR[0]) / Nstart
 
@@ -870,26 +875,35 @@ mod tests {
 
     #[test]
     fn test_sparse_nstart_calculation() {
-        // Verify Nstart = ceil(read_len / effective_start_lmax)
-        // 150 / 50 = 3 exact → Nstart=3, Lstart=50
-        assert_eq!(150_usize.div_ceil(50), 3);
-        assert_eq!(150 / 3_usize.max(1), 50);
+        // Verify Nstart matches STAR: readLen/seedSearchStartLmax + 1
+        // (when seedSearchStartLmax > 0 && seedSearchStartLmax < readLen)
+        //
+        // STAR (ReadAlign_mapOneRead.cpp line 48):
+        //   Nstart = seedSearchStartLmax>0 && seedSearchStartLmax<splitR[1]
+        //            ? splitR[1]/seedSearchStartLmax+1 : 1
+        //   Lstart = splitR[1] / Nstart
 
-        // 151 / 50 = 3.02 → Nstart=4, Lstart=37
-        assert_eq!(151_usize.div_ceil(50), 4);
-        assert_eq!(151 / 4_usize.max(1), 37);
+        // 150 / 50 + 1 = 4, Lstart = 150/4 = 37
+        let nstart = 150 / 50 + 1;
+        assert_eq!(nstart, 4);
+        assert_eq!(150 / nstart, 37);
 
-        // 30 / 50 = 0.6 → Nstart=1, Lstart=30
-        assert_eq!(30_usize.div_ceil(50), 1);
-        assert_eq!(30 / 1_usize.max(1), 30);
+        // 151 / 50 + 1 = 4, Lstart = 151/4 = 37
+        let nstart = 151 / 50 + 1;
+        assert_eq!(nstart, 4);
+        assert_eq!(151 / nstart, 37);
 
-        // Edge: 50 / 50 = 1 → Nstart=1, Lstart=50
-        assert_eq!(50_usize.div_ceil(50), 1);
-        assert_eq!(50 / 1_usize.max(1), 50);
+        // 30 / 50: seedSearchStartLmax (50) >= readLen (30) → Nstart=1
+        // (condition seedSearchStartLmax < readLen is false)
+        assert_eq!(1_usize, 1);
 
-        // 100 / 50 = 2 → Nstart=2, Lstart=50
-        assert_eq!(100_usize.div_ceil(50), 2);
-        assert_eq!(100 / 2_usize.max(1), 50);
+        // 50 / 50: seedSearchStartLmax (50) >= readLen (50) → Nstart=1
+        assert_eq!(1_usize, 1);
+
+        // 100 / 50 + 1 = 3, Lstart = 100/3 = 33
+        let nstart = 100 / 50 + 1;
+        assert_eq!(nstart, 3);
+        assert_eq!(100 / nstart, 33);
     }
 
     #[test]

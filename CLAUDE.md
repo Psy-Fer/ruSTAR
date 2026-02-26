@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**269 tests passing, 0 clippy warnings.** SE: 99.4% position agreement (adjusted), 98.8% CIGAR, 2.1% splice rate (STAR: 2.2%), 64 shared junctions, 99.5% MAPQ agreement. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**269 tests passing, 0 clippy warnings.** SE: 99.4% position agreement (adjusted), 98.8% CIGAR, 2.0% splice rate (STAR: 2.2%), 64 shared junctions, 99.6% MAPQ agreement. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 

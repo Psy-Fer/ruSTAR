@@ -356,6 +356,10 @@ pub fn cluster_seeds(
         actual_start: u64,
         actual_end: u64,
         alive: bool, // false = merged into another window (STAR kills merged windows)
+        // STAR's WALrec: persistent minimum non-anchor length threshold.
+        // Non-anchor seeds shorter than this are rejected early (before capacity check).
+        // Updated during capacity eviction. Matches STAR's assignAlignToWindow behavior.
+        wa_lrec: usize,
     }
 
     let mut windows: Vec<Window> = Vec::new();
@@ -490,6 +494,7 @@ pub fn cluster_seeds(
                         actual_start: forward_pos,
                         actual_end: forward_pos + length as u64,
                         alive: true,
+                        wa_lrec: 0,
                     });
                 }
             }
@@ -567,9 +572,16 @@ pub fn cluster_seeds(
                 continue;
             }
 
+            // STAR's WALrec early rejection: non-anchor seeds shorter than the
+            // persistent minimum are rejected before capacity check. This matches
+            // STAR's assignAlignToWindow where WALrec persists across calls.
+            if !is_anchor_seed && length < window.wa_lrec {
+                continue;
+            }
+
             // Capacity check (seedPerWindowNmax) with anchor protection
             if window.alignments.len() >= seed_per_window_nmax {
-                // Find min length of non-anchor entries
+                // Find min length of non-anchor entries (STAR: recalculate WALrec)
                 let min_non_anchor_len = window
                     .alignments
                     .iter()
@@ -578,18 +590,31 @@ pub fn cluster_seeds(
                     .min()
                     .unwrap_or(usize::MAX);
 
-                if length <= min_non_anchor_len && !is_anchor_seed {
+                // Update persistent threshold
+                window.wa_lrec = min_non_anchor_len;
+
+                // STAR uses strict < for rejection (not <=): entries equal to
+                // the minimum CAN enter and trigger eviction+replacement.
+                if length < min_non_anchor_len && !is_anchor_seed {
                     continue; // New entry too short
                 }
 
-                // Evict shortest non-anchor entries
+                // Evict shortest non-anchor entries (STAR: WA_Length <= WALrec)
                 window
                     .alignments
                     .retain(|wa| wa.is_anchor || wa.length > min_non_anchor_len);
 
                 if window.alignments.len() >= seed_per_window_nmax {
-                    continue; // Still full after eviction
+                    continue; // Still full after eviction (all anchors)
                 }
+            }
+
+            // STAR's addition condition: if (aAnchor || aLength > WALrec[iW])
+            // Non-anchor entries must be STRICTLY longer than wa_lrec to be added.
+            // Once WALrec is raised (e.g., to 6 after evicting 6bp entries), all
+            // equal-length entries are permanently excluded from this window.
+            if !is_anchor_seed && length <= window.wa_lrec {
+                continue;
             }
 
             // Insert the new WA entry

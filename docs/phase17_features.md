@@ -2,7 +2,7 @@
 
 # Phase 17: Features + Polish
 
-**Status**: In Progress (17.1 complete)
+**Status**: In Progress (17.1, 17.5 complete)
 
 **Goal**: Production-ready features and quality-of-life improvements.
 
@@ -14,7 +14,7 @@
 | 17.2 | Coordinate-sorted BAM (`--outSAMtype BAM SortedByCoordinate`) | Planned |
 | 17.3 | Paired-end chimeric detection | Planned |
 | 17.4 | `--outReadsUnmapped Fastx` | Planned |
-| 17.5 | Fix clippy warnings (config structs for too_many_arguments) | Planned |
+| 17.5 | Fix clippy warnings (0 warnings) | ✅ Complete |
 | 17.6 | `--outStd SAM/BAM` (stdout output for piping) | Planned |
 | 17.7 | GTF tag parameters (`sjdbGTFchrPrefix`, etc.) | Planned |
 | 17.8 | `--quantMode GeneCounts` | Planned |
@@ -60,6 +60,23 @@
 
 ---
 
+## Phase 17.5: Clippy Cleanup ✅
+
+**Problem**: 13 clippy warnings creating noise during debugging.
+
+**Changes**:
+- Removed dead code: `verify_match_at_position()`, unused `read_seq` param from `cluster_seeds()`
+- **`cluster_seeds()`**: 9 args → 3 args — now takes `&Parameters` instead of 6 windowing params
+- **`search_direction_sparse()`**: 8 args → 7 args — folded `effective_start_lmax` into body
+- **`ChimericSegment::new()`**: Removed constructor, all 6 call sites use struct literal syntax
+- Added `AlignReadResult` type alias for `align_read()` return type
+- Idiomatic fixes: `.contains()`, `.div_ceil()`, `.saturating_sub()`
+- `#[allow(clippy::too_many_arguments)]` on 4 functions with genuinely many distinct args
+
+**Result**: 0 clippy warnings, 264/264 tests passing.
+
+---
+
 ## Phase 14: STARsolo (Single-Cell) — DEFERRED
 
-**Prerequisite**: All accuracy gaps resolved, position agreement >99%. (Current: 97.4% pos, 99.1% MAPQ agree after Phase 16.10 multi-transcript DP)
+**Prerequisite**: All accuracy gaps resolved, position agreement >99%. (Current: 99.3% adjusted pos)

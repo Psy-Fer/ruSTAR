@@ -412,7 +412,7 @@ impl AlignmentScorer {
                 }
                 _ => break,
             }
-            if jj_l > 100 {
+            if jj_l > 255 {
                 break;
             }
         }
@@ -433,7 +433,7 @@ impl AlignmentScorer {
                 }
                 _ => break,
             }
-            if jj_r > 100 {
+            if jj_r > 255 {
                 break;
             }
         }

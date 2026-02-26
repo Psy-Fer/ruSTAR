@@ -49,8 +49,8 @@ Paired-end (Phase 8) builds on threaded infrastructure. GTF/junctions (Phase 7) 
 | 12 | Chimeric Detection | ✅ | 170 | SE chimeric, Chimeric.out.junction |
 | [13](docs/phase13_accuracy.md) | Performance + Accuracy | ✅ | 205 | 94.5% pos, 97.8% CIGAR, 2.1% splice |
 | [15](docs/phase15_sam_tags.md) | SAM Tags + PE Fix | ✅ | 235 | NH/HI/AS/NM/nM/XS/jM/jI/MD, PE fix |
-| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 264 | 99.5% pos, 2.0% splice, 99.2% MAPQ/CIGAR, recursive stitcher, Nstart fix |
-| [17](docs/phase17_features.md) | Features + Polish | ✅* | 264 | Log.final.out, sorted BAM planned |
+| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 264 | 99.3% pos, 2.1% splice, 99.1% MAPQ, recursive stitcher, Nstart fix |
+| [17](docs/phase17_features.md) | Features + Polish | ✅* | 264 | Log.final.out, clippy cleanup, sorted BAM planned |
 | 14 | STARsolo | DEFERRED | — | Waiting for accuracy parity |
 
 *Partially complete — see linked docs for sub-phase status.
@@ -180,7 +180,17 @@ See [docs/phase15_sam_tags.md](docs/phase15_sam_tags.md) for detailed sub-phase 
 
 See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (16.1-16.13), [docs/phase16_14_nstart_fix.md](docs/phase16_14_nstart_fix.md) for the Nstart fix.
 
-**Summary**: Bin-based windowing, pre-DP seed extension, MMP SA range narrowing, multi-transcript DP, recursive combinatorial stitcher, STAR-faithful scoring (scoreStitchSJshift removed), sparse bidirectional seed search with Nstart fix (99.5% pos, 2.0% splice, 99.2% MAPQ/CIGAR agree, 52 actionable disagreements), mate rescue.
+**Summary**: Bin-based windowing, pre-DP seed extension, MMP SA range narrowing, multi-transcript DP, recursive combinatorial stitcher, STAR-faithful scoring (scoreStitchSJshift removed), sparse bidirectional seed search with Nstart fix (99.3% pos adjusted, 2.1% splice, 99.1% MAPQ agree), mate rescue.
+
+**Remaining disagreements (10k SE yeast, 157 total):**
+
+| Root Cause | Count | Status |
+|-----------|-------|--------|
+| False splices — tiny trailing exons (6-12bp) | 22 | Phase 16.15 planned |
+| Repeat region tie-breaking (rDNA multi-mapper) | 119 | Unavoidable |
+| Missed splices (STAR finds, ruSTAR doesn't) | 26 | Investigation needed |
+| MAPQ inflation (ruSTAR=255, STAR=multi) | 42 | Related to multi-loci discovery |
+| Mapping-only differences (one maps, other doesn't) | 55 | Investigation needed |
 
 ---
 
@@ -188,7 +198,7 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 
 See [docs/phase17_features.md](docs/phase17_features.md) for sub-phase table and 17.1 details.
 
-**Summary**: Log.final.out complete. Sorted BAM, PE chimeric, quantMode planned.
+**Summary**: Log.final.out complete. Clippy cleanup (0 warnings). Sorted BAM, PE chimeric, quantMode planned.
 
 ---
 

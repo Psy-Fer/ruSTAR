@@ -630,6 +630,7 @@ pub fn cluster_seeds(
                 is_anchor: is_anchor_seed,
             });
         }
+
     }
 
     // Phase 5: Build SeedCluster output
@@ -785,24 +786,8 @@ fn stitch_align_to_transcript(
         let del = (genome_gap - read_gap) as u32;
         let shared = read_gap as usize;
 
-        // Score shared bases on donor side
-        let shared_mm = if shared > 0 {
-            count_mismatches_in_region(
-                read_seq,
-                last_exon.read_end,
-                last_exon.genome_end,
-                shared,
-                index,
-                cluster.is_reverse,
-            )
-        } else {
-            0
-        };
-        gap_mm += shared_mm;
-        d_score += shared as i32 - 2 * shared_mm as i32;
-
         if del >= scorer.align_intron_min && del <= scorer.align_intron_max {
-            // Splice junction — apply jR scanning
+            // Splice junction — jR scanning FIRST, then score shared bases (STAR-faithful)
             let donor_sa = last_exon.genome_end + shared as u64;
             let (jr_shift, motif, motif_score, jj_l, jj_r) = scorer.find_best_junction_position(
                 read_seq,
@@ -823,7 +808,83 @@ fn stitch_align_to_transcript(
                 .min(read_gap as i32)
                 .min(eff_length as i32);
 
-            // Check stitch mismatch limit
+            // Post-jR shared base scoring using correct genome side (STAR-faithful).
+            // STAR's stitchAlignToTranscript scores shared bases AFTER jR scanning:
+            //   for (ii=min(1,jR+1); ii<=max(rGap,jR); ii++)
+            //     g1 = (ii<=jR) ? (gAend+ii) : (gBstart1+ii);
+            // Where gBstart1 = gAend + Del (acceptor = donor + intron).
+            //
+            // Our jr_shift is relative to donor_sa = genome_end + shared, while STAR's
+            // jR is relative to genome_end. So STAR_jR = jr_shift + shared.
+            // junction_offset = number of shared bases on donor side
+            // = max(0, min(STAR_jR, shared)) = max(0, min(jr_shift + shared, shared))
+            // Bases [0..junction_offset) → donor genome
+            // Bases [junction_offset..shared) → acceptor genome (donor + intron)
+            let junction_offset =
+                (shared as i32 + jr_shift).max(0).min(shared as i32) as usize;
+
+            let mut shared_mm = 0u32;
+            let mut shared_score = 0i32;
+
+            // Score bases on donor side (before junction)
+            if junction_offset > 0 {
+                let mm = count_mismatches_in_region(
+                    read_seq,
+                    last_exon.read_end,
+                    last_exon.genome_end,
+                    junction_offset,
+                    index,
+                    cluster.is_reverse,
+                );
+                shared_mm += mm;
+                shared_score += junction_offset as i32 - 2 * mm as i32;
+            }
+
+            // Score bases on acceptor side (after junction, skip intron)
+            let acceptor_bases = shared - junction_offset;
+            if acceptor_bases > 0 {
+                let mm = count_mismatches_in_region(
+                    read_seq,
+                    last_exon.read_end + junction_offset,
+                    last_exon.genome_end + junction_offset as u64 + del as u64,
+                    acceptor_bases,
+                    index,
+                    cluster.is_reverse,
+                );
+                shared_mm += mm;
+                shared_score += acceptor_bases as i32 - 2 * mm as i32;
+            }
+
+            // Extended range: when jr_shift < -shared (STAR_jR < 0), the junction
+            // has shifted left past ALL shared bases into the previous exon. STAR
+            // also scores |STAR_jR| = |jr_shift + shared| borrowed bases against
+            // the acceptor genome.
+            if jr_shift < -(shared as i32) {
+                let n_extra = (-(jr_shift + shared as i32)) as usize;
+                let extra_read_start =
+                    (last_exon.read_end as i64 + jr_shift as i64 + shared as i64) as usize;
+                let extra_genome_start =
+                    (last_exon.genome_end as i64 + jr_shift as i64 + shared as i64 + del as i64)
+                        as u64;
+                let extra_mm = count_mismatches_in_region(
+                    read_seq,
+                    extra_read_start,
+                    extra_genome_start,
+                    n_extra,
+                    index,
+                    cluster.is_reverse,
+                );
+                shared_mm += extra_mm;
+                // These bases were scored as exact matches on donor (+1 each, 0 mm).
+                // On acceptor, each mismatch costs -2. No base-score adjustment needed
+                // since the exon boundary will move left (handled by exon adjustment below).
+                shared_score -= 2 * extra_mm as i32;
+            }
+
+            gap_mm += shared_mm;
+            d_score += shared_score;
+
+            // Check stitch mismatch limit (now uses correctly scored gap_mm)
             if !scorer.stitch_mismatch_allowed(&motif, gap_mm) {
                 return None;
             }
@@ -882,7 +943,22 @@ fn stitch_align_to_transcript(
             new_wt.junction_annotated.push(is_annotated);
             new_wt.junction_shifts.push((jj_l, jj_r));
         } else {
-            // Deletion (too short/long for intron)
+            // Deletion (too short/long for intron) — score shared bases on donor side
+            let shared_mm = if shared > 0 {
+                count_mismatches_in_region(
+                    read_seq,
+                    last_exon.read_end,
+                    last_exon.genome_end,
+                    shared,
+                    index,
+                    cluster.is_reverse,
+                )
+            } else {
+                0
+            };
+            gap_mm += shared_mm;
+            d_score += shared as i32 - 2 * shared_mm as i32;
+
             let del_score = scorer.score_del_open + scorer.score_del_base * del as i32;
             d_score += del_score;
             new_wt.n_gap += 1;

@@ -17,31 +17,6 @@ pub struct ChimericSegment {
 }
 
 impl ChimericSegment {
-    /// Create a new chimeric segment
-    pub fn new(
-        chr_idx: usize,
-        genome_start: u64,
-        genome_end: u64,
-        is_reverse: bool,
-        read_start: usize,
-        read_end: usize,
-        cigar: Vec<CigarOp>,
-        score: i32,
-        n_mismatch: u32,
-    ) -> Self {
-        Self {
-            chr_idx,
-            genome_start,
-            genome_end,
-            is_reverse,
-            read_start,
-            read_end,
-            cigar,
-            score,
-            n_mismatch,
-        }
-    }
-
     /// Get segment length in read coordinates
     pub fn read_length(&self) -> usize {
         self.read_end - self.read_start
@@ -145,17 +120,17 @@ mod tests {
         read_start: usize,
         read_end: usize,
     ) -> ChimericSegment {
-        ChimericSegment::new(
+        ChimericSegment {
             chr_idx,
             genome_start,
             genome_end,
-            false,
+            is_reverse: false,
             read_start,
             read_end,
-            vec![CigarOp::Match(50)],
-            100,
-            2,
-        )
+            cigar: vec![CigarOp::Match(50)],
+            score: 100,
+            n_mismatch: 2,
+        }
     }
 
     #[test]

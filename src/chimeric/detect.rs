@@ -205,10 +205,8 @@ fn genomic_distance(c1: &SeedCluster, c2: &SeedCluster) -> u64 {
 
     if c1.genome_end < c2.genome_start {
         c2.genome_start - c1.genome_end
-    } else if c2.genome_end < c1.genome_start {
-        c1.genome_start - c2.genome_end
     } else {
-        0 // overlapping
+        c1.genome_start.saturating_sub(c2.genome_end)
     }
 }
 
@@ -224,17 +222,17 @@ fn transcript_to_segment(transcript: &Transcript) -> Result<ChimericSegment, Err
     let read_start = transcript.exons[0].read_start;
     let read_end = transcript.exons.last().unwrap().read_end;
 
-    Ok(ChimericSegment::new(
-        transcript.chr_idx,
-        transcript.genome_start,
-        transcript.genome_end,
-        transcript.is_reverse,
+    Ok(ChimericSegment {
+        chr_idx: transcript.chr_idx,
+        genome_start: transcript.genome_start,
+        genome_end: transcript.genome_end,
+        is_reverse: transcript.is_reverse,
         read_start,
         read_end,
-        transcript.cigar.clone(),
-        transcript.score,
-        transcript.n_mismatch,
-    ))
+        cigar: transcript.cigar.clone(),
+        score: transcript.score,
+        n_mismatch: transcript.n_mismatch,
+    })
 }
 
 #[cfg(test)]

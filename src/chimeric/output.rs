@@ -169,29 +169,29 @@ mod tests {
         let mut writer = ChimericJunctionWriter::new(prefix).unwrap();
 
         // Create mock chimeric alignment (chr9 -> chr22, BCR-ABL fusion)
-        let donor = ChimericSegment::new(
-            0,
-            133738300,
-            133738363,
-            false,
-            0,
-            63,
-            vec![CigarOp::Match(63)],
-            100,
-            2,
-        );
+        let donor = ChimericSegment {
+            chr_idx: 0,
+            genome_start: 133738300,
+            genome_end: 133738363,
+            is_reverse: false,
+            read_start: 0,
+            read_end: 63,
+            cigar: vec![CigarOp::Match(63)],
+            score: 100,
+            n_mismatch: 2,
+        };
 
-        let acceptor = ChimericSegment::new(
-            1,
-            23632600,
-            23632637,
-            false,
-            63,
-            100,
-            vec![CigarOp::Match(37)],
-            80,
-            1,
-        );
+        let acceptor = ChimericSegment {
+            chr_idx: 1,
+            genome_start: 23632600,
+            genome_end: 23632637,
+            is_reverse: false,
+            read_start: 63,
+            read_end: 100,
+            cigar: vec![CigarOp::Match(37)],
+            score: 80,
+            n_mismatch: 1,
+        };
 
         let alignment = ChimericAlignment::new(
             donor,
@@ -248,29 +248,29 @@ mod tests {
         let mut writer = ChimericJunctionWriter::new(prefix).unwrap();
 
         // Create mock chimeric alignment (same chr, opposite strands)
-        let donor = ChimericSegment::new(
-            0,
-            1000,
-            1050,
-            false, // forward
-            0,
-            50,
-            vec![CigarOp::Match(50)],
-            100,
-            1,
-        );
+        let donor = ChimericSegment {
+            chr_idx: 0,
+            genome_start: 1000,
+            genome_end: 1050,
+            is_reverse: false,
+            read_start: 0,
+            read_end: 50,
+            cigar: vec![CigarOp::Match(50)],
+            score: 100,
+            n_mismatch: 1,
+        };
 
-        let acceptor = ChimericSegment::new(
-            0,
-            2000,
-            2050,
-            true, // reverse
-            50,
-            100,
-            vec![CigarOp::Match(50)],
-            100,
-            1,
-        );
+        let acceptor = ChimericSegment {
+            chr_idx: 0,
+            genome_start: 2000,
+            genome_end: 2050,
+            is_reverse: true,
+            read_start: 50,
+            read_end: 100,
+            cigar: vec![CigarOp::Match(50)],
+            score: 100,
+            n_mismatch: 1,
+        };
 
         let alignment = ChimericAlignment::new(
             donor,

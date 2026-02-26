@@ -5,40 +5,6 @@ use crate::align::transcript::{CigarOp, Transcript};
 use crate::error::Error;
 use crate::index::GenomeIndex;
 
-/// Verify match length at a specific genome position with correct strand handling.
-///
-/// Seeds found via binary search guarantee `sa_nbases` matching bases at `sa_start`,
-/// but other positions in the SA range may match fewer bases. This function re-verifies
-/// the actual match length at each specific genome position.
-///
-/// For reverse-strand positions, adds `n_genome` offset to access the reverse-complement
-/// region of the genome (which is stored at `[n_genome, 2*n_genome)`).
-fn verify_match_at_position(
-    read_seq: &[u8],
-    read_pos: usize,
-    genome_pos: u64,
-    is_reverse: bool,
-    max_length: usize,
-    index: &GenomeIndex,
-) -> usize {
-    let actual_genome_pos = if is_reverse {
-        genome_pos + index.genome.n_genome
-    } else {
-        genome_pos
-    };
-    let mut length = 0;
-    for i in 0..max_length {
-        if read_pos + i >= read_seq.len() {
-            break;
-        }
-        match index.genome.get_base(actual_genome_pos + i as u64) {
-            Some(gb) if gb < 5 && gb == read_seq[read_pos + i] => length += 1,
-            _ => break,
-        }
-    }
-    length
-}
-
 /// Count mismatches in an alignment by comparing read sequence to genome sequence.
 ///
 /// The read sequence is always in forward orientation. For reverse-strand alignments,
@@ -163,6 +129,7 @@ struct ExtendResult {
 /// * `p_mm_max` - outFilterMismatchNoverLmax (max mismatch ratio)
 /// * `index` - Genome index
 /// * `is_reverse` - Whether this is a reverse-strand alignment
+#[allow(clippy::too_many_arguments)]
 fn extend_alignment(
     read_seq: &[u8],
     read_start: usize,
@@ -332,28 +299,25 @@ pub struct SeedCluster {
 /// # Arguments
 /// * `seeds` - All seeds found in the read
 /// * `index` - Genome index
-/// * `win_bin_nbits` - Log2 of window bin size (STAR default: 16 → 64KB bins)
-/// * `win_anchor_dist_nbins` - Max bins for anchor-window merging (STAR default: 9)
-/// * `win_flank_nbins` - Bins to extend each window side (STAR default: 4)
-/// * `max_loci_for_anchor` - Max SA range for a seed to be an anchor (e.g., 10)
-/// * `win_anchor_multimap_nmax` - Max loci anchors can map to (STAR default: 50)
-/// * `seed_per_window_nmax` - Max WA entries per window (capacity eviction threshold)
+/// * `params` - Parameters (windowing params: winBinNbits, winAnchorDistNbins, winFlankNbins,
+///   winAnchorMultimapNmax, seedPerWindowNmax, seedMapMin)
 ///
 /// # Returns
 /// Vector of seed clusters, one per window with assigned seeds
 pub fn cluster_seeds(
     seeds: &[Seed],
-    read_seq: &[u8],
     index: &GenomeIndex,
-    win_bin_nbits: u32,
-    win_anchor_dist_nbins: u32,
-    win_flank_nbins: u32,
-    max_loci_for_anchor: usize,
-    win_anchor_multimap_nmax: usize,
-    seed_per_window_nmax: usize,
-    min_seed_length: usize,
+    params: &crate::params::Parameters,
 ) -> Vec<SeedCluster> {
     use std::collections::HashMap;
+
+    let win_bin_nbits = params.win_bin_nbits;
+    let win_anchor_dist_nbins = params.win_anchor_dist_nbins;
+    let win_flank_nbins = params.win_flank_nbins;
+    let max_loci_for_anchor = params.win_anchor_multimap_nmax;
+    let win_anchor_multimap_nmax = params.win_anchor_multimap_nmax;
+    let seed_per_window_nmax = params.seed_per_window_nmax;
+    let min_seed_length = params.seed_map_min;
 
     let anchor_set: Vec<bool> = seeds
         .iter()
@@ -1835,9 +1799,12 @@ mod tests {
             },
         ];
 
-        // Bin-based windowing: win_bin_nbits=16, win_anchor_dist_nbins=9, win_flank_nbins=4
-        let read_seq = vec![0u8; 20]; // Dummy read for verify_match_at_position
-        let clusters = cluster_seeds(&seeds, &read_seq, &index, 16, 9, 4, 10, 50, 50, 5);
+        // Bin-based windowing with default parameters
+        let params = {
+            use clap::Parser;
+            crate::params::Parameters::parse_from(vec!["ruSTAR"])
+        };
+        let clusters = cluster_seeds(&seeds, &index, &params);
 
         // With empty SA ranges, no clusters will be created
         assert_eq!(clusters.len(), 0);

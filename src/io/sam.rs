@@ -77,6 +77,7 @@ impl SamWriter {
     /// * `transcripts` - Alignment transcripts (1 or more for multi-mappers)
     /// * `genome` - Genome index
     /// * `params` - Parameters
+    #[allow(clippy::too_many_arguments)]
     pub fn write_alignment(
         &mut self,
         read_name: &str,

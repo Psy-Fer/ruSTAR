@@ -85,6 +85,7 @@ impl SpliceJunctionStats {
     /// * `is_unique` - True if from unique mapping, false if multi-mapping
     /// * `overhang` - Minimum overhang on either side
     /// * `annotated` - True if junction is annotated in GTF
+    #[allow(clippy::too_many_arguments)]
     pub fn record_junction(
         &self,
         chr_idx: usize,

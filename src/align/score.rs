@@ -266,6 +266,7 @@ impl AlignmentScorer {
     /// - jr_shift: how many bases to shift the junction boundary (positive = rightward)
     /// - best_motif: the splice motif at the optimal position
     /// - best_motif_score: the motif penalty at the optimal position
+    #[allow(clippy::too_many_arguments)]
     pub fn find_best_junction_position(
         &self,
         read_seq: &[u8],

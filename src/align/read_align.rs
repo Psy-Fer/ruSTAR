@@ -8,6 +8,14 @@ use crate::index::GenomeIndex;
 use crate::params::{IntronMotifFilter, IntronStrandFilter, Parameters};
 use crate::stats::UnmappedReason;
 
+/// Result of aligning a single read: (transcripts, chimeric_alignments, n_for_mapq, unmapped_reason)
+pub type AlignReadResult = (
+    Vec<Transcript>,
+    Vec<crate::chimeric::ChimericAlignment>,
+    usize,
+    Option<UnmappedReason>,
+);
+
 /// Paired-end alignment result
 #[derive(Debug, Clone)]
 pub struct PairedAlignment {
@@ -67,19 +75,10 @@ pub fn align_read(
     read_name: &str,
     index: &GenomeIndex,
     params: &Parameters,
-) -> Result<
-    (
-        Vec<Transcript>,
-        Vec<crate::chimeric::ChimericAlignment>,
-        usize,
-        Option<UnmappedReason>,
-    ),
-    Error,
-> {
+) -> Result<AlignReadResult, Error> {
     let debug_read = !params.read_name_filter.is_empty() && read_name == params.read_name_filter;
 
-    // Step 1: Find seeds
-    // STAR uses seedMapMin (default 5) as minimum seed length
+    // Step 1: Find seeds (seedMapMin from params)
     let min_seed_length = params.seed_map_min;
     let seeds = Seed::find_seeds(read_seq, index, min_seed_length, params)?;
 
@@ -118,19 +117,7 @@ pub fn align_read(
 
     // Step 2: Cluster seeds (STAR's bin-based windowing)
     // seed_per_window_nmax capacity eviction is handled inside cluster_seeds()
-    let max_loci_for_anchor = params.win_anchor_multimap_nmax; // STAR: winAnchorMultimapNmax
-    let clusters = cluster_seeds(
-        &seeds,
-        read_seq,
-        index,
-        params.win_bin_nbits,
-        params.win_anchor_dist_nbins,
-        params.win_flank_nbins,
-        max_loci_for_anchor,
-        params.win_anchor_multimap_nmax,
-        params.seed_per_window_nmax,
-        min_seed_length,
-    );
+    let clusters = cluster_seeds(&seeds, index, params);
 
     if debug_read {
         eprintln!(
@@ -366,10 +353,7 @@ pub fn align_read(
             }
             IntronMotifFilter::RemoveNoncanonical => {
                 // Reject if any junction is non-canonical
-                if t.junction_motifs
-                    .iter()
-                    .any(|m| *m == SpliceMotif::NonCanonical)
-                {
+                if t.junction_motifs.contains(&SpliceMotif::NonCanonical) {
                     *filter_reasons.entry("noncanonical_junction").or_insert(0) += 1;
                     return false;
                 }
@@ -626,20 +610,7 @@ fn rescue_unmapped_mate(
         .collect();
 
     // Step 5: Cluster and stitch the filtered seeds (bin-based windowing)
-    let max_loci_for_anchor = params.win_anchor_multimap_nmax;
-    let min_seed_length = params.seed_map_min;
-    let clusters = cluster_seeds(
-        &filtered_seeds,
-        unmapped_seq,
-        index,
-        params.win_bin_nbits,
-        params.win_anchor_dist_nbins,
-        params.win_flank_nbins,
-        max_loci_for_anchor,
-        params.win_anchor_multimap_nmax,
-        params.seed_per_window_nmax,
-        min_seed_length,
-    );
+    let clusters = cluster_seeds(&filtered_seeds, index, params);
 
     if clusters.is_empty() {
         return Ok(None);

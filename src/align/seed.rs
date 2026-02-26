@@ -37,7 +37,7 @@ impl Seed {
     /// # Arguments
     /// * `read_seq` - Read sequence (encoded as 0=A, 1=C, 2=G, 3=T)
     /// * `index` - Genome index with SA and SAindex
-    /// * `min_seed_length` - Minimum seed length to report (typically 8-20)
+    /// * `min_seed_length` - Minimum seed length to report
     /// * `params` - Parameters including seedMultimapNmax
     ///
     /// # Returns
@@ -65,7 +65,6 @@ impl Seed {
             index,
             min_seed_length,
             params,
-            params.seed_search_start_lmax,
             false,
             &mut seeds,
         )?;
@@ -83,7 +82,6 @@ impl Seed {
             index,
             min_seed_length,
             params,
-            params.seed_search_start_lmax,
             true,
             &mut seeds,
         )?;
@@ -202,11 +200,11 @@ fn search_direction_sparse(
     index: &GenomeIndex,
     min_seed_length: usize,
     params: &Parameters,
-    effective_start_lmax: usize,
     is_rc: bool,
     seeds: &mut Vec<Seed>,
 ) -> Result<(), Error> {
     let read_len = read_seq.len();
+    let effective_start_lmax = params.seed_search_start_lmax;
 
     // STAR: seedSearchStartLmax is the max spacing between starting positions.
     // Nstart = readLen / seedSearchStartLmax (number of starting positions).
@@ -216,7 +214,7 @@ fn search_direction_sparse(
         1
     } else if is_rc {
         // R→L: ceil division (STAR: (readLen + seedSearchStartLmax - 1) / seedSearchStartLmax)
-        (read_len + effective_start_lmax - 1) / effective_start_lmax
+        read_len.div_ceil(effective_start_lmax)
     } else {
         // L→R: floor division with min 1 (STAR: readLen / seedSearchStartLmax)
         (read_len / effective_start_lmax).max(1)

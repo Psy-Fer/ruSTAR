@@ -117,7 +117,7 @@ pub fn align_read(
 
     // Step 2: Cluster seeds (STAR's bin-based windowing)
     // seed_per_window_nmax capacity eviction is handled inside cluster_seeds()
-    let clusters = cluster_seeds(&seeds, index, params);
+    let clusters = cluster_seeds(&seeds, index, params, read_seq.len());
 
     if debug_read {
         eprintln!(
@@ -607,7 +607,7 @@ fn rescue_unmapped_mate(
         .collect();
 
     // Step 5: Cluster and stitch the filtered seeds (bin-based windowing)
-    let clusters = cluster_seeds(&filtered_seeds, index, params);
+    let clusters = cluster_seeds(&filtered_seeds, index, params, unmapped_seq.len());
 
     if clusters.is_empty() {
         return Ok(None);

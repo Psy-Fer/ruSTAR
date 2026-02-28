@@ -308,6 +308,7 @@ pub fn cluster_seeds(
     seeds: &[Seed],
     index: &GenomeIndex,
     params: &crate::params::Parameters,
+    read_len: usize,
 ) -> Vec<SeedCluster> {
     use std::collections::HashMap;
 
@@ -561,19 +562,34 @@ pub fn cluster_seeds(
             // Same diagonal means (genome_pos - read_pos) is equal. If overlap
             // found, keep the longer entry. This deduplicates shorter seeds
             // subsumed by longer seeds at the same alignment position.
-            let new_diag = forward_pos as i64 - seed.read_pos as i64;
+            //
+            // CRITICAL: STAR uses positive-strand read coordinates for overlap
+            // detection (stitchPieces.cpp line 151: aRstart = Lread - (aLength+aRstart)
+            // for reverse-strand). Without this, reverse-strand seeds covering the
+            // same genomic exon have different diagonals → no overlap → anchor
+            // proliferation → window capacity overflow → splice-target seed eviction.
+            let (new_ps_rstart, new_ps_rend) = if window.is_reverse {
+                let ps = read_len - (length + seed.read_pos);
+                (ps, ps + length)
+            } else {
+                (seed.read_pos, seed.read_pos + length)
+            };
+            let new_diag = forward_pos as i64 - new_ps_rstart as i64;
             let mut overlap_idx = None;
             for (i, wa) in window.alignments.iter().enumerate() {
-                let wa_diag = wa.genome_pos as i64 - wa.read_pos as i64;
+                let (wa_ps_rstart, wa_ps_rend) = if window.is_reverse {
+                    let ps = read_len - (wa.length + wa.read_pos);
+                    (ps, ps + wa.length)
+                } else {
+                    (wa.read_pos, wa.read_pos + wa.length)
+                };
+                let wa_diag = wa.genome_pos as i64 - wa_ps_rstart as i64;
                 if new_diag == wa_diag {
                     // Same diagonal — check for overlapping read ranges
-                    // (matches STAR's exact overlap condition)
-                    let new_rstart = seed.read_pos;
-                    let new_rend = seed.read_pos + length;
-                    let wa_rstart = wa.read_pos;
-                    let wa_rend = wa.read_pos + wa.length;
-                    if (new_rstart >= wa_rstart && new_rstart < wa_rend)
-                        || (new_rend >= wa_rstart && new_rend < wa_rend)
+                    // in positive-strand coordinates (matches STAR's exact
+                    // overlap condition from assignAlignToWindow)
+                    if (new_ps_rstart >= wa_ps_rstart && new_ps_rstart < wa_ps_rend)
+                        || (new_ps_rend >= wa_ps_rstart && new_ps_rend < wa_ps_rend)
                     {
                         overlap_idx = Some(i);
                         break;
@@ -1962,7 +1978,7 @@ mod tests {
             use clap::Parser;
             crate::params::Parameters::parse_from(vec!["ruSTAR"])
         };
-        let clusters = cluster_seeds(&seeds, &index, &params);
+        let clusters = cluster_seeds(&seeds, &index, &params, 150);
 
         // With empty SA ranges, no clusters will be created
         assert_eq!(clusters.len(), 0);

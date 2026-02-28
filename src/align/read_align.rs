@@ -401,6 +401,12 @@ pub fn align_read(
         }
     }
 
+    // Note: STAR sometimes finds 2 equivalent indel placements in homopolymer runs
+    // via its recursive stitcher's seed exploration (NH=2 instead of NH=1 for ~5 reads).
+    // Generating equivalents post-hoc causes more harm than good (41 false NH=2 vs 5 fixed).
+    // The root cause is jR scanning placing insertions at different positions — fixing that
+    // would be a better approach than post-hoc enumeration.
+
     // Step 5: Deduplicate transcripts with identical genomic coordinates AND CIGAR.
     // Keep only the highest-scoring transcript for each unique (location, CIGAR) pair.
     // Transcripts with different CIGARs (e.g. indel at different positions) are kept

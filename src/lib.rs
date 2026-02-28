@@ -516,13 +516,19 @@ fn align_reads_single_end<W: AlignmentWriter>(
                 }
 
                 // Record stats (atomic, lock-free)
-                let n = transcripts.len();
-                stats.record_alignment(n, max_multimaps);
-                if n == 0 {
+                // For too-many-loci, n_for_mapq carries the true loci count
+                // while transcripts is empty
+                let n_for_stats = if transcripts.is_empty() && n_for_mapq > 0 {
+                    n_for_mapq // too-many-loci: use true count for stats
+                } else {
+                    transcripts.len()
+                };
+                stats.record_alignment(n_for_stats, max_multimaps);
+                if transcripts.is_empty() && unmapped_reason.is_some() {
                     stats.record_unmapped_reason(
                         unmapped_reason.unwrap_or(crate::stats::UnmappedReason::Other),
                     );
-                } else if n == 1 {
+                } else if transcripts.len() == 1 {
                     stats.record_transcript_stats(&transcripts[0]);
                 }
 

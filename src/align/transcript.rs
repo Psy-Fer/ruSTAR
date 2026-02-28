@@ -46,7 +46,7 @@ pub struct Exon {
 }
 
 /// CIGAR operation
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CigarOp {
     /// M: match/mismatch (default mode)
     Match(u32),

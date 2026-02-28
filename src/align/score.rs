@@ -278,6 +278,7 @@ impl AlignmentScorer {
         is_reverse: bool,
         n_genome: u64,
         prev_exon_len: usize,
+        next_seed_len: usize, // length of the B seed (for scan range)
     ) -> (i32, SpliceMotif, i32, u32, u32) {
         let del = g_gap - r_gap; // net intron/deletion length (constant)
         debug_assert!(del > 0);
@@ -386,10 +387,24 @@ impl AlignmentScorer {
                     best_motif = motif;
                     best_motif_score = motif_score;
                 }
+            } else {
+                // Deletion (Del < alignIntronMin) or out-of-range gap — no motif,
+                // pure positional score. STAR: jCan1=-1, jPen1=0, Score2=Score1.
+                // For reverse strand, rightmost-in-RC wins ties (= leftmost in forward).
+                if score1 > max_score2 || (is_reverse && score1 == max_score2) {
+                    max_score2 = score1;
+                    best_jr = jr1;
+                    best_motif = SpliceMotif::NonCanonical;
+                    best_motif_score = 0;
+                }
             }
 
             jr1 += 1;
-            if jr1 > r_gap as i32 {
+            // STAR: jR1 < int(rBend) - int(rAend) where rBend = rBstart + L - 1
+            // This equals jR1 < rGap + L, allowing the scan to extend into the B seed.
+            // This is critical for finding canonical junctions when seeds are adjacent
+            // (rGap=0) but the junction needs to shift into the B seed's territory.
+            if jr1 >= r_gap as i32 + next_seed_len as i32 {
                 break;
             }
         }
@@ -438,13 +453,26 @@ impl AlignmentScorer {
             }
         }
 
-        // Non-canonical or deletion: flush LEFT to be deterministic in repeat regions
+        // Non-canonical or deletion: flush to be deterministic in repeat regions.
+        // STAR operates in forward-genome space, so flush-left = leftmost in forward coords.
+        // Our function operates in SA space (RC genome for reverse reads), so:
+        //   - Forward reads: flush LEFT in SA space = LEFT in forward space ✓
+        //   - Reverse reads: flush RIGHT in SA space = LEFT in forward space ✓
         if best_motif == SpliceMotif::NonCanonical || del < self.align_intron_min as i64 {
-            best_jr -= jj_l;
-            jj_r += jj_l;
-            jj_l = 0;
-            // Clamp: don't shift beyond available flanking Matches
-            best_jr = best_jr.max(-(prev_exon_len as i32)).min(r_gap as i32);
+            if is_reverse {
+                // Reverse strand: flush RIGHT in RC space = LEFT in forward space
+                best_jr += jj_r;
+                jj_l += jj_r;
+                jj_r = 0;
+            } else {
+                // Forward strand: flush LEFT (STAR default)
+                best_jr -= jj_l;
+                jj_r += jj_l;
+                jj_l = 0;
+            }
+            // STAR: if (int(EX_L)+jR<1) return -1000005;
+            // Clamp: don't let exon A become zero-length (STAR rejects, we clamp)
+            best_jr = best_jr.max(1 - prev_exon_len as i32);
             // Re-check motif at flushed position
             if del >= self.align_intron_min as i64 && del <= self.align_intron_max as i64 {
                 let donor_sa = (g_a_end_inc as i64 + best_jr as i64 + 1) as u64;
@@ -1282,6 +1310,7 @@ mod tests {
             false, // forward strand
             genome.n_genome,
             5, // prev_exon_len
+            3, // next_seed_len
         );
 
         // jR=1 should find GT-AG motif
@@ -1325,6 +1354,7 @@ mod tests {
             false,
             genome.n_genome,
             5,
+            2, // next_seed_len
         );
 
         assert_eq!(motif, SpliceMotif::GtAg);
@@ -1375,6 +1405,7 @@ mod tests {
             false,
             genome.n_genome,
             5,
+            2, // next_seed_len
         );
 
         // Non-canonical junction should be flushed left

@@ -505,18 +505,24 @@ fn max_mappable_length(
 
         if comp3 {
             // read > genome at mismatch: move left boundary up
-            i1a = i1b;
-            l1a = l1b;
-            i1b = i1;
-            l1b = l1;
+            // STAR only shifts history when match length improves (L3 > L1)
+            if l3 > l1 {
+                i1a = i1b;
+                l1a = l1b;
+                i1b = i1;
+                l1b = l1;
+            }
             i1 = i3;
             l1 = l3;
         } else {
             // read <= genome at mismatch: move right boundary down
-            i2a = i2b;
-            l2a = l2b;
-            i2b = i2;
-            l2b = l2;
+            // STAR only shifts history when match length improves (L3 > L2)
+            if l3 > l2 {
+                i2a = i2b;
+                l2a = l2b;
+                i2b = i2;
+                l2b = l2;
+            }
             i2 = i3;
             l2 = l3;
         }
@@ -550,50 +556,70 @@ fn max_mappable_length(
 /// Binary search to find the SA boundary where match length transitions
 /// from >= l3 to < l3. Used to narrow the SA range to only positions
 /// matching the maximum prefix length.
-/// Ports STAR's funFindMultRange.
+/// Ports STAR's findMultRange (SuffixArrayFuns.cpp).
+///
+/// STAR's logic: given the "best" SA index i3 with match length L3,
+/// find the farthest SA index that also matches L3 bases, searching
+/// outward from i1 (which may or may not already match).
+///
+/// i1a tracks the boundary with L >= L3 ("good" side)
+/// i1b tracks the boundary with L < L3 ("bad" side)
+/// Binary search narrows between them until adjacent.
 #[allow(clippy::too_many_arguments)]
 fn find_mult_range(
     read_seq: &[u8],
     read_pos: usize,
     index: &GenomeIndex,
     _remaining: usize,
-    mut i3: usize,
+    i3: usize,
     l3: usize,
-    mut i1: usize,
+    i1: usize,
     l1: usize,
     i1a: usize,
     l1a: usize,
     i1b: usize,
     l1b: usize,
 ) -> usize {
-    if l1 >= l3 {
-        return i1; // Boundary already at target length
-    }
-
-    // Use closest cached intermediate with L >= l3 to narrow search space
-    if l1b >= l3 {
-        i3 = i1b;
-    } else if l1a >= l3 {
-        i3 = i1a;
-    }
-
-    // Binary search between i3 (L >= l3) and i1 (L < l3)
-    // Start comparison from the minimum known matching length
-    let mut l_start = l1;
-
-    while (i3 + 1 < i1) || (i1 + 1 < i3) {
-        let i4 = median_uint2(i3, i1);
-        let (l4, _) = compare_seq_to_genome(read_seq, read_pos, index, i4, l_start);
-
-        if l4 >= l3 {
-            i3 = i4;
+    // STAR's findMultRange: set up (i1a, i1b) search range
+    // i1a will have L >= L3 (the "good" side)
+    // i1b will have L < L3 (the "bad" side)
+    let (mut ia, mut ib, mut lb);
+    if l1 < l3 {
+        // i1 is below target: search between i3 (good) and i1 (bad)
+        ib = i1;
+        lb = l1;
+        ia = i3;
+    } else {
+        // i1 already at target length
+        if l1a < l1 {
+            // Search between i1a (bad) and i1 (good), outward from i1
+            ib = i1a;
+            lb = l1a;
+            ia = i1;
         } else {
-            i1 = i4;
-            l_start = l4; // Update comparison start to shorter match
+            // i1a also at target — search between i1a and i1b
+            // (STAR: falls through without reassignment, keeps original i1a/i1b)
+            ia = i1a;
+            ib = i1b;
+            lb = l1b;
         }
     }
 
-    i3
+    // Binary search: ia has L >= l3, ib has L < l3
+    // compareSeqToGenome is called with N=l3 (not remaining), matching STAR
+    while (ib + 1 < ia) || (ia + 1 < ib) {
+        let ic = median_uint2(ia, ib);
+        let (lc, _) = compare_seq_to_genome(read_seq, read_pos, index, ic, lb);
+
+        if lc >= l3 {
+            ia = ic;
+        } else {
+            ib = ic;
+            lb = lc;
+        }
+    }
+
+    ia
 }
 
 #[cfg(test)]

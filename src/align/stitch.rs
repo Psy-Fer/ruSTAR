@@ -801,112 +801,117 @@ fn stitch_align_to_transcript(
         let del = (genome_gap - read_gap) as u32;
         let shared = read_gap as usize;
 
-        if del >= scorer.align_intron_min && del <= scorer.align_intron_max {
-            // Splice junction — jR scanning FIRST, then score shared bases (STAR-faithful)
-            let donor_sa = last_exon.genome_end + shared as u64;
-            let (jr_shift, motif, motif_score, jj_l, jj_r) = scorer.find_best_junction_position(
+        let is_splice = del >= scorer.align_intron_min && del <= scorer.align_intron_max;
+
+        // STAR: Del > alignIntronMax → reject (return -1000003)
+        if del > scorer.align_intron_max && scorer.align_intron_max > 0 {
+            return None;
+        }
+
+        // --- jR scanning for BOTH splice junctions and deletions (STAR-faithful) ---
+        // STAR uses the same scanning code path for both cases; the only difference
+        // is motif detection (splice) vs pure positional score (deletion).
+        let donor_sa = last_exon.genome_end + shared as u64;
+        let (jr_shift, motif, motif_score, jj_l, jj_r) = scorer.find_best_junction_position(
+            read_seq,
+            last_exon.read_end + shared,
+            donor_sa,
+            read_gap.max(0),
+            genome_gap,
+            &index.genome,
+            cluster.is_reverse,
+            index.genome.n_genome,
+            last_exon.read_end - last_exon.read_start + shared,
+            eff_length,
+        );
+
+        // Clamp shift: must not consume entire donor or acceptor
+        let prev_match_len = (last_exon.read_end - last_exon.read_start + shared) as i32;
+        let jr_shift = jr_shift.max(-prev_match_len).min(eff_length as i32);
+
+        // Post-jR shared base scoring using correct genome side (STAR-faithful).
+        // Our jr_shift is relative to donor_sa = genome_end + shared, while STAR's
+        // jR is relative to genome_end. So STAR_jR = jr_shift + shared.
+        // junction_offset = number of shared bases on donor side
+        let junction_offset = (shared as i32 + jr_shift).max(0).min(shared as i32) as usize;
+
+        let mut shared_mm = 0u32;
+        let mut shared_score = 0i32;
+
+        // Score bases on donor side (before junction/deletion)
+        if junction_offset > 0 {
+            let mm = count_mismatches_in_region(
                 read_seq,
-                last_exon.read_end + shared,
-                donor_sa,
-                read_gap.max(0),
-                genome_gap,
-                &index.genome,
+                last_exon.read_end,
+                last_exon.genome_end,
+                junction_offset,
+                index,
                 cluster.is_reverse,
-                index.genome.n_genome,
-                last_exon.read_end - last_exon.read_start + shared,
             );
+            shared_mm += mm;
+            shared_score += junction_offset as i32 - 2 * mm as i32;
+        }
 
-            // Clamp shift: must not consume entire donor or acceptor
-            let prev_match_len = (last_exon.read_end - last_exon.read_start + shared) as i32;
-            let jr_shift = jr_shift
-                .max(-prev_match_len)
-                .min(read_gap as i32)
-                .min(eff_length as i32);
+        // Score bases on acceptor side (after junction/deletion, skip gap)
+        let acceptor_bases = shared - junction_offset;
+        if acceptor_bases > 0 {
+            let mm = count_mismatches_in_region(
+                read_seq,
+                last_exon.read_end + junction_offset,
+                last_exon.genome_end + junction_offset as u64 + del as u64,
+                acceptor_bases,
+                index,
+                cluster.is_reverse,
+            );
+            shared_mm += mm;
+            shared_score += acceptor_bases as i32 - 2 * mm as i32;
+        }
 
-            // Post-jR shared base scoring using correct genome side (STAR-faithful).
-            // STAR's stitchAlignToTranscript scores shared bases AFTER jR scanning:
-            //   for (ii=min(1,jR+1); ii<=max(rGap,jR); ii++)
-            //     g1 = (ii<=jR) ? (gAend+ii) : (gBstart1+ii);
-            // Where gBstart1 = gAend + Del (acceptor = donor + intron).
-            //
-            // Our jr_shift is relative to donor_sa = genome_end + shared, while STAR's
-            // jR is relative to genome_end. So STAR_jR = jr_shift + shared.
-            // junction_offset = number of shared bases on donor side
-            // = max(0, min(STAR_jR, shared)) = max(0, min(jr_shift + shared, shared))
-            // Bases [0..junction_offset) → donor genome
-            // Bases [junction_offset..shared) → acceptor genome (donor + intron)
-            let junction_offset = (shared as i32 + jr_shift).max(0).min(shared as i32) as usize;
+        // Extended left range: junction shifted left past ALL shared bases into exon A
+        if jr_shift < -(shared as i32) {
+            let n_extra = (-(jr_shift + shared as i32)) as usize;
+            let extra_read_start =
+                (last_exon.read_end as i64 + jr_shift as i64 + shared as i64) as usize;
+            let extra_genome_start =
+                (last_exon.genome_end as i64 + jr_shift as i64 + shared as i64 + del as i64) as u64;
+            let extra_mm = count_mismatches_in_region(
+                read_seq,
+                extra_read_start,
+                extra_genome_start,
+                n_extra,
+                index,
+                cluster.is_reverse,
+            );
+            shared_mm += extra_mm;
+            shared_score -= 2 * extra_mm as i32;
+        }
 
-            let mut shared_mm = 0u32;
-            let mut shared_score = 0i32;
+        // Extended right range: junction shifted right past ALL shared bases into seed B
+        if jr_shift > shared as i32 {
+            let n_extra = (jr_shift - shared as i32) as usize;
+            let extra_read_start = last_exon.read_end + shared;
+            let extra_genome_start = last_exon.genome_end + shared as u64;
+            let extra_mm = count_mismatches_in_region(
+                read_seq,
+                extra_read_start,
+                extra_genome_start,
+                n_extra,
+                index,
+                cluster.is_reverse,
+            );
+            shared_mm += extra_mm;
+            shared_score -= 2 * extra_mm as i32;
+        }
 
-            // Score bases on donor side (before junction)
-            if junction_offset > 0 {
-                let mm = count_mismatches_in_region(
-                    read_seq,
-                    last_exon.read_end,
-                    last_exon.genome_end,
-                    junction_offset,
-                    index,
-                    cluster.is_reverse,
-                );
-                shared_mm += mm;
-                shared_score += junction_offset as i32 - 2 * mm as i32;
-            }
+        gap_mm += shared_mm;
+        d_score += shared_score;
 
-            // Score bases on acceptor side (after junction, skip intron)
-            let acceptor_bases = shared - junction_offset;
-            if acceptor_bases > 0 {
-                let mm = count_mismatches_in_region(
-                    read_seq,
-                    last_exon.read_end + junction_offset,
-                    last_exon.genome_end + junction_offset as u64 + del as u64,
-                    acceptor_bases,
-                    index,
-                    cluster.is_reverse,
-                );
-                shared_mm += mm;
-                shared_score += acceptor_bases as i32 - 2 * mm as i32;
-            }
-
-            // Extended range: when jr_shift < -shared (STAR_jR < 0), the junction
-            // has shifted left past ALL shared bases into the previous exon. STAR
-            // also scores |STAR_jR| = |jr_shift + shared| borrowed bases against
-            // the acceptor genome.
-            if jr_shift < -(shared as i32) {
-                let n_extra = (-(jr_shift + shared as i32)) as usize;
-                let extra_read_start =
-                    (last_exon.read_end as i64 + jr_shift as i64 + shared as i64) as usize;
-                let extra_genome_start =
-                    (last_exon.genome_end as i64 + jr_shift as i64 + shared as i64 + del as i64)
-                        as u64;
-                let extra_mm = count_mismatches_in_region(
-                    read_seq,
-                    extra_read_start,
-                    extra_genome_start,
-                    n_extra,
-                    index,
-                    cluster.is_reverse,
-                );
-                shared_mm += extra_mm;
-                // These bases were scored as exact matches on donor (+1 each, 0 mm).
-                // On acceptor, each mismatch costs -2. No base-score adjustment needed
-                // since the exon boundary will move left (handled by exon adjustment below).
-                shared_score -= 2 * extra_mm as i32;
-            }
-
-            gap_mm += shared_mm;
-            d_score += shared_score;
-
-            // Check stitch mismatch limit (now uses correctly scored gap_mm)
+        // --- Type-specific scoring and tracking ---
+        if is_splice {
+            // Check stitch mismatch limit
             if !scorer.stitch_mismatch_allowed(&motif, gap_mm) {
                 return None;
             }
-
-            // STAR does NOT check alignSJoverhangMin inside stitchAlignToTranscript —
-            // both overhang checks are commented out in STAR's source code.
-            // The real overhang+repeat check happens at finalization in stitchWindowAligns,
-            // where extension lengths are included (making exon lengths larger).
 
             // Check annotation (needed for sjdbScore bonus and finalization check)
             let is_annotated = junction_db.is_some_and(|db| {
@@ -924,112 +929,145 @@ fn stitch_align_to_transcript(
                 d_score += scorer.sjdb_score;
             }
 
-            // Adjust last exon for jr_shift
-            if jr_shift != 0 {
-                if let Some(last) = new_wt.exons.last_mut() {
-                    last.read_end =
-                        (last.read_end as i64 + shared as i64 + jr_shift as i64) as usize;
-                    last.genome_end =
-                        (last.genome_end as i64 + shared as i64 + jr_shift as i64) as u64;
-                }
-            } else if shared > 0 {
-                if let Some(last) = new_wt.exons.last_mut() {
-                    last.read_end += shared;
-                    last.genome_end += shared as u64;
-                }
-            }
-
-            // New exon for acceptor side
-            // jr_shift positive = junction moved right → acceptor starts later
-            // jr_shift negative = junction moved left → acceptor starts earlier
-            let acceptor_read_start = (eff_read_pos as i64 + jr_shift as i64) as usize;
-            let acceptor_genome_start = (eff_genome_pos as i64 + jr_shift as i64) as u64;
-            let acceptor_len = (eff_length as i64 - jr_shift as i64).max(0) as usize;
-            new_wt.exons.push(ExonBlock {
-                read_start: acceptor_read_start,
-                read_end: acceptor_read_start + acceptor_len,
-                genome_start: acceptor_genome_start,
-                genome_end: acceptor_genome_start + acceptor_len as u64,
-            });
-
             new_wt.n_junction += 1;
             new_wt.junction_motifs.push(motif);
             new_wt.junction_annotated.push(is_annotated);
             new_wt.junction_shifts.push((jj_l, jj_r));
         } else {
-            // Deletion (too short/long for intron) — score shared bases on donor side
-            let shared_mm = if shared > 0 {
-                count_mismatches_in_region(
-                    read_seq,
-                    last_exon.read_end,
-                    last_exon.genome_end,
-                    shared,
-                    index,
-                    cluster.is_reverse,
-                )
-            } else {
-                0
-            };
-            gap_mm += shared_mm;
-            d_score += shared as i32 - 2 * shared_mm as i32;
-
+            // Deletion gap scoring
             let del_score = scorer.score_del_open + scorer.score_del_base * del as i32;
             d_score += del_score;
             new_wt.n_gap += 1;
-
-            // Extend last exon through shared bases
-            if shared > 0 {
-                if let Some(last) = new_wt.exons.last_mut() {
-                    last.read_end += shared;
-                    last.genome_end += shared as u64;
-                }
-            }
-
-            // New exon after deletion
-            new_wt.exons.push(ExonBlock {
-                read_start: eff_read_pos,
-                read_end: eff_read_pos + eff_length,
-                genome_start: eff_genome_pos,
-                genome_end: eff_genome_pos + eff_length as u64,
-            });
         }
-    } else {
-        // Insertion: read_gap > genome_gap
-        let ins = (read_gap - genome_gap) as u32;
-        let shared = genome_gap as usize;
 
-        let shared_mm = if shared > 0 {
-            count_mismatches_in_region(
-                read_seq,
-                last_exon.read_end,
-                last_exon.genome_end,
-                shared,
-                index,
-                cluster.is_reverse,
-            )
-        } else {
-            0
-        };
-        gap_mm += shared_mm;
-        d_score += shared as i32 - 2 * shared_mm as i32;
-
-        let ins_score = scorer.score_ins_open + scorer.score_ins_base * ins as i32;
-        d_score += ins_score;
-        new_wt.n_gap += 1;
-
-        // Extend last exon through shared genome bases
-        if shared > 0 {
+        // --- Common: adjust exon A and create exon B ---
+        if jr_shift != 0 {
+            if let Some(last) = new_wt.exons.last_mut() {
+                last.read_end = (last.read_end as i64 + shared as i64 + jr_shift as i64) as usize;
+                last.genome_end = (last.genome_end as i64 + shared as i64 + jr_shift as i64) as u64;
+            }
+        } else if shared > 0 {
             if let Some(last) = new_wt.exons.last_mut() {
                 last.read_end += shared;
                 last.genome_end += shared as u64;
             }
         }
 
-        // New exon after insertion
+        // New exon for B side
+        let b_read_start = (eff_read_pos as i64 + jr_shift as i64) as usize;
+        let b_genome_start = (eff_genome_pos as i64 + jr_shift as i64) as u64;
+        let b_len = (eff_length as i64 - jr_shift as i64).max(0) as usize;
         new_wt.exons.push(ExonBlock {
-            read_start: eff_read_pos,
+            read_start: b_read_start,
+            read_end: b_read_start + b_len,
+            genome_start: b_genome_start,
+            genome_end: b_genome_start + b_len as u64,
+        });
+    } else {
+        // Insertion: read_gap > genome_gap
+        let ins = (read_gap - genome_gap) as usize;
+        let shared = genome_gap; // i64, can be negative (genome overlap)
+
+        let mut jr = 0i32; // number of shared bases going to A side
+
+        if shared > 0 {
+            // jR scanning to find optimal insertion placement (STAR lines 265-291)
+            let shared_usize = shared as usize;
+            let genome_offset: u64 = if cluster.is_reverse {
+                index.genome.n_genome
+            } else {
+                0
+            };
+
+            let mut score1 = 0i32;
+            let mut max_score1 = 0i32;
+
+            // Phase 1: Scan shared bases to find best split point
+            // STAR: for (jR1=1; jR1<=gGap; jR1++)
+            for jr1 in 1..=shared_usize {
+                let g_pos = last_exon.genome_end + (jr1 - 1) as u64 + genome_offset;
+                if let Some(gb) = index.genome.get_base(g_pos) {
+                    if gb < 4 {
+                        // Pre-insertion read base (A side)
+                        let r_pre = read_seq[last_exon.read_end + jr1 - 1];
+                        // Post-insertion read base (B side, after ins gap)
+                        let r_post = read_seq[last_exon.read_end + ins + jr1 - 1];
+
+                        if r_pre == gb {
+                            score1 += 1;
+                        } else {
+                            score1 -= 1;
+                        }
+                        if r_post == gb {
+                            score1 -= 1;
+                        } else {
+                            score1 += 1;
+                        }
+                    }
+                }
+
+                // STAR default (alignInsertionFlush=None): strict > only.
+                // First maximum wins = leftmost insertion in current coordinate space.
+                // For flushRight mode (not yet implemented): Score1 >= maxScore1.
+                if score1 > max_score1 {
+                    max_score1 = score1;
+                    jr = jr1 as i32;
+                }
+            }
+
+            // Phase 2: Score shared bases with jR determining pre/post-insertion side
+            // STAR: for (ii=1; ii<=gGap; ii++) r1 = rAend+ii+(ii<=jR ? 0 : Ins)
+            for ii in 1..=shared_usize {
+                let r_idx = if (ii as i32) <= jr {
+                    // Pre-insertion side
+                    last_exon.read_end + ii - 1
+                } else {
+                    // Post-insertion side (skip insertion gap)
+                    last_exon.read_end + ins + ii - 1
+                };
+                let g_pos = last_exon.genome_end + (ii - 1) as u64 + genome_offset;
+
+                if let Some(gb) = index.genome.get_base(g_pos) {
+                    if gb < 4 && read_seq[r_idx] < 4 {
+                        if read_seq[r_idx] == gb {
+                            d_score += 1;
+                        } else {
+                            d_score -= 1;
+                            gap_mm += 1;
+                        }
+                    }
+                }
+            }
+        } else if shared < 0 {
+            // Overlapping seeds on genome — reduce score
+            // STAR: for (ii=0; ii<-gGap; ii++) Score -= scoreMatch;
+            d_score -= (-shared) as i32;
+        }
+        // shared == 0: simple insertion, no scanning needed, jr stays 0
+
+        let ins_score = scorer.score_ins_open + scorer.score_ins_base * ins as i32;
+        d_score += ins_score;
+        new_wt.n_gap += 1;
+
+        // Extend last exon by jr shared bases (A side)
+        let jr_usize = jr.max(0) as usize;
+        if jr_usize > 0 {
+            if let Some(last) = new_wt.exons.last_mut() {
+                last.read_end += jr_usize;
+                last.genome_end += jr_usize as u64;
+            }
+        }
+
+        // New exon after insertion
+        // B read start: after extended A + insertion gap in read
+        // B genome start: after extended A (contiguous on genome)
+        let b_read_start = last_exon.read_end + jr_usize + ins;
+        let b_genome_start = last_exon.genome_end + jr_usize as u64;
+        // B ends at original seed B end
+        new_wt.exons.push(ExonBlock {
+            read_start: b_read_start,
             read_end: eff_read_pos + eff_length,
-            genome_start: eff_genome_pos,
+            genome_start: b_genome_start,
             genome_end: eff_genome_pos + eff_length as u64,
         });
     }
@@ -1156,7 +1194,11 @@ fn finalize_transcript(
     let alignment_start = wt.read_start;
     let alignment_end = wt.read_end;
 
+    // STAR: Lprev = tR2 - trA.rStart + 1 (current transcript length)
+    let transcript_len = alignment_end - alignment_start;
+
     // Extend alignment into flanking regions (STAR-style extendAlign)
+    // STAR passes trA.nMM as nMMprev for both extensions
     let left_extend = if alignment_start > 0 {
         extend_alignment(
             read_seq,
@@ -1164,8 +1206,8 @@ fn finalize_transcript(
             wt.genome_start,
             -1,
             alignment_start,
-            0,       // nMMprev=0 matches STAR
-            100_000, // Lprev=100000 matches STAR
+            wt.n_mismatch,  // STAR: trA.nMM (accumulated transcript mismatches)
+            transcript_len, // STAR: tR2-trA.rStart+1 (current transcript length)
             scorer.n_mm_max,
             scorer.p_mm_max,
             index,
@@ -1179,6 +1221,9 @@ fn finalize_transcript(
         }
     };
 
+    // After left extension, STAR updates trA.nMM and transcript length
+    let transcript_len_after_left = transcript_len + left_extend.extend_len;
+
     let right_extend = if alignment_end < read_seq.len() {
         extend_alignment(
             read_seq,
@@ -1186,8 +1231,8 @@ fn finalize_transcript(
             wt.genome_end,
             1,
             read_seq.len() - alignment_end,
-            wt.n_mismatch + left_extend.n_mismatch,
-            100_000,
+            wt.n_mismatch + left_extend.n_mismatch, // STAR: trA.nMM (after left ext)
+            transcript_len_after_left,              // STAR: tR2-trA.rStart+1 (after left ext)
             scorer.n_mm_max,
             scorer.p_mm_max,
             index,
@@ -1685,9 +1730,10 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
     // of repetitive seeds, matching STAR's WA_Anchor=2 "last anchor" logic.
     let mut wa_entries: Vec<WindowAlignment> = cluster.alignments.clone();
 
-    // Aggressive diagonal dedup: for each diagonal (sa_pos - read_pos), merge
-    // overlapping seeds into intervals, then keep only 1 seed per merged interval
-    // (the longest). With dense seed search, most seeds are redundant subsets.
+    // Diagonal dedup: for each diagonal (sa_pos - read_pos), merge overlapping
+    // seeds into intervals, keeping only the longest seed per merged interval.
+    // This prevents combinatorial explosion in the recursive stitcher when many
+    // redundant seeds cover the same diagonal region.
     {
         use std::collections::HashMap;
         // For each diagonal, find the longest seed per merged interval
@@ -1705,7 +1751,6 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
             // Sort by start position
             seeds.sort();
             // Merge intervals, keeping the index of the longest seed in each merged group
-            let mut merged_start = seeds[0].0;
             let mut merged_end = seeds[0].1;
             let mut best_idx = seeds[0].2;
             let mut best_len = seeds[0].1 - seeds[0].0;
@@ -1722,7 +1767,6 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
                 } else {
                     // New interval — commit previous best
                     keep_indices.insert(best_idx);
-                    merged_start = s;
                     merged_end = e;
                     best_len = e - s;
                     best_idx = idx;
@@ -1730,7 +1774,6 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
             }
             // Commit last group
             keep_indices.insert(best_idx);
-            let _ = merged_start; // suppress unused warning
         }
 
         // Retain only the kept indices

@@ -15,6 +15,8 @@ pub enum UnmappedReason {
     TooShort,
     /// All transcripts filtered by mismatch count/rate
     TooManyMismatches,
+    /// Too many multi-mapping loci (nTr > outFilterMultimapNmax)
+    TooManyLoci,
 }
 
 /// Tracks alignment statistics for a read mapping run
@@ -188,6 +190,9 @@ impl AlignmentStats {
             }
             UnmappedReason::TooShort => {
                 self.unmapped_short.fetch_add(1, Ordering::Relaxed);
+            }
+            UnmappedReason::TooManyLoci => {
+                // Tracked via record_alignment's too_many_loci path, not here
             }
             UnmappedReason::Other => {
                 self.unmapped_other.fetch_add(1, Ordering::Relaxed);

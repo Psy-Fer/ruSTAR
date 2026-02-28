@@ -401,21 +401,35 @@ pub fn align_read(
         }
     }
 
-    // Step 5: Deduplicate transcripts with identical genomic coordinates
-    // Keep only the highest-scoring transcript for each unique location
-    // Sort by (chr, start, end, strand, score_descending) so dedup_by keeps the best
+    // Step 5: Deduplicate transcripts with identical genomic coordinates AND CIGAR.
+    // Keep only the highest-scoring transcript for each unique (location, CIGAR) pair.
+    // Transcripts with different CIGARs (e.g. indel at different positions) are kept
+    // as separate alignments, matching STAR's blocksOverlap dedup behavior.
     transcripts.sort_by(|a, b| {
-        (a.chr_idx, a.genome_start, a.genome_end, a.is_reverse)
-            .cmp(&(b.chr_idx, b.genome_start, b.genome_end, b.is_reverse))
+        (
+            a.chr_idx,
+            a.genome_start,
+            a.genome_end,
+            a.is_reverse,
+            &a.cigar,
+        )
+            .cmp(&(
+                b.chr_idx,
+                b.genome_start,
+                b.genome_end,
+                b.is_reverse,
+                &b.cigar,
+            ))
             .then_with(|| b.score.cmp(&a.score)) // Higher score first
     });
 
-    // Dedup consecutive entries with same coordinates (keeps first = highest score)
+    // Dedup consecutive entries with same coordinates AND CIGAR (keeps first = highest score)
     transcripts.dedup_by(|a, b| {
         a.chr_idx == b.chr_idx
             && a.genome_start == b.genome_start
             && a.genome_end == b.genome_end
             && a.is_reverse == b.is_reverse
+            && a.cigar == b.cigar
     });
 
     // Step 5b: Re-sort by score (descending) with deterministic tie-breaking
@@ -440,8 +454,19 @@ pub fn align_read(
         transcripts.retain(|t| t.score >= score_threshold);
     }
 
-    // Step 5c: Truncate to max multimap count
-    transcripts.truncate(params.out_filter_multimap_nmax as usize);
+    // Step 5c: Check multimap count (STAR's mappedFilter: nTr > outFilterMultimapNmax)
+    // If too many loci, clear transcripts — read becomes unmapped "too many loci"
+    if transcripts.len() > params.out_filter_multimap_nmax as usize {
+        let n_loci = transcripts.len();
+        transcripts.clear();
+        // Return n_loci so caller can track "too many loci" stats correctly
+        return Ok((
+            transcripts,
+            chimeric_alignments,
+            n_loci,
+            Some(UnmappedReason::TooManyLoci),
+        ));
+    }
 
     // Step 6: Filter chimeric alignments
     if params.chim_segment_min > 0 {

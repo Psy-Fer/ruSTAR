@@ -6,7 +6,7 @@ A Rust reimplementation of [STAR](https://github.com/alexdobin/STAR) (Spliced Tr
 
 ruSTAR aims to be a faithful port of STAR, matching the original behavior as closely as possible. It uses the same genome index format, accepts the same `--camelCase` command-line parameters, and produces compatible SAM/BAM output.
 
-**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection, and multi-threaded parallel processing. 264 tests passing.
+**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection, and multi-threaded parallel processing. 269 tests passing.
 
 ## Quick Start
 
@@ -67,64 +67,70 @@ target/release/ruSTAR \
 
 ## Accuracy Comparison vs STAR
 
-### Single-End (10k yeast reads, 150bp)
+Benchmarked on 10,000 yeast RNA-seq reads (150 bp SE, ERR12389696), compared to STAR 2.7.x with identical parameters and genome index.
 
-#### Alignment Rates
+### Single-End Alignment Rates
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Unique mapped | 93.0% | 92.6% |
-| Multi-mapped | 7.0% | 7.4% |
+| Unique mapped | 92.6% | 92.6% |
+| Multi-mapped | 7.4% | 7.4% |
 | Soft-clipped reads | 26.0% | 26.0% |
-| Splice rate | 1.9% | 2.2% |
+| Splice rate | 2.2% | 2.2% |
+| Shared splice junctions | 67 / 72 STAR junctions | — |
+| Motif agreement (shared junctions) | 100% | — |
 
-#### Position and CIGAR Agreement
+### Strict Per-Read Comparison (SE)
 
-| Mode | Position agree | CIGAR agree | Splice rate |
-|------|---------------|-------------|-------------|
-| Normal (default) | 97.4% | 98.5% | 1.9% |
+A read is counted as a **match** only if it aligns to the exact same chromosome, exact same start position, and has identical splice junctions (intron coordinates). Any difference in any of these is a mismatch.
 
-#### MAPQ Agreement
+| Result | Count | % |
+|--------|-------|---|
+| Exact match (chr + pos + CIGAR identical) | 8792 | 98.49% |
+| Splice match (chr + pos + introns match, CIGAR differs) | 1 | 0.01% |
+| **Total match** | **8793** | **98.50%** |
+| Mismatch — unavoidable tie-breaking | 127 | 1.42% |
+| Mismatch — fixable algorithm differences | 7 | 0.08% |
+| **Parity (excluding unavoidable ties)** | **8920 / 8927** | **99.92%** |
+
+#### Mismatch Classification
+
+| Category | Count | Fixable? |
+|----------|-------|----------|
+| Diff chromosome, both multi-mapper (repeat copy tie-breaking) | 100 | No — same score, different copy chosen |
+| Same chr, identical CIGAR, different position (repeat copy tie-breaking) | 21 | No — same score, different copy chosen |
+| Same chr, same score, different intron at repeat locus | 4 | No — same AS/NH, tiebreaking only |
+| Same chr, same splice, position differs 3–4 bp (soft-clip boundary) | 2 | No — same AS/NH, different soft-clip split |
+| Same chr + pos, different splice junctions | 4 | Partial (2 missed splices + 1 jR scan off-by-4bp + 1 STAR false splice) |
+| Same chr, STAR spliced / ruSTAR not (missed splice) | 1 | Yes |
+| STAR mapped, ruSTAR unmapped | 1 | Maybe (high-mismatch read, NM=10) |
+| ruSTAR mapped, STAR unmapped (false splice) | 1 | Yes (adapter contamination → 279 kb intron) |
+| **Total mismatches** | **134** | |
+
+> **Unavoidable ties (127 reads):** Both tools find the same set of equally-scored alignments but choose different ones as primary due to internal processing order. Neither alignment is more correct than the other.
+
+> **STAR false splice (1 read):** ERR12389696.5825571 — STAR creates a 607 kb intron from adapter-contaminated bases, scoring 2 points higher than the correct soft-clipped alignment. ruSTAR correctly soft-clips this read.
+
+### MAPQ Agreement (SE)
 
 | Metric | Value |
 |--------|-------|
-| MAPQ agreement | 99.1% |
-| MAPQ inflation (ruSTAR=255, STAR<255) | 62 reads (was 323 pre-16.10) |
+| MAPQ agreement (position-matched reads) | 99.9% |
+| MAPQ inflation (ruSTAR=255, STAR<255) | 5 reads |
+| MAPQ deflation (ruSTAR<255, STAR=255) | 2 reads |
 
-#### Junction Statistics (SE)
-
-| Metric | ruSTAR | STAR |
-|--------|--------|------|
-| Shared junctions | 62 | 72 total |
-| ruSTAR-only junctions | 0 | -- |
-| Motif agreement (shared) | 100% | -- |
-
-### Paired-End (10k yeast read pairs, 150bp)
-
-#### Alignment Rates
+### Paired-End (10k yeast read pairs, 150 bp)
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
 | Both mates mapped | 8761 (97.1%) | 8390 (100%) |
 | Half-mapped pairs | 263 (2.9%) | 0 |
 | Unmapped pairs | 0 | 0 |
+| Per-mate position agreement | 97.8% | — |
+| Per-mate CIGAR agreement | 96.0% | — |
+| Shared splice junctions | 85 / 90 STAR junctions | — |
 
-#### Per-Mate Agreement
-
-| Metric | Value |
-|--------|-------|
-| Per-mate position agree | 97.8% |
-| Per-mate CIGAR agree | 96.0% |
-
-#### Junction Statistics (PE)
-
-| Metric | ruSTAR | STAR |
-|--------|--------|------|
-| Shared junctions | 85 | 90 total |
-| ruSTAR-only junctions | 3 | -- |
-| Motif agreement (shared) | 100% | -- |
-
-> **Note**: 263 half-mapped pairs (2.9%) are cases where one mate maps but the other fails even with mate rescue. STAR uses joint DP stitching which recovers these.
+> **Note on half-mapped pairs:** 263 pairs (2.9%) have one mate that fails alignment even with mate rescue. STAR recovers these via joint paired-end DP stitching (not yet implemented).
 
 ## Supported Features
 
@@ -153,7 +159,7 @@ target/release/ruSTAR \
 - No `--quantMode GeneCounts`
 - No `--outReadsUnmapped Fastx`
 - No `--outStd SAM/BAM` (stdout output)
-- Residual MAPQ inflation (~62 reads MAPQ 255 vs STAR <255) — mostly multi-mapper tie-breaking
+- Residual MAPQ inflation (5 reads in 10k SE benchmark) — missed splice/indel secondary alignments
 - No STARsolo single-cell features
 
 See [ROADMAP.md](ROADMAP.md) for detailed implementation tracking.

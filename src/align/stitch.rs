@@ -787,7 +787,38 @@ fn stitch_align_to_transcript(
     let is_mate_boundary = wa.mate_id != last_mate && wa.mate_id != 2 && last_mate != 2;
 
     if is_mate_boundary {
-        // Genome gap between mates (in forward SA coords)
+        // STAR condition (stitchAlignToTranscript.cpp:352):
+        // gBstart + trA->exons[0][EX_R] + nBasesMax >= trA->exons[0][EX_G] || EX_G < EX_R
+        // For forward clusters: checked in forward genome space.
+        // For reverse clusters: checked in STAR's encoded genome space, then converted to
+        // ruSTAR's forward-position representation (Phase 16.27 convention).
+        if cluster.is_reverse {
+            // Reverse cluster: stitch_read = RC(combined) = [mate2|SPACER|RC(mate1)].
+            // wt.exons[0] is the first mate2 exon; wa is the new mate1 seed.
+            // Recover mate1's position in the original combined read [mate1|SPACER|RC(mate2)]:
+            //   combined_start_mate1 = combined_len - stitch_pos_mate1 - len_mate1
+            // STAR's encoded-space reject condition (converted to forward-position arithmetic):
+            //   combined_start_mate1 < len_mate2_exon - len_mate1 + (P_mate2 - P_mate1)
+            let combined_start_mate1 =
+                (read_seq.len() as i64) - (wa.read_pos as i64) - (wa.length as i64);
+            let first_exon = &wt.exons[0];
+            let len_mate2_exon = (first_exon.read_end - first_exon.read_start) as i64;
+            let len_mate1 = wa.length as i64;
+            let p_diff =
+                first_exon.genome_start as i64 - wa.sa_pos as i64; // P_mate2 - P_mate1
+            if combined_start_mate1 < len_mate2_exon - len_mate1 + p_diff {
+                return None;
+            }
+        } else {
+            let first_exon = &wt.exons[0];
+            let ex_g = first_exon.genome_start;
+            let ex_r = first_exon.read_start as u64;
+            // Reject when gBstart + EX_R < EX_G (and EX_G >= EX_R to avoid false rejection near chr start)
+            if ex_g >= ex_r && wa.genome_pos + ex_r < ex_g {
+                return None;
+            }
+        }
+        // Forward-gap check: alignMatesGapMax (disabled when 0)
         let genome_gap = wa.genome_pos.saturating_sub(last_exon.genome_end);
         if align_mates_gap_max > 0 && genome_gap > align_mates_gap_max {
             return None;

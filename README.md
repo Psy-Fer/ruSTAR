@@ -6,7 +6,7 @@ A Rust reimplementation of [STAR](https://github.com/alexdobin/STAR) (Spliced Tr
 
 ruSTAR aims to be a faithful port of STAR, matching the original behavior as closely as possible. It uses the same genome index format, accepts the same `--camelCase` command-line parameters, and produces compatible SAM/BAM output.
 
-**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection, and multi-threaded parallel processing. 269 tests passing.
+**Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection, and multi-threaded parallel processing. 268 tests passing.
 
 ## Quick Start
 
@@ -123,14 +123,13 @@ A read is counted as a **match** only if it aligns to the exact same chromosome,
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Both mates mapped | 8761 (97.1%) | 8390 (100%) |
-| Half-mapped pairs | 263 (2.9%) | 0 |
+| Both mates mapped | 8382 (99.9%) | 8390 (100%) |
+| Half-mapped pairs | 0 | 0 |
 | Unmapped pairs | 0 | 0 |
-| Per-mate position agreement | 97.8% | — |
-| Per-mate CIGAR agreement | 96.0% | — |
-| Shared splice junctions | 85 / 90 STAR junctions | — |
+| Per-mate position agreement | 98.3% | — |
+| Per-mate CIGAR agreement | 97.4% | — |
 
-> **Note on half-mapped pairs:** 263 pairs (2.9%) have one mate that fails alignment even with mate rescue. STAR recovers these via joint paired-end DP stitching (not yet implemented).
+> **8-pair gap vs STAR**: ruSTAR uses STAR's combined-read PE path (`[mate1_fwd][SPACER][RC(mate2)]`), producing near-identical output. The remaining 8-pair difference stems from scoring edge cases in short-insert overlapping reads.
 
 ## Supported Features
 

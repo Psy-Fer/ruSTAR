@@ -3,7 +3,7 @@ use crate::align::score::{AlignmentScorer, SpliceMotif};
 use crate::align::seed::Seed;
 use crate::align::stitch::{
     adjust_mate2_coords, cluster_seeds, find_mate_boundary, finalize_transcript,
-    split_working_transcript, stitch_seeds_with_jdb, stitch_seeds_with_jdb_debug,
+    split_working_transcript, stitch_seeds_with_jdb_debug,
     stitch_seeds_working,
 };
 use crate::align::transcript::Transcript;
@@ -535,140 +535,6 @@ pub fn align_read(
     ))
 }
 
-/// Attempt to rescue an unmapped mate using the mapped mate's position as anchor.
-///
-/// # Algorithm
-/// 1. Find seeds for the unmapped mate (genome-wide, same as SE path)
-/// 2. Filter seeds to keep only those within the rescue window on the mapped mate's chromosome
-/// 3. Cluster the filtered seeds
-/// 4. Stitch seeds within each cluster via DP
-/// 5. Apply the same quality filters as align_read()
-/// 6. Return the best transcript if any passes filters
-///
-/// # Arguments
-/// * `unmapped_seq` - Sequence of the unmapped mate (encoded)
-/// * `mapped_transcript` - Best transcript from the mapped mate (anchor)
-/// * `index` - Genome index
-/// * `params` - Parameters
-///
-/// # Returns
-/// `Some(transcript)` if rescue succeeds, `None` otherwise
-fn rescue_unmapped_mate(
-    unmapped_seq: &[u8],
-    mapped_transcript: &Transcript,
-    index: &GenomeIndex,
-    params: &Parameters,
-) -> Result<Option<Transcript>, Error> {
-    // Step 1: Find seeds for unmapped mate (genome-wide search)
-    let min_seed_length = 8;
-    let seeds = Seed::find_seeds(unmapped_seq, index, min_seed_length, params)?;
-
-    if seeds.is_empty() {
-        return Ok(None);
-    }
-
-    // Step 2: Determine rescue window
-    // Use alignMatesGapMax if set, otherwise default 1Mb
-    let rescue_range: u64 = if params.align_mates_gap_max > 0 {
-        params.align_mates_gap_max as u64
-    } else {
-        1_000_000
-    };
-    let anchor_chr = mapped_transcript.chr_idx;
-    let anchor_start = mapped_transcript.genome_start;
-    let anchor_end = mapped_transcript.genome_end;
-    let window_start = anchor_start.saturating_sub(rescue_range);
-    let window_end = anchor_end.saturating_add(rescue_range);
-
-    // Step 3: Filter seeds — keep only those with at least one genome position
-    // on the same chromosome and within the rescue window
-    let filtered_seed_indices: Vec<usize> = seeds
-        .iter()
-        .enumerate()
-        .filter(|(_, seed)| {
-            seed.genome_positions(index).any(|(pos, is_rev)| {
-                // Convert SA position to forward genome coordinate
-                let fwd_pos = index.sa_pos_to_forward(pos, is_rev, seed.length);
-                // Check if this position is on the anchor chromosome and within window
-                if let Some((chr_idx, _)) = index.genome.position_to_chr(fwd_pos) {
-                    chr_idx == anchor_chr && fwd_pos >= window_start && fwd_pos <= window_end
-                } else {
-                    false
-                }
-            })
-        })
-        .map(|(i, _)| i)
-        .collect();
-
-    if filtered_seed_indices.is_empty() {
-        return Ok(None);
-    }
-
-    // Step 4: Build a filtered seed list for clustering
-    let filtered_seeds: Vec<Seed> = filtered_seed_indices
-        .iter()
-        .map(|&i| seeds[i].clone())
-        .collect();
-
-    // Step 5: Cluster and stitch the filtered seeds (bin-based windowing)
-    let clusters = cluster_seeds(&filtered_seeds, index, params, unmapped_seq.len());
-
-    if clusters.is_empty() {
-        return Ok(None);
-    }
-
-    let scorer = AlignmentScorer::from_params(params);
-    let junction_db = if index.junction_db.is_empty() {
-        None
-    } else {
-        Some(&index.junction_db)
-    };
-
-    let mut transcripts = Vec::new();
-    for cluster in clusters.iter().take(params.align_windows_per_read_nmax) {
-        let cluster_transcripts = stitch_seeds_with_jdb(
-            cluster,
-            unmapped_seq,
-            index,
-            &scorer,
-            junction_db,
-            params.align_transcripts_per_window_nmax,
-        )?;
-        transcripts.extend(cluster_transcripts);
-    }
-
-    // Step 6: Apply quality filters (same as align_read)
-    // STAR uses (Lread-1) for relative thresholds and casts to integer
-    let read_length = unmapped_seq.len() as f64;
-    let lread_m1 = (unmapped_seq.len() as f64) - 1.0;
-    transcripts.retain(|t| {
-        if t.score < params.out_filter_score_min {
-            return false;
-        }
-        if t.score < (params.out_filter_score_min_over_lread * lread_m1) as i32 {
-            return false;
-        }
-        if t.n_mismatch > params.out_filter_mismatch_nmax {
-            return false;
-        }
-        let mismatch_rate = t.n_mismatch as f64 / read_length;
-        if mismatch_rate > params.out_filter_mismatch_nover_lmax {
-            return false;
-        }
-        let n_matched = t.n_matched();
-        if n_matched < params.out_filter_match_nmin {
-            return false;
-        }
-        if n_matched < (params.out_filter_match_nmin_over_lread * lread_m1) as u32 {
-            return false;
-        }
-        true
-    });
-
-    // Sort by score (best first) and return the best
-    transcripts.sort_by(|a, b| b.score.cmp(&a.score));
-    Ok(transcripts.into_iter().next())
-}
 
 /// STAR's fragment spacer base (MARK_FRAG_SPACER_BASE = 11 in IncludeDefine.h:174).
 /// Not a valid genome base (A=0,C=1,G=2,T=3,N=4), so no seed can span this byte.
@@ -756,6 +622,15 @@ pub fn align_paired_read(
         .map(|&b| if b < 4 { 3 - b } else { b })
         .collect();
 
+    // Palindromic pair: mate1_fwd == RC(mate2_fwd) → combined read [X|spacer|X].
+    // Both halves map to the same genome position, producing false joint pairs.
+    // STAR rejects these via stitchWindowAligns.cpp overlap check (extendAlign asymmetry).
+    // Detect upfront: if the reads are exact reverse complements of each other, all
+    // clusters will be palindromic — no valid joint alignment is possible.
+    if mate1_seq == rc_mate2.as_slice() {
+        return Ok((Vec::new(), 0, Some(UnmappedReason::TooShort)));
+    }
+
     let debug_pe = !params.read_name_filter.is_empty() && read_name == params.read_name_filter;
 
     let mut seeds = Seed::find_seeds(&combined, index, params.seed_map_min, params)?;
@@ -788,6 +663,10 @@ pub fn align_paired_read(
 
     let lread1_m1 = (len1 as f64) - 1.0;
     let lread2_m1 = (len2 as f64) - 1.0;
+    // STAR uses combined read length (len1+spacer+len2) as denominator for PE score threshold.
+    // This is stricter than summing individual thresholds when they're computed separately.
+    let combined_score_threshold =
+        (params.out_filter_score_min_over_lread * (len1 + SPACER_LEN + len2 - 1) as f64) as i32;
 
     let mut joint_pairs: Vec<PairedAlignment> = Vec::new();
     let mut mate1_candidates: Vec<Transcript> = Vec::new();
@@ -816,6 +695,16 @@ pub fn align_paired_read(
                 // mate_id=0 = mate1 ([0, len1)), mate_id=1 = mate2 ([len1+1, total_len))
                 match find_mate_boundary(&wt) {
                     Some(boundary_idx) => {
+                        // STAR combined-read score filter (ReadAlign_mappedFilter.cpp line 8):
+                        // trBest->maxScore < outFilterScoreMinOverLread * (Lread-1).
+                        // wt.score is the combined-read stitching score (before per-mate extension).
+                        // Must check BEFORE split_working_transcript because split sets both
+                        // wt1.score=wt.score and wt2.score=wt.score (approximations), and using
+                        // wt1.score+wt2.score would double-count, inflating the effective score.
+                        if wt.score < combined_score_threshold {
+                            continue;
+                        }
+
                         // Joint: split at mate1→mate2 boundary
                         let (wt1, wt2) = match split_working_transcript(
                             &wt, boundary_idx, len1, SPACER_LEN,
@@ -825,6 +714,31 @@ pub fn align_paired_read(
                         };
                         if wt1.exons.is_empty() || wt2.exons.is_empty() {
                             continue;
+                        }
+
+                        // STAR stitchWindowAligns.cpp:189-218: overlap consistency checks.
+                        // When mates overlap in the genome, verify the overlap is consistent.
+                        // "Left mate" = mate1 (lower read number), "right mate" = mate2.
+                        // STAR applies these checks AFTER backward extension, where exons[0][EX_R] → 0.
+                        // We use 0 for the effective leftReadStart to match STAR's post-extension value.
+                        {
+                            let left_end = wt1.exons.last().unwrap().genome_end;
+                            let right_start = wt2.exons.first().unwrap().genome_start;
+                            if left_end > right_start {
+                                // Check 1: leftMateStart > rightMateStart + 0 (post-extension EX_R)
+                                let left_start = wt1.exons.first().unwrap().genome_start;
+                                if left_start > right_start {
+                                    continue;
+                                }
+                                // Check 2: leftMateEnd > rightMateEnd + nBasesMax
+                                // rightMateEnd = last_mate2_exon.genome_start + (len2 - last_mate2_exon.read_start)
+                                let last_m2 = wt2.exons.last().unwrap();
+                                let right_end =
+                                    last_m2.genome_start + (len2 - last_m2.read_start) as u64;
+                                if left_end > right_end {
+                                    continue;
+                                }
+                            }
                         }
 
                         let t1 = match finalize_transcript(
@@ -932,6 +846,13 @@ pub fn align_paired_read(
                         continue;
                     }
 
+                    // STAR combined-read score filter: check wt.score before split.
+                    // split_working_transcript sets wt1.score=wt.score and wt2.score=wt.score,
+                    // so using wt1.score+wt2.score would double-count.
+                    if wt.score < combined_score_threshold {
+                        continue;
+                    }
+
                     // Build wt2 (mate2 portion, no position adjustment needed)
                     let (wt2, wt1) = match split_working_transcript(
                         &wt, boundary_idx, len2, SPACER_LEN,
@@ -941,6 +862,31 @@ pub fn align_paired_read(
                     };
                     if wt2.exons.is_empty() || wt1.exons.is_empty() {
                         continue;
+                    }
+
+                    // STAR stitchWindowAligns.cpp:189-218: overlap consistency checks.
+                    // In the reverse cluster: wt2 = MATE1 content (RC(mate1_fwd) seeds,
+                    // combined_pos [0,len1)); wt1 = MATE2 content (mate2_fwd seeds,
+                    // combined_pos [len2+SPACER,..)), adj by -(len2+SPACER_LEN) in split.
+                    // STAR applies these after backward extension where exons[0][EX_R] → 0.
+                    {
+                        let left_end = wt2.exons.last().unwrap().genome_end;
+                        let right_start = wt1.exons.first().unwrap().genome_start;
+                        if left_end > right_start {
+                            // Check 1: first_mate1.G > first_mate2.G + 0 (post-extension EX_R)
+                            let first_m1 = wt2.exons.first().unwrap();
+                            if first_m1.genome_start > right_start {
+                                continue;
+                            }
+                            // Check 2: last_mate1.G_end > last_mate2.G_start + (len1 - adj_read_start)
+                            // wt1.last.read_start is adj by -(len2+SPACER_LEN); len1-adj = Lread-combined_pos
+                            let last_m2 = wt1.exons.last().unwrap();
+                            let right_end = last_m2.genome_start
+                                + (len1 as u64).saturating_sub(last_m2.read_start as u64);
+                            if left_end > right_end {
+                                continue;
+                            }
+                        }
                     }
 
                     let t2 = match finalize_transcript(
@@ -1092,83 +1038,12 @@ pub fn align_paired_read(
         return Ok((results, pe_mapq_n, None));
     }
 
-    // 2. Pick the best single-mate candidate and attempt targeted rescue.
-    // STAR does not have a cross-product path. When mates end up in separate clusters, STAR
-    // picks the best-mapped mate and rescues the other near its position.
-    sort_and_filter_single(&mut mate1_candidates, len1, params);
-    sort_and_filter_single(&mut mate2_candidates, len2, params);
-
-    let maybe_mapped = match (
-        mate1_candidates.into_iter().next(),
-        mate2_candidates.into_iter().next(),
-    ) {
-        (Some(t1), Some(t2)) => {
-            // Both mates mapped to separate clusters — pick the better-scoring one for rescue
-            if t1.score >= t2.score {
-                Some((t1, true))
-            } else {
-                Some((t2, false))
-            }
-        }
-        (Some(t1), None) => Some((t1, true)),
-        (None, Some(t2)) => Some((t2, false)),
-        (None, None) => None,
-    };
-
-    let Some((mapped_best, mate1_is_mapped)) = maybe_mapped else {
-        return Ok((Vec::new(), 0, Some(UnmappedReason::Other)));
-    };
-
-    let unmapped_seq = if mate1_is_mapped { mate2_seq } else { mate1_seq };
-
-    if let Some(rescued) = rescue_unmapped_mate(unmapped_seq, &mapped_best, index, params)? {
-        let (t1, t2) = if mate1_is_mapped {
-            (mapped_best.clone(), rescued)
-        } else {
-            (rescued, mapped_best.clone())
-        };
-        let is_proper_pair = check_proper_pair(&t1, &t2, params);
-        let insert_size = calculate_insert_size(&t1, &t2);
-        return Ok((
-            vec![PairedAlignmentResult::BothMapped(Box::new(PairedAlignment {
-                mate1_transcript: t1,
-                mate2_transcript: t2,
-                mate1_region: (0, mate1_seq.len()),
-                mate2_region: (0, mate2_seq.len()),
-                is_proper_pair,
-                insert_size,
-            }))],
-            1,
-            None,
-        ));
-    }
-
-    // Rescue failed → HalfMapped
-    Ok((
-        vec![PairedAlignmentResult::HalfMapped {
-            mapped_transcript: mapped_best,
-            mate1_is_mapped,
-        }],
-        1,
-        None,
-    ))
+    // 2. STAR: mono-mate transcript score (≈len_mate) < 0.66*(len1+len2+1) → "unmapped: too short"
+    // STAR's mappedFilter uses combined read Lread as denominator, so single-mate candidates
+    // always fail the threshold. STAR has no rescue step — return unmapped.
+    Ok((Vec::new(), 0, Some(UnmappedReason::TooShort)))
 }
 
-/// Filter and sort individual transcript candidates (for single-mate fallback paths).
-/// Applies the same per-read quality thresholds as `filter_paired_transcripts`, then sorts
-/// by score descending.
-fn sort_and_filter_single(transcripts: &mut Vec<Transcript>, read_len: usize, params: &Parameters) {
-    let read_len_f = read_len as f64;
-    let lread_m1 = read_len_f - 1.0;
-    transcripts.retain(|t| {
-        t.score >= params.out_filter_score_min
-            && t.score >= (params.out_filter_score_min_over_lread * lread_m1) as i32
-            && t.n_mismatch <= params.out_filter_mismatch_nmax
-            && (t.n_mismatch as f64) <= params.out_filter_mismatch_nover_lmax * read_len_f
-            && t.n_matched() >= params.out_filter_match_nmin
-    });
-    transcripts.sort_by(|a, b| b.score.cmp(&a.score));
-}
 
 /// Check if paired alignment is a proper pair
 fn check_proper_pair(
@@ -1781,42 +1656,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_rescue_unmapped_mate_no_seeds() {
-        // Unmapped mate has all N's (no seeds possible), should return None
-        let index = make_test_index();
-        let params = make_test_params();
-
-        use crate::align::transcript::{CigarOp, Exon};
-        let mapped_transcript = Transcript {
-            chr_idx: 0,
-            genome_start: 0,
-            genome_end: 4,
-            is_reverse: false,
-            exons: vec![Exon {
-                genome_start: 0,
-                genome_end: 4,
-                read_start: 0,
-                read_end: 4,
-            }],
-            cigar: vec![CigarOp::Match(4)],
-            score: 100,
-            n_mismatch: 0,
-            n_gap: 0,
-            n_junction: 0,
-            junction_motifs: vec![],
-            junction_annotated: vec![],
-            read_seq: vec![0, 1, 2, 3],
-        };
-
-        let unmapped_seq = vec![4, 4, 4, 4, 4, 4, 4, 4]; // all N's
-        let result = rescue_unmapped_mate(&unmapped_seq, &mapped_transcript, &index, &params);
-        assert!(result.is_ok());
-        assert!(
-            result.unwrap().is_none(),
-            "Should return None when unmapped mate has no seeds"
-        );
-    }
 
     #[test]
     fn test_align_paired_both_unmapped() {

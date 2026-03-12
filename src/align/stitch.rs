@@ -998,9 +998,12 @@ fn stitch_align_to_transcript(
             shared_score -= 2 * extra_mm as i32;
         }
 
-        // Extended right range: junction shifted right past ALL shared bases into seed B
-        if jr_shift > shared as i32 {
-            let n_extra = (jr_shift - shared as i32) as usize;
+        // Extended right range: junction shifted right into seed B territory.
+        // STAR_jR = jr_shift + shared (ruSTAR's jr_shift is measured from end of shared region,
+        // while STAR's jR is measured from end of seed A). Extended right triggers when
+        // STAR_jR > rGap (= shared), i.e. jr_shift > 0. n_extra = STAR_jR - rGap = jr_shift.
+        if jr_shift > 0 {
+            let n_extra = jr_shift as usize;
             let extra_read_start = last_exon.read_end + shared;
             let extra_genome_start = last_exon.genome_end + shared as u64;
             let extra_mm = count_mismatches_in_region(

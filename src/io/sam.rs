@@ -453,7 +453,10 @@ impl SamWriter {
             data.insert(Tag::HIT_INDEX, Value::from(1i32));
         }
         if attrs.contains("AS") {
-            data.insert(Tag::ALIGNMENT_SCORE, Value::from(mapped_transcript.score));
+            data.insert(
+                Tag::ALIGNMENT_SCORE,
+                Value::from(mapped_transcript.score),
+            );
         }
         if attrs.contains("NM") {
             data.insert(
@@ -698,7 +701,10 @@ fn transcript_to_record(
         data.insert(Tag::HIT_INDEX, Value::from(hit_index as i32));
     }
     if attrs.contains("AS") {
-        data.insert(Tag::ALIGNMENT_SCORE, Value::from(transcript.score));
+        data.insert(
+            Tag::ALIGNMENT_SCORE,
+            Value::from(transcript.score),
+        );
     }
     if attrs.contains("NM") {
         data.insert(
@@ -1029,7 +1035,10 @@ fn build_paired_mate_record(
         data.insert(Tag::HIT_INDEX, Value::from(hit_index as i32));
     }
     if attrs.contains("AS") {
-        data.insert(Tag::ALIGNMENT_SCORE, Value::from(transcript.score));
+        data.insert(
+            Tag::ALIGNMENT_SCORE,
+            Value::from(transcript.score),
+        );
     }
     if attrs.contains("NM") {
         data.insert(

@@ -627,15 +627,6 @@ pub fn align_paired_read(
         .map(|&b| if b < 4 { 3 - b } else { b })
         .collect();
 
-    // Palindromic pair: mate1_fwd == RC(mate2_fwd) → combined read [X|spacer|X].
-    // Both halves map to the same genome position, producing false joint pairs.
-    // STAR rejects these via stitchWindowAligns.cpp overlap check (extendAlign asymmetry).
-    // Detect upfront: if the reads are exact reverse complements of each other, all
-    // clusters will be palindromic — no valid joint alignment is possible.
-    if mate1_seq == rc_mate2.as_slice() {
-        return Ok((Vec::new(), 0, Some(UnmappedReason::TooShort)));
-    }
-
     let debug_pe = !params.read_name_filter.is_empty() && read_name == params.read_name_filter;
 
     let mut seeds = Seed::find_seeds(&combined, index, params.seed_map_min, params)?;
@@ -773,6 +764,11 @@ pub fn align_paired_read(
                             continue;
                         }
 
+                        // D5: junction consistency in overlap region (FR: t1=left mate)
+                        if !pe_junctions_consistent(&t1, &t2) {
+                            continue;
+                        }
+
                         let is_proper_pair = check_proper_pair(&t1, &t2, params);
                         let insert_size = calculate_insert_size(&t1, &t2);
                         joint_pairs.push(PairedAlignment {
@@ -904,6 +900,11 @@ pub fn align_paired_read(
 
                     // Reject negative insert size (mate1 ends before mate2 starts)
                     if t1.genome_end <= t2.genome_start {
+                        continue;
+                    }
+
+                    // D5: junction consistency in overlap region (RF: t2=left mate)
+                    if !pe_junctions_consistent(&t2, &t1) {
                         continue;
                     }
 
@@ -1114,6 +1115,67 @@ fn filter_paired_transcripts(paired_alns: &mut Vec<PairedAlignment>, params: &Pa
 
     // Limit to top N
     paired_alns.truncate(params.out_filter_multimap_nmax as usize);
+}
+
+/// Extract splice junctions from a Transcript's CIGAR as (donor, acceptor) pairs.
+/// Junction coords are in genomic space (0-based). Junctions only exist where CigarOp::RefSkip is.
+fn extract_junctions_from_cigar(t: &Transcript) -> Vec<(u64, u64)> {
+    let mut junctions = Vec::new();
+    let mut genome_pos = t.genome_start;
+    for op in &t.cigar {
+        use crate::align::transcript::CigarOp;
+        match op {
+            CigarOp::Match(n) | CigarOp::Equal(n) | CigarOp::Diff(n) | CigarOp::Del(n) => {
+                genome_pos += *n as u64;
+            }
+            CigarOp::RefSkip(n) => {
+                let donor = genome_pos;
+                let acceptor = genome_pos + *n as u64;
+                junctions.push((donor, acceptor));
+                genome_pos = acceptor;
+            }
+            CigarOp::Ins(_) | CigarOp::SoftClip(_) | CigarOp::HardClip(_) => {}
+        }
+    }
+    junctions
+}
+
+/// D5: Check junction consistency in the overlapping region of paired-end mates.
+/// When mates overlap in the genome, every splice junction in the overlap from the
+/// left mate must appear in the right mate, and vice versa.
+/// Implements STAR stitchWindowAligns.cpp check after overlap detection.
+///
+/// `left` is the mate with the lower genome_start, `right` is the other mate.
+pub(crate) fn pe_junctions_consistent(left: &Transcript, right: &Transcript) -> bool {
+    // Overlapping region: [overlap_start, overlap_end)
+    let overlap_start = left.genome_start.max(right.genome_start);
+    let overlap_end = left.genome_end.min(right.genome_end);
+    if overlap_start >= overlap_end {
+        return true; // No overlap — nothing to check
+    }
+
+    let left_juncs = extract_junctions_from_cigar(left);
+    let right_juncs = extract_junctions_from_cigar(right);
+
+    // Every junction from left that falls within the overlap must be in right too
+    for (donor, acceptor) in &left_juncs {
+        if *donor >= overlap_start
+            && *acceptor <= overlap_end
+            && !right_juncs.iter().any(|(d, a)| d == donor && a == acceptor)
+        {
+            return false;
+        }
+    }
+    // Every junction from right that falls within the overlap must be in left too
+    for (donor, acceptor) in &right_juncs {
+        if *donor >= overlap_start
+            && *acceptor <= overlap_end
+            && !left_juncs.iter().any(|(d, a)| d == donor && a == acceptor)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]

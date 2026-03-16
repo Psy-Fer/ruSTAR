@@ -51,7 +51,7 @@ Paired-end (Phase 8) builds on threaded infrastructure. GTF/junctions (Phase 7) 
 | 12 | Chimeric Detection | ✅ | 170 | SE chimeric, Chimeric.out.junction |
 | [13](docs/phase13_accuracy.md) | Performance + Accuracy | ✅ | 205 | 94.5% pos, 97.8% CIGAR, 2.1% splice |
 | [15](docs/phase15_sam_tags.md) | SAM Tags + PE Fix | ✅ | 235 | NH/HI/AS/NM/nM/XS/jM/jI/MD, PE fix |
-| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, 26 actionable, 1 STAR-only; PE: 8383/8390 (7-pair gap), 98.3% pos, 0 half-mapped |
+| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, 26 actionable, 1 STAR-only; PE: 8383/8391 (8-pair gap), 98.3% pos, 0 half-mapped |
 | [17](docs/phase17_features.md) | Features + Polish | ✅* | 268 | Log.final.out, clippy cleanup, sorted BAM planned |
 | 14 | STARsolo | DEFERRED | — | Waiting for accuracy parity |
 
@@ -197,15 +197,17 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 
 **Adjusted SE summary (post Phase 16.29)**: 99.7% position agreement, 99.9% CIGAR, 2.2% splice rate (= STAR), 99.9% MAPQ, 26 actionable disagreements, 1 STAR-only / 1 ruSTAR-only. MAPQ inflation: 4 reads, MAPQ deflation: 4 reads.
 
-**PE parity (10k yeast pairs, 150 bp, post Phase 16.28):**
+**PE parity (10k yeast pairs, 150 bp, post D5 junction consistency fix):**
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Both-mapped pairs | 8383 | 8390 |
+| Both-mapped pairs | 8383 | 8391 |
 | Half-mapped pairs | 0 | 0 |
-| Net gap | −7 | — |
+| Net gap | −8 | — |
 | Per-mate position agreement | 98.3% | — |
 | Per-mate CIGAR agreement | 97.5% | — |
+| ruSTAR-only false positives | ~142 | — |
+| STAR-only missed | ~150 | — |
 
 **PE implementation path:**
 - Phase 16.PE1: Recursive combinatorial stitcher (`stitch_recurse`) replacing forward DP
@@ -213,6 +215,8 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 - Phase 16.PE3: Removed non-STAR independent SE + cross-product path; decision tree: joint pairs only → TooShort/unmapped
 - Score threshold fix: `split_working_transcript` copies `wt.score` to both halves; checking `wt1.score+wt2.score` doubled the threshold. Fixed to check `wt.score < combined_score_threshold` before split.
 - Phase 16.28: extendAlign EXTEND_ORDER fix — for reverse-strand alignments, extend right (5' of read) before left.
+- Phase 16.30: PE overlap check fix — forward cluster check 1 uses post-extension estimate for mate1 genome start.
+- D5 (2026-03-12): Overlapping-mate junction consistency check (`pe_junctions_consistent`). Removed 2 false-positive pairs where splice junctions in the overlapping genome region disagreed between mates. See `docs/star_comparison/DIFFERENCES.md`.
 
 **Remaining fixable SE issues (deferred):**
 
@@ -224,7 +228,7 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 | ruSTAR false splice (adapter contamination, 279 kb) | 1 | Medium |
 | STAR-only mapped (high-mismatch read NM=10) | 1 | Unknown |
 
-**Remaining PE gap (7 pairs):** Cause TBD. Investigation needed at combined-read stitching level.
+**Remaining PE gap (8 pairs):** ~142 ruSTAR-only false positives, ~150 STAR-only missed. Next investigation: D10 (`stitchWindowSeeds` forward N² DP) and direct analysis of STAR-only missed pairs. See `docs/star_comparison/DIFFERENCES.md`.
 
 ---
 

@@ -8,7 +8,7 @@ This file is the primary tracking document for differences between STAR's C++ so
 
 ---
 
-## D1: `stitchWindowAligns` — Score Range Check Uses Per-Mate Score Too 🟡
+## D1: `stitchWindowAligns` — Score Range Check Uses Per-Mate Score Too 🟢
 
 **STAR** (`stitchWindowAligns.cpp`, finalization block):
 ```cpp
@@ -27,9 +27,24 @@ transcripts.retain(|t| t.score >= max_score - params.out_filter_multimap_score_r
 
 Only checks against the global best. The per-mate score check (`maxScoreMate`) is absent.
 
-**Impact**: For paired-end combined-read paths, if mate1 has a high individual score but the combined WA score is lower, STAR might record the combined transcript while ruSTAR would reject it. Likely explains some of the remaining PE 7-pair gap.
+**Investigation result (2026-03-12)**: The per-mate check has a critical constraint: `trA.iFrag >= 0` is true **only for single-mate transcripts**. Joint transcripts (spanning both mates) always receive `iFrag = -1` in STAR's code:
+```cpp
+if (trA.exons[0][EX_iFrag] != trA.exons[trA.nExons-1][EX_iFrag]) {
+    trA.iFrag = -1;  // multi-fragment (joint)
+}
+```
+And `maxScoreMate` is only **updated** by single-mate transcripts:
+```cpp
+if (trA.iFrag >= 0) {
+    if (Score > RA->maxScoreMate[trA.iFrag]) RA->maxScoreMate[trA.iFrag] = Score;
+}
+```
+Therefore:
+- The per-mate check **never benefits joint (BothMapped) transcripts**.
+- It only helps retain secondary single-mate transcripts (from the combined-read path) when their score falls below the global max set by a high-scoring joint pair.
+- In ruSTAR, single-mate candidates are collected into `mate1_candidates` / `mate2_candidates` but discarded as `TooShort` (STAR-faithful: no rescue path). Since we have 0 half-mapped reads, this is a non-issue.
 
-**Investigation needed**: Check if `maxScoreMate` is populated during PE combined-read stitching in STAR and what its value is for the 7 missing PE pairs.
+**Impact**: **No effect on PE both-mapped count or gap.** Would only affect MAPQ for half-mapped reads, of which there are none. **No action needed.**
 
 ---
 
@@ -86,19 +101,54 @@ trA.roStart = (trA.roStr == 0) ? trA.rStart : Lread - trA.rStart - trA.rLength;
 **STAR** (`stitchWindowAligns.cpp` lines ~175-220):
 ```cpp
 if (trA.exons[0][EX_iFrag] != trA.exons[trA.nExons-1][EX_iFrag]) {
-    // Check for negative insert size
+    // Joint transcript: first and last exon are from different mates
+
+    // 1. Negative insert size check
     if (trA.exons[trA.nExons-1][EX_G] + trA.exons[trA.nExons-1][EX_L] <= trA.exons[0][EX_G]) return;
-    // If mates overlap, check junction consistency
-    if (mate1_end > mate2_start) {
-        // Check that overlapping junctions on both mates are identical
-        ...
+
+    // 2. Overlap check: find mate boundary index (iExFrag1 = first mate2 exon)
+    // mate1_end_g = exons[iExFrag1-1][EX_G] + exons[iExFrag1-1][EX_L]
+    // mate2_start_g = exons[iExFrag1][EX_G]
+
+    if (mate1_end_g > mate2_start_g) {
+        // Mates overlap in genome — verify junction consistency in overlap region
+
+        // Check mate1 junctions that fall within the overlap
+        for each mate1 junction (iex1 < iExFrag1-1):
+            if junction acceptor (exons[iex1+1][EX_G]) >= mate2_start_g:
+                // Must find matching junction in mate2 with same canonSJ motif
+                if not found in mate2 → return (reject)
+                if found but different motif → return (reject)
+
+        // Check mate2 junctions that fall within the overlap
+        for each mate2 junction (iex2 >= iExFrag1):
+            if junction donor (exons[iex2][EX_G] + exons[iex2][EX_L]) <= mate1_end_g:
+                // Must find matching junction in mate1
+                if not found in mate1 → return (reject)
     }
 }
 ```
 
-**ruSTAR** (`read_align.rs`): The negative insert size check IS implemented (Phase 16 fix). The junction consistency check for overlapping mates may or may not be implemented; needs verification.
+**ruSTAR** (`read_align.rs`, forward cluster path ~line 742):
+- **Check 1 (negative insert size)**: ✅ Implemented — `t2.genome_end <= t1.genome_start → continue`
+- **Check 2 (post-extension overlap start/end)**: ✅ Implemented — the Phase 16.30 fix (uses `left_start_ext` estimate)
+- **Junction consistency in overlap region**: ❌ **NOT implemented**
 
-**Impact**: For PE reads where mate regions overlap (short-insert libraries), inconsistent junction calls could produce false alignments.
+ruSTAR currently applies the geometric overlap checks but does not verify that splice junctions in the overlapping genome region are consistent between the two mates.
+
+**Investigation result (2026-03-12)**:
+D5's junction consistency check is a **false-positive filter** (rejects biologically impossible alignments), not a recovery mechanism for missed pairs. Its impact on the PE gap is:
+- It would reduce the **144 ruSTAR-only false positives** (pairs that pass ruSTAR but STAR rejects)
+- It would **not** help recover the **149 STAR-only missed pairs**
+- Net effect on both-mapped gap: **widening** (fewer ruSTAR-only → larger net gap), unless some rejected false positives happen to compete with (and block) the correct alignment
+
+**Scenarios where D5 matters**:
+1. Short-insert pairs (mates overlap) where one mate calls a splice junction in the overlap region and the other doesn't
+2. Short-insert pairs where both mates call junctions at the same genomic position but with different motifs
+
+These are relatively rare in yeast (most splicing is clean GT-AG). In human data with abundant splicing and short-insert libraries, D5 would matter more.
+
+**Priority**: Medium for correctness (prevents biologically invalid outputs), but not a gap-recovery mechanism. Implementing it may widen the already-small 5-pair gap slightly.
 
 ---
 
@@ -192,7 +242,7 @@ if score > max_score {
 
 ---
 
-## D10: `stitchWindowSeeds` (forward-DP) — Architecture Difference 🟡
+## D10: `stitchWindowSeeds` (forward-DP) — Architecture Difference 🟢
 
 **STAR** has TWO stitching passes per window:
 1. `ReadAlign::stitchWindowSeeds()` — forward O(N²) DP selecting the single best chain
@@ -202,9 +252,9 @@ The forward DP in `stitchWindowSeeds` selects the "winning chain" for the primar
 
 **ruSTAR**: Only uses the recursive `stitch_recurse` approach (equivalent to `stitchWindowAligns`). The pre-DP `stitchWindowSeeds` approach is simulated by Phase 16.7b pre-DP seed extension scoring (which computes left-extension scores before recursion to help select good seed endpoints).
 
-**Impact**: The pre-DP step in STAR serves as a fast path for finding the best single transcript. Without it, ruSTAR may explore more branches in the recursive search for the same result (performance difference, not correctness difference). However, the scoring heuristics used in STAR's pre-DP may allow STAR to reject certain seed combinations earlier, potentially producing slightly different transcripts in edge cases.
+**Investigation result (2026-03-12)**: `stitchWindowSeeds` is gated by `#ifdef COMPILE_FOR_LONG_READS` in STAR's Makefile. Standard short-read STAR (compiled without `COMPILE_FOR_LONG_READS`) **never calls** `stitchWindowSeeds`. The only active stitching pass is `stitchWindowAligns`, which ruSTAR's `stitch_recurse` correctly implements. D10 is **not applicable** for short-read STAR alignment.
 
-**Investigation needed**: Confirm whether `stitchWindowSeeds` and `stitchWindowAligns` are both always called, or whether they're alternative paths.
+**Impact**: None for standard short-read use. **Closed.**
 
 ---
 
@@ -299,20 +349,51 @@ When `chimSegmentMin > 0`, STAR records ALL transcripts regardless of score (for
 
 ---
 
+## D17: PE Palindromic False Positives — Cat A 🟡
+
+**Pattern** (investigated 2026-03-12): 121 high-MAPQ ruSTAR-only pairs have both mates mapping to the same genomic position with large overlap (63-149bp). All have complementary soft clips (mate1 left-clip + mate2 right-clip, or vice versa). STAR does NOT output these.
+
+**STAR behavior**: STAR correctly rejects them. STAR maps valid zero-insert pairs with the same geometry (`150M|150M`, `1S149M|149M1S`), so neither "same-position" nor "soft clips" alone is the criterion. Most likely: STAR's per-mate SE scoring finds a better non-palindromic alignment for each mate individually (adapter bases hit a different genome region), making the palindromic joint alignment sub-optimal. STAR then fails to form a concordant PE pair at those different positions → both unmapped.
+
+**ruSTAR behavior**: The combined-read approach `[mate1_fwd | SPACER | RC(mate2_fwd)] = [X | SPACER | X]` has all seeds mapping to position P. ruSTAR finds a valid joint transcript at P → false BothMapped.
+
+**Impact**: 121 extra false-positive pairs in ruSTAR. Fixing these alone would WORSEN the 8-pair net gap (removes 121 from BothMapped without recovering any STAR-only missed). Must be fixed in conjunction with recovering STAR-only misses.
+
+**Fix needed**: Implement per-mate score comparison (check if individual mate SE scores would produce a better overall result than the joint alignment). This is a significant architectural addition.
+
+---
+
+## D18: PE 151 STAR-Only Missed Pairs 🔴
+
+**Pattern**: 151 pairs that STAR maps as BothMapped but ruSTAR doesn't find any joint transcript for.
+
+**Root cause**: Unknown. D10 (`stitchWindowSeeds`) is ruled out (STARlong-only). Diagonal dedup mate guard fix had no impact. Candidates:
+- Missing seeds in some clusters (seed finding gap)
+- Score threshold too strict at mate boundary
+- Different seed extension behavior near the mate boundary
+
+**Impact**: Primary contributor to the 8-pair net gap. Recovering these is the highest priority PE improvement.
+
+**Investigation needed**: Sample 10-20 STAR-only missed pairs, examine what alignments STAR produces vs what ruSTAR sees in its seed clusters. Run ruSTAR with debug output for specific read names.
+
+---
+
 ## Summary Table
 
 | ID | Component | Description | Impact | Status |
 |----|-----------|-------------|--------|--------|
-| D1 | stitchWindowAligns | Per-mate score check missing | 🟡 PE | Investigate |
+| D1 | stitchWindowAligns | Per-mate score check missing | 🟢 | ✅ No effect on BothMapped — only affects half-mapped MAPQ (0 half-mapped) |
 | D2 | stitchWindowAligns | Terminal exon overhang check | 🟢 | ✅ Confirmed equivalent |
 | D3 | stitchWindowAligns | Soft-clip at chr ends | 🟢 | Default matches STAR |
 | D4 | stitchWindowAligns | `roStart` computation | 🟢 | Equivalent |
-| D5 | stitchWindowAligns | PE mate overlap consistency | 🟡 | Verify |
+| D5 | stitchWindowAligns | PE mate overlap junction consistency | 🟢 | ✅ Implemented 2026-03-12 — false-positive filter, may widen net gap slightly |
 | D6 | stitchAlignToTranscript | Left-shift scoring range (in-range) | 🟢 | ✅ Confirmed equivalent |
 | D7 | stitchAlignToTranscript | Step 1 left-scan with scoreStitchSJshift | 🟡 | Low risk |
 | D8 | stitchAlignToTranscript | jR scan upper bound | 🟢 | ✅ Confirmed correct |
 | D9 | extendAlign | Strict `>` vs `>=` for maxScore record | 🟢 | ✅ Confirmed correct |
-| D10 | stitchWindowSeeds | Forward-DP not used in ruSTAR | 🟡 | Investigate |
+| D10 | stitchWindowSeeds | Forward-DP not used in ruSTAR | 🟢 | ✅ STARlong-only (#ifdef COMPILE_FOR_LONG_READS) — not applicable for short reads |
+| D17 | PE palindromic pairs | 121 false BothMapped from palindromic reads | 🟡 | Root cause identified, fix requires per-mate score comparison |
+| D18 | PE missed pairs | 151 STAR-only pairs not found by ruSTAR | 🔴 | Root cause unknown — highest priority |
 | D11 | mappedFilter | `Lread-1` in proportional filter | 🟢 | Fixed (16.12 docs) |
 | D12 | stitchAlignToTranscript | `alignInsertionFlush` | 🟡 | Verify |
 | D13 | stitchAlignToTranscript | Del vs intron scoring | 🟢 | Equivalent |
@@ -324,18 +405,18 @@ When `chimSegmentMin > 0`, STAR records ALL transcripts regardless of score (for
 
 ## Priority Investigation Order
 
-### Resolved (Confirmed Equivalent)
-- **D2, D3, D6, D8, D9**: All confirmed equivalent to STAR.
-- **D4, D11, D13, D15**: Always equivalent.
-
 ### Remaining — High Priority
-1. **D1**: Per-mate score check (`maxScoreMate[iFrag]`) — verify if this explains the PE gap. The check allows single-mate transcripts to be retained in `wTr[]` even when a better combined transcript exists. In ruSTAR, single-mate combined-read candidates are currently discarded.
-2. **D5**: PE mate overlap consistency check — relevant for overlapping-mate libraries.
+1. **D7**: Left-scan starting point in `find_best_junction_position` — low risk since `scoreStitchSJshift = 0`, but worth verifying.
 
 ### Remaining — Medium Priority
-3. **D7**: Left-scan starting point in `find_best_junction_position` — low risk since `scoreStitchSJshift = 0`.
-4. **D10**: `stitchWindowSeeds` N² forward-DP — primarily a performance question; the recursive stitcher should find the same results.
+2. **D5**: PE mate overlap junction consistency — ✅ Implemented 2026-03-12. Reduces ruSTAR-only false positives; may widen net gap slightly.
 
 ### Remaining — Low Priority
-5. **D12**: `alignInsertionFlush` for insertion placement.
-6. **D14, D16**: Minor issues for nUnique tracking and chimeric pass-through.
+4. **D12**: `alignInsertionFlush` for insertion placement.
+5. **D14, D16**: Minor issues for nUnique tracking and chimeric pass-through.
+
+### Closed
+- **D1**: Investigated 2026-03-12. Per-mate check (`maxScoreMate`) only applies to single-mate transcripts (`iFrag >= 0`). Joint transcripts have `iFrag = -1` and are unaffected. No impact on BothMapped count. **No action needed.**
+- **D2, D3, D6, D8, D9**: All confirmed equivalent to STAR.
+- **D4, D11, D13, D15**: Always equivalent.
+- **D10**: Investigated 2026-03-12. `stitchWindowSeeds` is `#ifdef COMPILE_FOR_LONG_READS` only — standard STAR never calls it. **Not applicable.**

@@ -149,6 +149,6 @@ STAR calls `stitchWindowSeeds(iW, iWrec, WAexcl=NULL)` for the primary path, and
 
 ## Is stitchWindowSeeds Always Called?
 
-From analysis of STAR's source, `stitchWindowSeeds` appears to be called from `ReadAlign_stitchPieces.cpp` (not fetched) for EACH window. Then `stitchWindowAligns` is likely called from the same context. Without `ReadAlign_stitchPieces.cpp`, the exact relationship is uncertain.
+**Resolution (2026-03-12)**: `stitchWindowSeeds` is gated by `#ifdef COMPILE_FOR_LONG_READS` in STAR's Makefile. Standard short-read STAR is compiled **without** this flag, so `stitchWindowSeeds` is never compiled in or called. The only active stitching pass is `stitchWindowAligns`.
 
-**Investigation needed**: Fetch and analyze `ReadAlign_stitchPieces.cpp` to understand the full call chain.
+**Conclusion**: D10 is **not applicable** for standard short-read STAR alignment. ruSTAR's `stitch_recurse` (equivalent to `stitchWindowAligns`) is the correct and complete equivalent. No implementation needed.

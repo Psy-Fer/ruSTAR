@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 67 shared junctions, 99.9% MAPQ agreement, 26 actionable disagreements, 1 STAR-only / 1 ruSTAR-only mapped. MAPQ inflation: 4, deflation: 4. PE: 8383/8391 both-mapped (8-pair gap vs STAR), 0 half-mapped, 98.3% per-mate position agreement. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 67 shared junctions, 99.9% MAPQ agreement, 26 actionable disagreements, 0 STAR-only / 0 ruSTAR-only mapped. MAPQ inflation: 4, deflation: 4. PE: 8295/8390 both-mapped (−95 under STAR), 0 half-mapped, 32 ruSTAR-only false positives (down from 144 via Phase 16.31 overlap check fix), 127 STAR-only missed. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -143,6 +143,19 @@ predicates = "3"
 7. **STAR-only (1 read)** — `ERR12389696.13766843` high-mismatch read (NM=10), not mapped by ruSTAR.
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
+
+## PE False Positives — Root Cause (Confirmed 2026-03-19)
+
+**144 ruSTAR-only false positives** are non-palindromic overlapping PE pairs rejected by STAR via `outFilterMatchNminOverLread` applied to the **combined read length**, not per-mate.
+
+- STAR `Lread` for a PE combined read = `len1 + SPACER(11) + len2` ≈ 311 for 150bp reads
+- `outFilterMatchNminOverLread` default = 0.66 → threshold = `0.66 × 310 = 204.6 → 205` matched bases required
+- Overlapping false-positive pairs have `nMatch ≈ 130-150` (only one mate's worth) → fail `mappedFilter` → `unmapped=short`
+- ruSTAR's `combined_score_threshold = 0.66 × (len1 + SPACER + len2 - 1) = 198` is correct for the score, but `nMatch` filtering against the combined Lread is missing
+
+**Fix needed**: After `split_working_transcript`, check that `t1.n_match + t2.n_match >= 0.66 × (combined_Lread - 1)`. This is the `outFilterMatchNminOverLread` check on the combined read.
+
+**Confirmed by**: STAR debug tracing (`test/debug_star.sh` + instrumented STAR at `/home/jamfer/Dropbox/Bioinformatics/tools/repos/STAR/source/STAR`). Example: `ERR12389696.10060311` has `nMatch=137`, threshold=198 → `MAPPEDFILTER-RESULT: unmapped=short`.
 
 ## Remaining Limitations (Top 5)
 

@@ -40,6 +40,10 @@ pub struct PairedAlignment {
     /// which is consistent across duplicate loci. Post-finalization per-mate scores diverge due
     /// to independent extension into soft-clip regions.
     pub combined_wt_score: i32,
+    /// Pre-finalization combined-read coverage: sum of exon read spans in the joint WT before
+    /// split_working_transcript. Mirrors STAR's nMatch on the joint combined transcript used in
+    /// mappedFilter. For valid pairs ≈ len1+len2; for overlapping false-positives ≈ one mate len.
+    pub combined_n_match: u32,
 }
 
 /// Result of paired-end alignment, covering all mapping outcomes.
@@ -699,6 +703,14 @@ pub fn align_paired_read(
                             continue;
                         }
                         let combined_wt_score = wt.score;
+                        // Pre-split combined-read coverage: mirrors STAR's nMatch on the joint
+                        // combined transcript (used in mappedFilter). Sum of exon read spans
+                        // before finalize_transcript inflates per-mate contributions.
+                        let combined_n_match: u32 = wt
+                            .exons
+                            .iter()
+                            .map(|e| (e.read_end - e.read_start) as u32)
+                            .sum();
 
                         // Joint: split at mate1→mate2 boundary
                         let (wt1, wt2) = match split_working_transcript(
@@ -739,7 +751,8 @@ pub fn align_paired_read(
                         // This fixes short-insert pairs where raw genome_start > mate2.start due to
                         // the mate1 left soft clip, which post-extension would align correctly.
                         {
-                            let left_end = wt1.exons.last().unwrap().genome_end;
+                            // STAR check2_lhs uses stitched exon end; use post-finalization t1.genome_end.
+                            let left_end = t1.genome_end;
                             let right_start = wt2.exons.first().unwrap().genome_start;
                             if left_end > right_start {
                                 // Check 1: post-extension leftMateStart > rightMateStart
@@ -779,6 +792,7 @@ pub fn align_paired_read(
                             is_proper_pair,
                             insert_size,
                             combined_wt_score,
+                            combined_n_match,
                         });
                     }
                     None => {
@@ -844,6 +858,14 @@ pub fn align_paired_read(
                         continue;
                     }
                     let combined_wt_score = wt.score;
+                    // Pre-split combined-read coverage: mirrors STAR's nMatch on the joint
+                    // combined transcript (used in mappedFilter). Stitch_read for reverse cluster
+                    // is [mate2_fwd | SPACER_RC | RC(mate1_fwd)]; exon read spans cover same range.
+                    let combined_n_match: u32 = wt
+                        .exons
+                        .iter()
+                        .map(|e| (e.read_end - e.read_start) as u32)
+                        .sum();
 
                     // Build wt2 (mate2 portion, no position adjustment needed)
                     let (wt2, wt1) = match split_working_transcript(
@@ -880,7 +902,10 @@ pub fn align_paired_read(
                     // wt1 = mate1 content (right in genome).
                     // Applied pre-finalization using wt2/wt1 seed coords.
                     {
-                        let left_end = wt2.exons.last().unwrap().genome_end;
+                        // STAR check2_lhs = EX_G + EX_L of left mate's last stitched exon.
+                        // STAR's stitcher extends seeds to full match boundaries; ruSTAR's WT
+                        // stops at the last seed's end. Use post-finalization t2.genome_end.
+                        let left_end = t2.genome_end;
                         let right_start = wt1.exons.first().unwrap().genome_start;
                         if left_end > right_start {
                             // Check 1: left mate starts after right mate start → reject
@@ -918,6 +943,7 @@ pub fn align_paired_read(
                         is_proper_pair,
                         insert_size,
                         combined_wt_score,
+                        combined_n_match,
                     });
                 } else if has_mate2_exons && !has_mate1_exons {
                     // Mate2-only: all exons in [0, len2) → finalize with mate2_seq
@@ -1084,7 +1110,15 @@ fn filter_paired_transcripts(paired_alns: &mut Vec<PairedAlignment>, params: &Pa
 
         let combined_score = t1.score + t2.score;
         let combined_nm = t1.n_mismatch + t2.n_mismatch;
-        let combined_match = t1.n_matched() + t2.n_matched();
+
+        // STAR's mappedFilter applies nMatch against Lread-1 on the JOINT combined transcript
+        // (ReadAlign_mappedFilter.cpp line 21). For overlapping pairs (both mates at same genome
+        // region), STAR's joint transcript covers only one mate's worth → nMatch ≈ 137 < 198.
+        // ruSTAR extends each mate independently after split, inflating per-mate n_matched().
+        //
+        // Fix: use the pre-split combined-read coverage captured before split_working_transcript,
+        // which directly mirrors STAR's joint transcript nMatch without extension inflation.
+        let combined_match = pa.combined_n_match;
 
         // Score: trBest->maxScore < outFilterScoreMin || < outFilterScoreMinOverLread*(Lread-1)
         if combined_score < params.out_filter_score_min
@@ -1748,6 +1782,7 @@ mod tests {
             is_proper_pair: true,
             insert_size: 200,
             combined_wt_score: 0,
+            combined_n_match: 200,
         }));
         assert!(matches!(both, PairedAlignmentResult::BothMapped(_)));
 

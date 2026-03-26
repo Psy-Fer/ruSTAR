@@ -5,6 +5,10 @@ use crate::align::transcript::{CigarOp, Transcript};
 use crate::error::Error;
 use crate::index::GenomeIndex;
 
+/// STAR's MARK_FRAG_SPACER_BASE (IncludeDefine.h:174).
+/// Separates mate1 and mate2 fragments in the combined PE read.
+const PE_SPACER_BASE: u8 = 11;
+
 /// Count mismatches in an alignment by comparing read sequence to genome sequence.
 ///
 /// The read sequence is always in forward orientation. For reverse-strand alignments,
@@ -192,6 +196,11 @@ fn extend_alignment(
         }
 
         let read_base = read_seq[read_pos];
+
+        // Stop at PE fragment spacer base (STAR: MARK_FRAG_SPACER_BASE, extendAlign.cpp:63)
+        if read_base == PE_SPACER_BASE {
+            break;
+        }
 
         // Skip N bases (no score impact, matches STAR behavior)
         if read_base == 4 || genome_base == 4 {
@@ -839,7 +848,35 @@ fn stitch_align_to_transcript(
         }
         let mut new_wt = wt.clone();
 
-        // STAR lines 360, 383-386: add M2 seed length to score.
+        // STAR stitchAlignToTranscript.cpp:374-381: right-extend mate A to fragment boundary.
+        // extendAlign(R, G, rAend+1, gAend+1, 1, 1, DEF_readSeqLengthMax, nMatch, nMM, ...)
+        // extendToEnd=false (local mode); spacer at position 150 naturally stops the extension.
+        // nMatch approximated as score + n_mismatch (exact for seeds-only paths, approx otherwise).
+        let n_match_m1 = (wt.score + wt.n_mismatch as i32).max(0) as usize;
+        let right_ext = extend_alignment(
+            read_seq,
+            last_exon.read_end,
+            last_exon.genome_end,
+            1,
+            usize::MAX, // DEF_readSeqLengthMax; SPACER stop applies
+            wt.n_mismatch,
+            n_match_m1,
+            scorer.n_mm_max,
+            scorer.p_mm_max,
+            index,
+            cluster.is_reverse,
+        );
+        if right_ext.extend_len > 0 {
+            let last = new_wt.exons.last_mut().unwrap();
+            last.read_end += right_ext.extend_len;
+            last.genome_end += right_ext.extend_len as u64;
+            new_wt.score += right_ext.max_score;
+            new_wt.n_mismatch += right_ext.n_mismatch;
+        }
+
+        // STAR:360, 383-386: add seed B (mate fragment) length to score and push exon.
+        let n_mm_after_right = new_wt.n_mismatch;
+        new_wt.score += wa.length as i32;
         new_wt.exons.push(ExonBlock {
             read_start: wa.read_pos,
             read_end: wa.read_pos + wa.length,
@@ -847,12 +884,44 @@ fn stitch_align_to_transcript(
             genome_end: wa.sa_pos + wa.length as u64,
             mate_id: wa.mate_id,
         });
-        new_wt.score += wa.length as i32;
         new_wt.read_end = wa.read_pos + wa.length;
         new_wt.genome_end = wa.sa_pos + wa.length as u64;
         if wa.is_anchor {
             new_wt.n_anchor += 1;
         }
+
+        // STAR:390-400: left-extend seed B toward the fragment boundary.
+        // extlen = gBstart - EX_G_first + EX_R_first  (when alignEndsType.ext == false)
+        // nMatch after adding seed B = n_match_m1 + right_ext.extend_len + wa.length
+        let first_exon = &new_wt.exons[0];
+        let extlen = if wa.sa_pos >= first_exon.genome_start {
+            let raw = wa.sa_pos - first_exon.genome_start + first_exon.read_start as u64;
+            (raw as usize).min(wa.read_pos) // can't extend past start of read
+        } else {
+            wa.read_pos // fallback: limit by read position
+        };
+        let n_match_for_left = n_match_m1 + right_ext.extend_len + wa.length;
+        let left_ext = extend_alignment(
+            read_seq,
+            wa.read_pos,
+            wa.sa_pos,
+            -1,
+            extlen,
+            n_mm_after_right,
+            n_match_for_left,
+            scorer.n_mm_max,
+            scorer.p_mm_max,
+            index,
+            cluster.is_reverse,
+        );
+        if left_ext.extend_len > 0 {
+            let last = new_wt.exons.last_mut().unwrap();
+            last.read_start -= left_ext.extend_len;
+            last.genome_start -= left_ext.extend_len as u64;
+            new_wt.score += left_ext.max_score;
+            new_wt.n_mismatch += left_ext.n_mismatch;
+        }
+
         return Some(new_wt);
     }
 

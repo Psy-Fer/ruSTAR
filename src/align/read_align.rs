@@ -704,10 +704,26 @@ pub fn align_paired_read(
                             .saturating_sub(wt.exons.first().unwrap().genome_start);
                         let length_penalty = scorer.genomic_length_penalty(g_span);
                         let adjusted_score = (wt.score + length_penalty).max(0);
+                        // Log near-threshold failures: reads where the genomicLength penalty
+                        // causes the score to fall below threshold. These are the ~35 regression
+                        // reads introduced by Phase 16.31. Fires for any read pair, not just debug.
+                        if wt.score >= combined_score_threshold && adjusted_score < combined_score_threshold {
+                            eprintln!("[NEAR-THRESHOLD-FWD] {} raw={} penalty={} adj={} threshold={} n_exons={} gspan={}",
+                                read_name, wt.score, length_penalty, adjusted_score,
+                                combined_score_threshold, wt.exons.len(), g_span);
+                        }
                         if adjusted_score < combined_score_threshold {
                             continue;
                         }
                         let combined_wt_score = adjusted_score;
+                        if debug_pe {
+                            eprintln!("[RUSTAR-FINALIZE-PREEXT] raw={} penalty={} adj={} n_exons={} n_mismatch={}",
+                                wt.score, length_penalty, adjusted_score, wt.exons.len(), wt.n_mismatch);
+                            for (i, e) in wt.exons.iter().enumerate() {
+                                eprintln!("[RUSTAR-FINALIZE-EXON[{}]] rStart={} gStart={} len={} iFrag={}",
+                                    i, e.read_start, e.genome_start, e.read_end - e.read_start, e.mate_id);
+                            }
+                        }
                         // Pre-split combined-read coverage: mirrors STAR's nMatch on the joint
                         // combined transcript (used in mappedFilter). Sum of exon read spans
                         // before finalize_transcript inflates per-mate contributions.
@@ -863,10 +879,23 @@ pub fn align_paired_read(
                         .saturating_sub(wt.exons.first().unwrap().genome_start);
                     let length_penalty = scorer.genomic_length_penalty(g_span);
                     let adjusted_score = (wt.score + length_penalty).max(0);
+                    if wt.score >= combined_score_threshold && adjusted_score < combined_score_threshold {
+                        eprintln!("[NEAR-THRESHOLD-REV] {} raw={} penalty={} adj={} threshold={} n_exons={} gspan={}",
+                            read_name, wt.score, length_penalty, adjusted_score,
+                            combined_score_threshold, wt.exons.len(), g_span);
+                    }
                     if adjusted_score < combined_score_threshold {
                         continue;
                     }
                     let combined_wt_score = adjusted_score;
+                    if debug_pe {
+                        eprintln!("[RUSTAR-FINALIZE-PREEXT-REV] raw={} penalty={} adj={} n_exons={} n_mismatch={}",
+                            wt.score, length_penalty, adjusted_score, wt.exons.len(), wt.n_mismatch);
+                        for (i, e) in wt.exons.iter().enumerate() {
+                            eprintln!("[RUSTAR-FINALIZE-EXON-REV[{}]] rStart={} gStart={} len={} iFrag={}",
+                                i, e.read_start, e.genome_start, e.read_end - e.read_start, e.mate_id);
+                        }
+                    }
                     // Pre-split combined-read coverage: mirrors STAR's nMatch on the joint
                     // combined transcript (used in mappedFilter). Stitch_read for reverse cluster
                     // is [mate2_fwd | SPACER_RC | RC(mate1_fwd)]; exon read spans cover same range.

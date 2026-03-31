@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 67 shared junctions, 99.9% MAPQ agreement, 26 actionable disagreements, 0 STAR-only / 0 ruSTAR-only mapped. MAPQ inflation: 4, deflation: 4. PE: 8295/8390 both-mapped (−95 under STAR), 0 half-mapped, 32 ruSTAR-only false positives (down from 144 via Phase 16.31 overlap check fix), 127 STAR-only missed. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 67 shared junctions, 99.9% MAPQ agreement, 26 actionable disagreements, 0 STAR-only / 0 ruSTAR-only mapped. MAPQ inflation: 4, deflation: 4. PE: **8392/8390 both-mapped (+2 ruSTAR over STAR)**, 0 half-mapped, ~2 ruSTAR-only FPs, 98.8% per-mate position agreement (Phase 16.33: PE mate2 left-extension suppression — fixed zero-insert RF pairs). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -144,22 +144,13 @@ predicates = "3"
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
 
-## PE False Positives — Root Cause (Updated 2026-03-26)
+## PE Status (Updated 2026-03-31 — Phase 16.33)
 
-**132/144 ruSTAR-only false positives** were fixed by Phase 16.31 (scoreGenomicLengthLog2scale penalty on combined WT score). **12 remain**.
+**Phase 16.33** fixed zero-insert RF pairs (e.g. `ERR12389696.10454315`) by adding `no_left_ext: bool` to `finalize_transcript`. Two cascading bugs were fixed:
+1. **extlen signed arithmetic** (`stitch_align_to_transcript`): when `wa.sa_pos < first_exon.genome_start`, old unsigned code fell back to `wa.read_pos` (gave extlen=198→2-base extension). Fixed to signed i64 = STAR's `gBstart - EX_G + EX_R` formula (gives extlen=1).
+2. **mate2 left-extension suppression** (`finalize_transcript`): after split, wt2.read_start=46; per-mate finalize tried to extend leftward 46 bases into adapter, spuriously matching 1 adapter base. Added `no_left_ext: bool` param; pass `true` for mate2 (fwd cluster) and rc_mate1 (rev cluster).
 
-The 12 remaining FPs all share the same underlying issue: **ruSTAR's combined WT score is 36-106 points higher than STAR's finalized combined WT score** for these pairs, causing them to pass the combined_score_threshold (198) where STAR rejects them via `mappedFilter`.
-
-**Root cause of score inflation (TBD)**: STAR's combined WT score at finalization includes extensions done inside `stitchAlignToTranscript` PE boundary processing and `stitchWindowAligns` finalize. ruSTAR's combined WT score includes only seeds (no extensions until per-mate `finalize_transcript`). Despite this, ruSTAR's pre-extension score (e.g., 205 for 9834570) exceeds STAR's post-extension score (167). This means ruSTAR must have MORE/DIFFERENT seeds scored in the combined WT, not just missing extensions.
-
-**Breakdown of 12 remaining FPs**:
-- 9 FPs: STAR combined WT score 109-193 < 198 threshold; ruSTAR adj_score 203-264 > 198
-- 2 FPs (2243566, 21434027): STAR nW=0 (no seed windows); ruSTAR finds 16 and 3 joint_pairs
-- 1 FP (9495507): STAR nTr=12 > outFilterMultimapNmax=10; ruSTAR score-range filter keeps 1 pair (inflated score 291 vs tied 289 elsewhere)
-
-**Phase 16.32 (2026-03-26)**: Added `outFilterMultimapNmax` check after `filter_paired_transcripts`. Mechanism is correct but blocked by score inflation for all 12 FPs.
-
-**Historical note**: 132 of the original 144 FPs were non-palindromic overlapping pairs rejected by STAR via `outFilterMatchNminOverLread`. These were fixed by the scoreGenomicLengthLog2scale penalty (Phase 16.31) which correctly reduced the combined WT score below the threshold.
+**Current PE parity**: ruSTAR=8392 vs STAR=8390. ruSTAR +2 over STAR. ~2 residual FPs (score inflation, root cause TBD). 75 diff-chr disagreements per mate (unavoidable multi-mapper ties), ~21-24 same-chr per mate (some fixable).
 
 ## Remaining Limitations (Top 5)
 

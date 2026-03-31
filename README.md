@@ -119,15 +119,13 @@ A read is counted as a **match** only if it aligns to the exact same chromosome,
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
-| Both mates mapped | 8245 | 8390 |
+| Both mates mapped | 8392 | 8390 |
 | Half-mapped pairs | 0 | 0 |
 | Unmapped pairs | 0 | 0 |
-| ruSTAR-only mapped pairs | 12 | — |
-| STAR-only mapped pairs | 157 | — |
-| Per-mate position agreement | 98.0% | — |
-| Per-mate CIGAR agreement | 96.7% | — |
+| Per-mate position agreement | 98.8% | — |
+| Per-mate CIGAR agreement | 98.5% | — |
 
-> **PE parity in progress**: ruSTAR uses STAR's combined-read PE path (`[mate1_fwd][SPACER][RC(mate2)]`). The 12 ruSTAR-only false positives are overlapping pairs with marginally elevated combined-read scores. The 157 STAR-only missed pairs include 35 where ruSTAR's raw stitching score is slightly below STAR's (exposed by the genomic-length score penalty added in Phase 16.31) and 122 pre-existing gaps under investigation.
+> **PE parity**: ruSTAR uses STAR's combined-read PE path (`[mate1_fwd][SPACER][RC(mate2)]`). ruSTAR maps 2 more pairs than STAR (8392 vs 8390). The per-mate disagreements (~75/mate diff-chr) are unavoidable multi-mapper tie-breaking differences; ~21-24/mate same-chr disagreements are under investigation.
 
 ## Supported Features
 

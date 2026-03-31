@@ -419,17 +419,102 @@ if jr_shift > 0 {
 
 ---
 
-## Remaining SE Fixable Issues
+## Phase 16.30: PE Overlap Check Fix ✅ (2026-03-XX)
 
-| Read | Issue | Count | Difficulty |
-|------|-------|-------|------------|
-| ERR12389696.18296181 | ruSTAR false splice, 279 kb (adapter contamination) | 1 | Medium |
-| ERR12389696.8788548 | Missed splice: 127 kb intron, same start pos | 1 | High |
-| ERR12389696.12389135 | Missed splice: 38 kb intron → MAPQ inflation | 1 | High |
-| ERR12389696.5150933 | Missed splice: 58 kb intron, diff start pos | 1 | High |
-| ERR12389696.13766843 | STAR-only: high-mismatch read (NM=10) | 1 | Unknown |
-| Wrong intron choice (same chr, different large intron) | Different intron | 4 | High |
-| MAPQ inflation (missed splice/indel secondary) | | 4 | Medium |
-| MAPQ deflation (extra unspliced secondary) | | 4 | Medium |
+**Problem**: Forward cluster overlap check 1 used raw `wt1.first.genome_start` which incorrectly rejected valid short-insert FR pairs where mate1 has a left soft clip (raw genome_start > mate2.start, but post-extension they align correctly).
 
-**Unavoidable ties (~119 reads)**: Same score, different repeat copy chosen. Cannot be fixed without matching STAR's internal SA iteration order.
+**Fix**: Use `left_start_ext = wt1_first.genome_start - wt1_first.read_start` (post-extension estimate) for check 1. Restored old reverse cluster checks (check 1: left.start > right.start → reject; check 2: left.end > estimated right.end → reject).
+
+**Key insight**: FR false positives come from the FORWARD cluster; RF false positives come from the REVERSE cluster.
+
+**Files**: `src/align/read_align.rs`
+
+---
+
+## Phase 16.31: scoreGenomicLengthLog2scale PE Penalty ✅ (2026-03-25)
+
+**Problem**: 144 ruSTAR-only false positive pairs (non-palindromic overlapping pairs). STAR rejects these via `outFilterMatchNminOverLread` because the combined WT nMatch < threshold when only one genomic region is covered (zero-insert / very short insert). ruSTAR's combined WT score was passing the threshold.
+
+**Fix**: Apply `scoreGenomicLengthLog2scale` penalty to the combined WT score before comparing to `combined_score_threshold`. STAR applies this penalty in `stitchWindowAligns.cpp:262-265`: `Score = max(0, Score + penalty)`. For overlapping pairs, the penalty is typically -2, pushing scores from 200 → 198 (below threshold 198).
+
+**Impact**: 132 of 144 FPs fixed. 12 FPs remain (score inflation TBD). 35 new regressions introduced — pairs with raw scores 198-200 that fall below 198 after penalty (latent stitching/scoring discrepancy vs STAR).
+
+**Files**: `src/align/read_align.rs`
+
+---
+
+## Phase 16.32: outFilterMultimapNmax PE Check ✅ (2026-03-26)
+
+**Problem**: STAR's `mappedFilter` rejects PE reads where `nTr > outFilterMultimapNmax` even after score-range filtering. ruSTAR was missing this check for the PE joint path.
+
+**Fix**: Added check `if joint_pairs.len() > params.out_filter_multimap_nmax → return TooManyLoci` after `filter_paired_transcripts`, mirroring STAR's ordering.
+
+**Status**: Mechanism correct but blocked for all 12 remaining FPs by score inflation (ruSTAR scores 36-106 pts higher than STAR for those pairs).
+
+**Files**: `src/align/read_align.rs`
+
+---
+
+## Phase 16.D5: PE Junction Consistency Check ✅ (2026-03-16)
+
+**Problem**: When mates overlap in the genome, any splice junction in the overlap region must be present in both mates' alignments. Missing this check produced a small number of false positive overlapping pairs with inconsistent junction placement.
+
+**Fix**: `pe_junctions_consistent(&t1, &t2)` / `pe_junctions_consistent(&t2, &t1)` added to forward and reverse cluster joint paths respectively, after same-chr check and before `check_proper_pair`. Functions were implemented earlier but not wired in.
+
+**Files**: `src/align/read_align.rs`
+
+---
+
+## Phase 16.33: PE Mate2 Left-Extension Suppression ✅ (2026-03-31)
+
+**Problem**: Zero-insert RF pairs (e.g. `ERR12389696.10454315`: mate1 `V:340570 104M46S`, mate2 `V:340570 46S104M`) were not being mapped. Two cascading bugs:
+
+**Bug 1** — `extlen` unsigned arithmetic in `stitch_align_to_transcript`: When DP takes Path B (`{seed86 → mate2}` instead of `{seed0 → seed86 → mate2}`), `wa.sa_pos=3748442 < first_exon.genome_start=3748527`, causing the old unsigned conditional to fall back to `extlen=wa.read_pos=198` (giving a spurious 2-base left extension of mate2 instead of 1 base).
+
+**Fix**: Signed i64 arithmetic matching STAR's `gBstart - EX_G + EX_R` formula:
+```rust
+let raw = (wa.sa_pos as i64) - (first_exon.genome_start as i64) + (first_exon.read_start as i64);
+let extlen = if raw > 0 { (raw as usize).min(wa.read_pos) } else { 0 };
+```
+
+**Bug 2** — Spurious left extension in `finalize_transcript` for mate2: After `split_working_transcript`, `wt2.read_start=46`. In per-mate `finalize_transcript`, `alignment_start=46`, so it tries to extend 46 bases left into adapter. The adapter base rc_mate2[45]='T' matched genome[3748440]='T' by chance, giving 1 extra base (rStart=196 instead of 197, gStart=3748440 instead of 3748441), causing the overlap check to reject the pair.
+
+**Fix**: Added `no_left_ext: bool` parameter to `finalize_transcript`. The joint stitcher already establishes mate2's left boundary via `extlen`; per-mate finalize must not re-extend leftward. Pass `true` for mate2 in the forward joint cluster and `rc_mate1` in the reverse joint cluster.
+
+**Impact**:
+
+| Metric | Before | After |
+|--------|--------|-------|
+| PE both-mapped | 8245 (−145 vs STAR) | **8392 (+2 vs STAR)** |
+| Per-mate pos agree | ~98.4% | **98.8%** |
+| Per-mate CIGAR agree | ~98.5% | **98.5%** |
+| SE results | unchanged | unchanged |
+| Tests | 268/268 | 268/268 |
+
+**Files**: `src/align/stitch.rs`, `src/align/read_align.rs`
+
+---
+
+## Remaining SE Issues (Post Phase 16.33)
+
+| Category | Count | Notes |
+|----------|-------|-------|
+| Diff-chr multi-mapper ties | ~100 | Unavoidable — same score, different repeat copy |
+| Same-chr repeat ties | ~19 | Unavoidable — rDNA/segmental dups |
+| Wrong intron choice (same chr) | 4 | ruSTAR picks 170kb intron, STAR picks 84kb |
+| MAPQ inflation | 4 | Missed splice/indel secondary |
+| MAPQ deflation | 4 | Extra unspliced secondary |
+| ruSTAR-only false splice | 1 | `ERR12389696.18296181` — 279kb intron, adapter contamination |
+| STAR-only mapped | 1 | `ERR12389696.13766843` — NM=10, unknown |
+| **Total actionable** | **26** | |
+
+## Remaining PE Issues (Post Phase 16.33)
+
+| Category | Count | Notes |
+|----------|-------|-------|
+| Diff-chr per-mate disagreements | 75/mate | Unavoidable multi-mapper ties |
+| Same-chr per-mate disagreements | ~21-24/mate | Some fixable |
+| ruSTAR-only FPs | ~2 pairs | Score inflation (combined WT 36-106 pts above STAR) — root cause TBD |
+| ruSTAR vs STAR total pair gap | +2 ruSTAR | ruSTAR maps 2 more pairs than STAR |
+
+**Latent stitching/scoring discrepancy**: 35 pairs regressed from Phase 16.31 (raw combined WT scores 198-200 fall below 198 after penalty). STAR's raw scores for the same pairs are slightly higher. Root cause is a stitching or scoring difference not yet identified.

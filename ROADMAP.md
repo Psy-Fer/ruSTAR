@@ -51,7 +51,7 @@ Paired-end (Phase 8) builds on threaded infrastructure. GTF/junctions (Phase 7) 
 | 12 | Chimeric Detection | ✅ | 170 | SE chimeric, Chimeric.out.junction |
 | [13](docs/phase13_accuracy.md) | Performance + Accuracy | ✅ | 205 | 94.5% pos, 97.8% CIGAR, 2.1% splice |
 | [15](docs/phase15_sam_tags.md) | SAM Tags + PE Fix | ✅ | 235 | NH/HI/AS/NM/nM/XS/jM/jI/MD, PE fix |
-| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, 26 actionable, 0 STAR-only; PE: 8245/8390 (−145 ruSTAR under), 12 FP, 157 STAR-only (Phase 16.31: scoreGenomicLengthLog2scale penalty applied to combined PE WT score) |
+| [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: 99.7% pos, 2.2% splice, 26 actionable, 0 STAR-only; PE: **8392/8390 (+2 ruSTAR)**, 98.8% per-mate pos (Phase 16.33: PE mate2 left-extension suppression — zero-insert RF pairs) |
 | [17](docs/phase17_features.md) | Features + Polish | ✅* | 268 | Log.final.out, clippy cleanup, sorted BAM planned |
 | 14 | STARsolo | DEFERRED | — | Waiting for accuracy parity |
 

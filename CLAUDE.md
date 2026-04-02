@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 66 shared junctions, **100.0% MAPQ agreement, MAPQ inflation: 0, deflation: 0**. 127 position disagreements (ALL verified as genuine ties). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). 3 truly actionable SE issues remain. PE: **8400/8390 both-mapped (+10 ruSTAR over STAR)**, 0 half-mapped, ~16 ruSTAR-only FPs, 98.9% per-mate position agreement (Phase 16.37: alignIntronMax=0 fix). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**268 tests passing, 0 clippy warnings.** SE: 99.7% position agreement (adjusted), 99.9% CIGAR (pos-agreeing), 2.2% splice rate (STAR: 2.2%), 66 shared junctions, **100.0% MAPQ agreement, MAPQ inflation: 0, deflation: 0**. 127 position disagreements (ALL verified as genuine ties). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **1 truly actionable SE issue remains** (CIGAR insertion placement only — the other 2 previously listed are resolved). PE: **8400/8390 both-mapped (+10 ruSTAR over STAR)**, 0 half-mapped, ~16 ruSTAR-only FPs, 98.9% per-mate position agreement (Phase 16.38: STAR-faithful filter ordering). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -142,11 +142,16 @@ Both tools find identical alignment sets for all 127 disagreements. The primary 
 **1 CIGAR-only disagreement (same position, different CIGAR):**
 - `ERR12389696.13573895`: both tools align to XV:218357 MAPQ=255, but ruSTAR gives `100M1I45M4S` (insertion at read pos 100) while STAR gives `108M1I37M4S` (insertion at 108). Root cause: both alignments score AS=133. The 71-base seed is found at RC pos 29 (ruSTAR) vs RC pos 37 (STAR) due to different Lmapped chain paths through a long homopolymer region. Same diagonal, different starting position → different insertion placement. Seed-level tie.
 
-**3 truly actionable SE issues:**
+**1 truly actionable SE issue:**
 
-1. **ruSTAR-only false splice (1 read)** — `ERR12389696.18296181` maps with 279kb intron (adapter contamination pattern, likely spurious).
-2. **STAR-only (1 read)** — `ERR12389696.13766843` high-mismatch read (NM=10), not mapped by ruSTAR.
-3. **CIGAR-only insertion placement (1 read)** — `ERR12389696.13573895` (see above). Requires matching STAR's exact Lmapped chain to fix.
+1. **CIGAR-only insertion placement (1 read)** — `ERR12389696.13573895` (see above). Requires matching STAR's exact Lmapped chain to fix.
+
+Previously listed issues now resolved:
+- `ERR12389696.18296181` (ruSTAR-only false splice): filtered out by score threshold (score=95/92 < 98 threshold for 150bp read). Both the 1-exon soft-clip AND the 2-exon false splice fail the minimum score gate — read correctly unmapped.
+- `ERR12389696.13766843` (STAR-only NM=10 read): ruSTAR already maps this correctly (VII:24449, 28S121M1S, MAPQ=255) — it was incorrectly listed as "STAR-only".
+
+**Phase 16.38 (STAR-faithful filter ordering):**
+- Moved dedup + score-range filter (multMapSelect) to run BEFORE quality filters (mappedFilter). STAR's ordering: `multMapSelect → mappedFilter`. Old code ran quality filters first, which could remove the high-scoring primary leaving a lower-scoring secondary as apparent "best". No benchmark change (the specific false splice read was already filtered by score threshold), but structurally correct for edge cases.
 
 **Phase 16.37 (alignIntronMax=0 fix) resolved:**
 - `ERR12389696.5825571`: now aligns as `XV:80779 121M607028N13M16S` (exact match with STAR). Root cause: ruSTAR computed a finite intron limit of 589824 when `alignIntronMax=0`, blocking the 607kb intron. STAR uses `>0` guard in `stitchAlignToTranscript.cpp` line 100 — alignIntronMax=0 means no limit. Fix: use `u32::MAX` sentinel in score.rs.

@@ -264,7 +264,68 @@ pub fn align_read(
         transcripts.extend(cluster_transcripts);
     }
 
-    // Step 4: Filter transcripts
+    // Step 4a: Deduplicate and score-range filter — BEFORE quality filters.
+    // STAR order: multMapSelect (score-range) → mappedFilter (quality gates).
+    // Doing quality filters first is wrong: it can remove the high-scoring primary,
+    // leaving a lower-scoring secondary that then passes as the "best" alignment.
+
+    // Deduplicate transcripts with identical genomic coordinates AND CIGAR.
+    transcripts.sort_by(|a, b| {
+        (
+            a.chr_idx,
+            a.genome_start,
+            a.genome_end,
+            a.is_reverse,
+            &a.cigar,
+        )
+            .cmp(&(
+                b.chr_idx,
+                b.genome_start,
+                b.genome_end,
+                b.is_reverse,
+                &b.cigar,
+            ))
+            .then_with(|| b.score.cmp(&a.score))
+    });
+    transcripts.dedup_by(|a, b| {
+        a.chr_idx == b.chr_idx
+            && a.genome_start == b.genome_start
+            && a.genome_end == b.genome_end
+            && a.is_reverse == b.is_reverse
+            && a.cigar == b.cigar
+    });
+
+    // Sort by score descending (deterministic tie-breaking).
+    transcripts.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.n_junction.cmp(&b.n_junction))
+            .then_with(|| a.chr_idx.cmp(&b.chr_idx))
+            .then_with(|| a.genome_start.cmp(&b.genome_start))
+            .then_with(|| a.is_reverse.cmp(&b.is_reverse))
+    });
+
+    // Score-range filter: keep only alignments within outFilterMultimapScoreRange of the best.
+    // (STAR's multMapSelect step — must run before quality filters.)
+    if !transcripts.is_empty() {
+        let max_score = transcripts[0].score;
+        let score_threshold = max_score - params.out_filter_multimap_score_range;
+        transcripts.retain(|t| t.score >= score_threshold);
+    }
+
+    // Multimap count check: too many loci → unmapped.
+    if transcripts.len() > params.out_filter_multimap_nmax as usize {
+        let n_loci = transcripts.len();
+        transcripts.clear();
+        return Ok((
+            transcripts,
+            chimeric_alignments,
+            n_loci,
+            Some(UnmappedReason::TooManyLoci),
+        ));
+    }
+
+    // Step 4: Quality filters (STAR's mappedFilter — runs after score-range selection).
     // STAR uses (Lread-1) for relative thresholds and casts to integer
     // (ReadAlign_mappedFilter.cpp lines 8-9)
     let read_length = read_seq.len() as f64;
@@ -424,73 +485,6 @@ pub fn align_read(
     // Generating equivalents post-hoc causes more harm than good (41 false NH=2 vs 5 fixed).
     // The root cause is jR scanning placing insertions at different positions — fixing that
     // would be a better approach than post-hoc enumeration.
-
-    // Step 5: Deduplicate transcripts with identical genomic coordinates AND CIGAR.
-    // Keep only the highest-scoring transcript for each unique (location, CIGAR) pair.
-    // Transcripts with different CIGARs (e.g. indel at different positions) are kept
-    // as separate alignments, matching STAR's blocksOverlap dedup behavior.
-    transcripts.sort_by(|a, b| {
-        (
-            a.chr_idx,
-            a.genome_start,
-            a.genome_end,
-            a.is_reverse,
-            &a.cigar,
-        )
-            .cmp(&(
-                b.chr_idx,
-                b.genome_start,
-                b.genome_end,
-                b.is_reverse,
-                &b.cigar,
-            ))
-            .then_with(|| b.score.cmp(&a.score)) // Higher score first
-    });
-
-    // Dedup consecutive entries with same coordinates AND CIGAR (keeps first = highest score)
-    transcripts.dedup_by(|a, b| {
-        a.chr_idx == b.chr_idx
-            && a.genome_start == b.genome_start
-            && a.genome_end == b.genome_end
-            && a.is_reverse == b.is_reverse
-            && a.cigar == b.cigar
-    });
-
-    // Step 5b: Re-sort by score (descending) with deterministic tie-breaking
-    // When scores are equal, prefer: fewer junctions (non-spliced over spliced) →
-    // smallest chr index → smallest position → forward strand
-    transcripts.sort_by(|a, b| {
-        b.score
-            .cmp(&a.score)
-            .then_with(|| a.n_junction.cmp(&b.n_junction))
-            .then_with(|| a.chr_idx.cmp(&b.chr_idx))
-            .then_with(|| a.genome_start.cmp(&b.genome_start))
-            .then_with(|| a.is_reverse.cmp(&b.is_reverse))
-    });
-
-    // Step 5b: Filter to keep only alignments within score range of the best
-    // This is CRITICAL for unique vs multi-mapped classification
-    if !transcripts.is_empty() {
-        let max_score = transcripts[0].score;
-        let score_threshold = max_score - params.out_filter_multimap_score_range;
-
-        // Keep only transcripts within score range of the best
-        transcripts.retain(|t| t.score >= score_threshold);
-    }
-
-    // Step 5c: Check multimap count (STAR's mappedFilter: nTr > outFilterMultimapNmax)
-    // If too many loci, clear transcripts — read becomes unmapped "too many loci"
-    if transcripts.len() > params.out_filter_multimap_nmax as usize {
-        let n_loci = transcripts.len();
-        transcripts.clear();
-        // Return n_loci so caller can track "too many loci" stats correctly
-        return Ok((
-            transcripts,
-            chimeric_alignments,
-            n_loci,
-            Some(UnmappedReason::TooManyLoci),
-        ));
-    }
 
     // Step 6: Filter chimeric alignments
     if params.chim_segment_min > 0 {

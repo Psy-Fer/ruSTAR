@@ -1159,9 +1159,15 @@ pub fn align_paired_read(
         return Ok((Vec::new(), 0, Some(UnmappedReason::TooManyLoci)));
     }
 
-    // Step 3: position dedup — keep highest-scoring pair per (chr, mate1_pos, mate2_pos).
+    // Step 3: position dedup — for each (chr, mate1_pos, mate2_pos, strand) group, keep only
+    // alignments tied for the maximum combined_wt_score, and remove exact CIGAR duplicates.
+    // STAR keeps equal-scored alignments with different CIGARs at the same position as distinct
+    // (e.g., insertion at different positions in a homopolymer → NH=2).
+    // Lower-scored alignments at the same position are removed (dominated by the better one).
+
+    // Pass 1: sort by (position, score_desc, cigar) and remove exact position+CIGAR duplicates.
     joint_pairs.sort_by(|a, b| {
-        (
+        let pos_cmp = (
             a.mate1_transcript.chr_idx,
             a.mate1_transcript.genome_start,
             a.mate1_transcript.is_reverse,
@@ -1174,20 +1180,58 @@ pub fn align_paired_read(
                 b.mate1_transcript.is_reverse,
                 b.mate2_transcript.genome_start,
                 b.mate2_transcript.is_reverse,
-            ))
-            .then_with(|| {
-                let b_combined = b.mate1_transcript.score + b.mate2_transcript.score;
-                let a_combined = a.mate1_transcript.score + a.mate2_transcript.score;
-                b_combined.cmp(&a_combined)
-            })
+            ));
+        if pos_cmp != std::cmp::Ordering::Equal {
+            return pos_cmp;
+        }
+        // Within same position: sort by score desc, then by CIGAR for stable dedup
+        b.combined_wt_score
+            .cmp(&a.combined_wt_score)
+            .then_with(|| a.mate1_transcript.cigar.cmp(&b.mate1_transcript.cigar))
+            .then_with(|| a.mate2_transcript.cigar.cmp(&b.mate2_transcript.cigar))
     });
     joint_pairs.dedup_by(|a, b| {
+        // Remove exact duplicates: same position AND same CIGAR
         a.mate1_transcript.chr_idx == b.mate1_transcript.chr_idx
             && a.mate1_transcript.genome_start == b.mate1_transcript.genome_start
             && a.mate1_transcript.is_reverse == b.mate1_transcript.is_reverse
+            && a.mate1_transcript.cigar == b.mate1_transcript.cigar
             && a.mate2_transcript.genome_start == b.mate2_transcript.genome_start
             && a.mate2_transcript.is_reverse == b.mate2_transcript.is_reverse
+            && a.mate2_transcript.cigar == b.mate2_transcript.cigar
     });
+
+    // Pass 2: for each position group, remove entries with strictly lower score than the best.
+    {
+        // Compute max score per position group, then retain only ties.
+        let mut max_by_pos: std::collections::HashMap<
+            (usize, u64, bool, u64, bool),
+            i32,
+        > = std::collections::HashMap::new();
+        for pa in joint_pairs.iter() {
+            let key = (
+                pa.mate1_transcript.chr_idx,
+                pa.mate1_transcript.genome_start,
+                pa.mate1_transcript.is_reverse,
+                pa.mate2_transcript.genome_start,
+                pa.mate2_transcript.is_reverse,
+            );
+            let entry = max_by_pos.entry(key).or_insert(i32::MIN);
+            if pa.combined_wt_score > *entry {
+                *entry = pa.combined_wt_score;
+            }
+        }
+        joint_pairs.retain(|pa| {
+            let key = (
+                pa.mate1_transcript.chr_idx,
+                pa.mate1_transcript.genome_start,
+                pa.mate1_transcript.is_reverse,
+                pa.mate2_transcript.genome_start,
+                pa.mate2_transcript.is_reverse,
+            );
+            pa.combined_wt_score >= *max_by_pos.get(&key).unwrap_or(&i32::MIN)
+        });
+    }
     joint_pairs.sort_by(|a, b| {
         b.combined_wt_score
             .cmp(&a.combined_wt_score)

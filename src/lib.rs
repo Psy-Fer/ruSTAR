@@ -1070,16 +1070,13 @@ fn record_transcript_junctions(
             CigarOp::Ins(len) => {
                 current_exon_len += *len;
             }
-            CigarOp::SoftClip(len) => {
-                current_exon_len += *len;
-            }
             CigarOp::RefSkip(_) => {
                 exon_lengths.push(current_exon_len);
                 current_exon_len = 0;
             }
-            CigarOp::Del(_) | CigarOp::HardClip(_) => {
-                // Do not consume query bases
-            }
+            // Soft clips, deletions, hard clips do not contribute to overhang
+            // STAR counts only matched/inserted bases (not soft-clipped bases)
+            CigarOp::SoftClip(_) | CigarOp::Del(_) | CigarOp::HardClip(_) => {}
         }
     }
     exon_lengths.push(current_exon_len); // Final exon segment

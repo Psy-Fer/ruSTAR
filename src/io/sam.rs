@@ -312,6 +312,9 @@ impl SamWriter {
 
         for (pair_idx, paired_aln) in paired_alignments.iter().take(max_output).enumerate() {
             let hit_index = pair_idx + 1; // 1-based
+            // STAR reports the pre-split combined WT score (with length penalty) as AS.
+            // This is stored as combined_wt_score, matching STAR's primaryScore.
+            let combined_score = paired_aln.combined_wt_score;
 
             // Create record for mate1 (this=mate1, mate=mate2)
             let rec1 = build_paired_mate_record(
@@ -327,6 +330,7 @@ impl SamWriter {
                 paired_aln.insert_size,
                 max_output, // NH = number of reported alignments
                 hit_index,
+                combined_score,
                 &attrs,
             )?;
             records.push(rec1);
@@ -345,6 +349,7 @@ impl SamWriter {
                 -paired_aln.insert_size, // Negative for mate2
                 max_output,              // NH = number of reported alignments
                 hit_index,
+                combined_score,
                 &attrs,
             )?;
             records.push(rec2);
@@ -455,13 +460,8 @@ impl SamWriter {
         if attrs.contains("AS") {
             data.insert(Tag::ALIGNMENT_SCORE, Value::from(mapped_transcript.score));
         }
-        if attrs.contains("NM") {
-            data.insert(
-                Tag::EDIT_DISTANCE,
-                Value::from(compute_edit_distance(mapped_transcript)),
-            );
-        }
-        if attrs.contains("nM") {
+        if attrs.contains("NM") || attrs.contains("nM") {
+            // STAR maps NM attribute to 'nM' tag (mismatches only, not edit distance)
             data.insert(
                 Tag::new(b'n', b'M'),
                 Value::from(mapped_transcript.n_mismatch as i32),
@@ -703,13 +703,8 @@ fn transcript_to_record(
     if attrs.contains("AS") {
         data.insert(Tag::ALIGNMENT_SCORE, Value::from(transcript.score));
     }
-    if attrs.contains("NM") {
-        data.insert(
-            Tag::EDIT_DISTANCE,
-            Value::from(compute_edit_distance(transcript)),
-        );
-    }
-    if attrs.contains("nM") {
+    if attrs.contains("NM") || attrs.contains("nM") {
+        // STAR maps NM attribute to 'nM' tag (mismatches only, not edit distance)
         data.insert(
             Tag::new(b'n', b'M'),
             Value::from(transcript.n_mismatch as i32),
@@ -738,7 +733,9 @@ fn transcript_to_record(
     Ok(record)
 }
 
-/// Compute edit distance (NM tag): mismatches + inserted bases + deleted bases
+/// Compute edit distance (mismatches + inserted + deleted bases).
+/// Not emitted in SAM output (STAR maps NM attribute to 'nM' tag), but kept for tests.
+#[cfg(test)]
 fn compute_edit_distance(transcript: &Transcript) -> i32 {
     let indel_bases: u32 = transcript
         .cigar
@@ -932,6 +929,7 @@ fn build_paired_mate_record(
     insert_size: i32,
     n_alignments: usize,
     hit_index: usize,
+    combined_score: i32,
     attrs: &HashSet<String>,
 ) -> Result<RecordBuf, Error> {
     let mut record = RecordBuf::default();
@@ -1035,15 +1033,11 @@ fn build_paired_mate_record(
         data.insert(Tag::HIT_INDEX, Value::from(hit_index as i32));
     }
     if attrs.contains("AS") {
-        data.insert(Tag::ALIGNMENT_SCORE, Value::from(transcript.score));
+        // STAR reports combined score (sum of both mates) for PE AS tag
+        data.insert(Tag::ALIGNMENT_SCORE, Value::from(combined_score));
     }
-    if attrs.contains("NM") {
-        data.insert(
-            Tag::EDIT_DISTANCE,
-            Value::from(compute_edit_distance(transcript)),
-        );
-    }
-    if attrs.contains("nM") {
+    if attrs.contains("NM") || attrs.contains("nM") {
+        // STAR maps NM attribute to 'nM' tag (mismatches only, not edit distance)
         data.insert(
             Tag::new(b'n', b'M'),
             Value::from(transcript.n_mismatch as i32),
@@ -1311,8 +1305,9 @@ mod tests {
             true, // is_first_mate
             true, // is_proper_pair
             300,
-            1, // n_alignments
-            1, // hit_index
+            1,   // n_alignments
+            1,   // hit_index
+            190, // combined_score (100+90)
             &standard_attrs(),
         )
         .unwrap();
@@ -1338,8 +1333,9 @@ mod tests {
             false, // is_first_mate
             true,  // is_proper_pair
             -300,
-            1, // n_alignments
-            1, // hit_index
+            1,   // n_alignments
+            1,   // hit_index
+            190, // combined_score (100+90)
             &standard_attrs(),
         )
         .unwrap();
@@ -1418,8 +1414,9 @@ mod tests {
             true,
             true,
             250,
-            1, // n_alignments
-            1, // hit_index
+            1,   // n_alignments
+            1,   // hit_index
+            350, // combined_score (200+150)
             &standard_attrs(),
         )
         .unwrap();
@@ -1433,17 +1430,17 @@ mod tests {
         // Check TLEN
         assert_eq!(rec.template_length(), 250);
 
-        // Tags should reflect THIS transcript (mate1), not the mate
+        // AS is the combined score (STAR behavior); nM is per-mate mismatches
         let data = rec.data();
         assert_eq!(
             data.get(&Tag::ALIGNMENT_SCORE),
-            Some(&Value::from(200_i32)),
-            "AS should be from this transcript (200), not mate (150)"
+            Some(&Value::from(350_i32)),
+            "AS should be combined score (200+150=350)"
         );
         assert_eq!(
-            data.get(&Tag::EDIT_DISTANCE),
+            data.get(&Tag::new(b'n', b'M')),
             Some(&Value::from(0_i32)),
-            "NM should be from this transcript (0), not mate (1)"
+            "nM should be 0 (no mismatches in this mate)"
         );
     }
 
@@ -1503,15 +1500,16 @@ mod tests {
             Some(&Value::from(100_i32)),
             "AS tag should be 100"
         );
+        // STAR maps NM attribute to 'nM' tag (mismatches only); no standard NM tag
         assert_eq!(
             data.get(&Tag::EDIT_DISTANCE),
-            Some(&Value::from(5_i32)),
-            "NM tag should be 5 (2 mismatches + 3 deleted bases)"
+            None,
+            "Standard NM tag should not be present (STAR outputs nM not NM)"
         );
         assert_eq!(
             data.get(&Tag::new(b'n', b'M')),
             Some(&Value::from(2_i32)),
-            "nM tag should be 2 (mismatches only, no indels)"
+            "nM tag should be 2 (mismatches only, both NM and nM attrs map here)"
         );
     }
 
@@ -1649,9 +1647,9 @@ mod tests {
         );
         assert_eq!(data.get(&Tag::HIT_INDEX), Some(&Value::from(1_i32)));
         assert_eq!(data.get(&Tag::ALIGNMENT_SCORE), Some(&Value::from(100_i32)));
-        // NM = 2 mismatches, no indels
-        assert_eq!(data.get(&Tag::EDIT_DISTANCE), Some(&Value::from(2_i32)));
-        // nM = 2 mismatches only (same as NM when no indels)
+        // Standard NM tag absent (STAR maps NM→nM)
+        assert_eq!(data.get(&Tag::EDIT_DISTANCE), None);
+        // nM = 2 mismatches (NM and nM attrs both map to nM tag)
         assert_eq!(data.get(&Tag::new(b'n', b'M')), Some(&Value::from(2_i32)));
         // XS not in standard attrs
         assert_eq!(data.get(&Tag::new(b'X', b'S')), None);
@@ -2456,6 +2454,7 @@ mod tests {
             7,
             1,
             1,
+            190, // combined_score (100+90)
             &standard_attrs(),
         )
         .unwrap();
@@ -2478,6 +2477,7 @@ mod tests {
             -7,
             1,
             1,
+            190, // combined_score (100+90)
             &standard_attrs(),
         )
         .unwrap();
@@ -2542,7 +2542,7 @@ mod tests {
         let seq2 = vec![0, 1, 2];
         let qual2 = vec![30, 30, 30];
 
-        // Mate1 record should have mate1's tags
+        // Both mates should have combined AS (STAR behavior)
         let rec1 = build_paired_mate_record(
             "read1",
             &seq1,
@@ -2556,21 +2556,23 @@ mod tests {
             7,
             1,
             1,
+            180, // combined_score (100+80)
             &standard_attrs(),
         )
         .unwrap();
         assert_eq!(
             rec1.data().get(&Tag::ALIGNMENT_SCORE),
-            Some(&Value::from(100_i32)),
-            "Mate1 AS should be 100"
+            Some(&Value::from(180_i32)),
+            "Mate1 AS should be combined score (100+80=180)"
         );
+        // NM attribute maps to nM tag (mismatches only)
         assert_eq!(
-            rec1.data().get(&Tag::EDIT_DISTANCE),
+            rec1.data().get(&Tag::new(b'n', b'M')),
             Some(&Value::from(0_i32)),
-            "Mate1 NM should be 0"
+            "Mate1 nM should be 0"
         );
 
-        // Mate2 record should have mate2's tags
+        // Mate2 also gets combined AS
         let rec2 = build_paired_mate_record(
             "read1",
             &seq2,
@@ -2584,19 +2586,20 @@ mod tests {
             -7,
             1,
             1,
+            180, // combined_score (100+80)
             &standard_attrs(),
         )
         .unwrap();
         assert_eq!(
             rec2.data().get(&Tag::ALIGNMENT_SCORE),
-            Some(&Value::from(80_i32)),
-            "Mate2 AS should be 80"
+            Some(&Value::from(180_i32)),
+            "Mate2 AS should be combined score (100+80=180)"
         );
-        // NM = 2 mismatches + 1 deleted base = 3
+        // nM = mismatches only (no indel contribution)
         assert_eq!(
-            rec2.data().get(&Tag::EDIT_DISTANCE),
-            Some(&Value::from(3_i32)),
-            "Mate2 NM should be 3 (2 mismatches + 1 del)"
+            rec2.data().get(&Tag::new(b'n', b'M')),
+            Some(&Value::from(2_i32)),
+            "Mate2 nM should be 2 (mismatches only, not edit distance)"
         );
     }
 
@@ -2666,6 +2669,7 @@ mod tests {
             7,
             1,
             1,
+            190, // combined_score (100+90)
             &standard_attrs(),
         )
         .unwrap();
@@ -2685,6 +2689,7 @@ mod tests {
             -7,
             1,
             1,
+            190, // combined_score (100+90)
             &standard_attrs(),
         )
         .unwrap();
@@ -2741,12 +2746,12 @@ mod tests {
             "AS should be present"
         );
         assert!(
-            data.get(&Tag::EDIT_DISTANCE).is_some(),
-            "NM should be present"
+            data.get(&Tag::EDIT_DISTANCE).is_none(),
+            "Standard NM tag should be absent (STAR maps NM→nM)"
         );
         assert!(
             data.get(&Tag::new(b'n', b'M')).is_some(),
-            "nM should be present"
+            "nM should be present (NM and nM attrs both map here)"
         );
         // Non-standard tags absent
         assert!(
@@ -3020,17 +3025,17 @@ mod tests {
         .unwrap();
 
         let data = record.data();
-        // NM = edit distance: 2 mismatches + 5 ins + 3 del = 10
+        // Standard NM tag absent (STAR maps NM attribute to 'nM' tag)
         assert_eq!(
             data.get(&Tag::EDIT_DISTANCE),
-            Some(&Value::from(10_i32)),
-            "NM should be 10 (2 mismatches + 5 ins + 3 del)"
+            None,
+            "Standard NM tag should be absent"
         );
-        // nM = mismatches only: 2
+        // nM = mismatches only: 2 (both NM and nM attrs map here)
         assert_eq!(
             data.get(&Tag::new(b'n', b'M')),
             Some(&Value::from(2_i32)),
-            "nM should be 2 (mismatches only, excluding indels)"
+            "nM should be 2 (mismatches only, NM+nM attrs both map to nM tag)"
         );
     }
 

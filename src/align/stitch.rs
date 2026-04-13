@@ -57,6 +57,49 @@ fn count_mismatches_in_region(
     n_mismatch
 }
 
+/// Score a region base-by-base, skipping N in read or genome (STAR behavior).
+///
+/// Mirrors STAR's stitchAlignToTranscript.cpp loop:
+///   `if (G[ii]<4 && R[ii]<4) { if match: Score+=scoreMatch; else: Score-=scoreMatch; }`
+///
+/// Returns `(score, n_mismatch)`. N positions contribute 0 to score (neither +1 nor -1).
+fn score_region(
+    read_seq: &[u8],
+    read_start: usize,
+    genome_start: u64,
+    length: usize,
+    index: &GenomeIndex,
+    is_reverse: bool,
+) -> (i32, u32) {
+    let genome_offset = if is_reverse { index.genome.n_genome } else { 0 };
+    let mut score = 0i32;
+    let mut n_mismatch = 0u32;
+
+    for i in 0..length {
+        let read_pos = read_start + i;
+        if read_pos >= read_seq.len() {
+            break;
+        }
+        let read_base = read_seq[read_pos];
+        let Some(genome_base) = index.genome.get_base(genome_start + i as u64 + genome_offset)
+        else {
+            break;
+        };
+        // N in read or genome: skip, no score contribution (STAR: `if (G<4 && R<4)`)
+        if read_base >= 4 || genome_base >= 4 {
+            continue;
+        }
+        if read_base == genome_base {
+            score += 1;
+        } else {
+            score -= 1;
+            n_mismatch += 1;
+        }
+    }
+
+    (score, n_mismatch)
+}
+
 fn count_mismatches(
     read_seq: &[u8],
     cigar_ops: &[CigarOp],
@@ -996,7 +1039,7 @@ fn stitch_align_to_transcript(
     } else if read_gap == genome_gap {
         // Equal gap: base-by-base scoring
         let shared = read_gap as usize;
-        gap_mm = count_mismatches_in_region(
+        let (region_score, region_mm) = score_region(
             read_seq,
             last_exon.read_end,
             last_exon.genome_end,
@@ -1004,7 +1047,8 @@ fn stitch_align_to_transcript(
             index,
             cluster.is_reverse,
         );
-        d_score += shared as i32 - 2 * gap_mm as i32;
+        gap_mm = region_mm;
+        d_score += region_score;
 
         // Extend last exon through the gap and the new seed
         if let Some(last) = new_wt.exons.last_mut() {
@@ -1056,7 +1100,7 @@ fn stitch_align_to_transcript(
 
         // Score bases on donor side (before junction/deletion)
         if junction_offset > 0 {
-            let mm = count_mismatches_in_region(
+            let (s, mm) = score_region(
                 read_seq,
                 last_exon.read_end,
                 last_exon.genome_end,
@@ -1065,13 +1109,13 @@ fn stitch_align_to_transcript(
                 cluster.is_reverse,
             );
             shared_mm += mm;
-            shared_score += junction_offset as i32 - 2 * mm as i32;
+            shared_score += s;
         }
 
         // Score bases on acceptor side (after junction/deletion, skip gap)
         let acceptor_bases = shared - junction_offset;
         if acceptor_bases > 0 {
-            let mm = count_mismatches_in_region(
+            let (s, mm) = score_region(
                 read_seq,
                 last_exon.read_end + junction_offset,
                 last_exon.genome_end + junction_offset as u64 + del as u64,
@@ -1080,7 +1124,7 @@ fn stitch_align_to_transcript(
                 cluster.is_reverse,
             );
             shared_mm += mm;
-            shared_score += acceptor_bases as i32 - 2 * mm as i32;
+            shared_score += s;
         }
 
         // Extended left range: junction shifted left of natural position (jR < 0).

@@ -390,8 +390,7 @@ fn find_seed_at_position(
     // matched_level directly as the MMP. This causes chains to advance by shorter
     // amounts, ensuring intermediate positions (missed if advancing by the true MMP)
     // are not skipped.
-    let (match_length, narrowed_start, narrowed_end) = if bounds_tight
-        && matched_level < sa_nbases
+    let (match_length, narrowed_start, narrowed_end) = if bounds_tight && matched_level < sa_nbases
     {
         // STAR short-circuit (maxMappableLength2strands.cpp):
         // "if (Lind < gSAindexNbases && iSA1noN && iSA2good) { maxL=Lind; }"

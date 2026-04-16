@@ -564,7 +564,6 @@ fn build_combined_read(mate1: &[u8], mate2: &[u8]) -> Vec<u8> {
     v
 }
 
-
 /// Align paired-end reads using STAR's joint combined-read approach (Phase 16.11).
 ///
 /// # Algorithm (STAR-faithful)

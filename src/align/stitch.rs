@@ -81,7 +81,9 @@ fn score_region(
             break;
         }
         let read_base = read_seq[read_pos];
-        let Some(genome_base) = index.genome.get_base(genome_start + i as u64 + genome_offset)
+        let Some(genome_base) = index
+            .genome
+            .get_base(genome_start + i as u64 + genome_offset)
         else {
             break;
         };
@@ -580,8 +582,32 @@ pub fn cluster_seeds(
     // STAR resets nWA=0 after window creation, then re-assigns ALL seeds (including
     // anchors) through assignAlignToWindow. We match this by not pre-loading anchors
     // in Phase 2 and processing all seeds here through the same capacity logic.
-    let mut too_many_anchors = false; // STAR: MARKER_TOO_MANY_ANCHORS_PER_WINDOW
-    'outer: for (seed_idx, seed) in seeds.iter().enumerate() {
+    //
+    // STAR processes all pieces in a sorted pass (rStart asc, length desc for ties).
+    // This sorting ensures that when two seeds overlap on the same diagonal, the longer
+    // one enters the window first and blocks the shorter one via overlap detection —
+    // preventing window capacity overflow from many short copies on the same diagonal.
+    //
+    // We replicate this by: (1) collecting all candidates per window, (2) pre-deduping
+    // overlapping entries per diagonal (longest wins, shorter blocked before processing),
+    // then (3) processing survivors in original discovery order. This achieves the same
+    // overlap suppression without globally reordering seeds across windows.
+
+    // Per-window candidate entries collected before sorting.
+    struct WinCandidate {
+        seed_idx: usize,
+        sa_pos: u64,
+        forward_pos: u64,
+        length: usize,
+        n_loci: usize,
+        is_anchor: bool,
+        ps_rstart: usize, // positive-strand read start (sort key)
+    }
+
+    let mut win_candidates: Vec<Vec<WinCandidate>> =
+        (0..windows.len()).map(|_| Vec::new()).collect();
+
+    for (seed_idx, seed) in seeds.iter().enumerate() {
         let n_loci = seed.sa_end - seed.sa_start;
         if n_loci == 0 {
             continue;
@@ -608,6 +634,97 @@ pub fn cluster_seeds(
                 _ => continue,
             };
 
+            let ps_rstart = if windows[win_idx].is_reverse {
+                read_len - (length + seed.read_pos)
+            } else {
+                seed.read_pos
+            };
+
+            win_candidates[win_idx].push(WinCandidate {
+                seed_idx,
+                sa_pos,
+                forward_pos,
+                length,
+                n_loci,
+                is_anchor: is_anchor_seed,
+                ps_rstart,
+            });
+        }
+    }
+
+    // Pre-dedup overlapping diagonals (order-independent, length wins):
+    // Two candidate entries on the same diagonal with overlapping read ranges represent
+    // the same alignment position — keep only the longest. This is what STAR achieves
+    // via sorted-order overlap detection (longer seed enters first, shorter blocked).
+    // Pre-computing this dedup ensures correct results regardless of discovery order,
+    // fixing window capacity overflow without changing capacity-eviction behavior
+    // for other reads (seeds on unique diagonals are unaffected).
+    //
+    // After pre-dedup, Phase 4 processes survivors in original discovery order.
+    // The overlap detection in the main Phase 4 loop below is still present but will
+    // never find an overlap (since pre-dedup already resolved all of them). It serves
+    // as a safety net for any edge cases not covered by pre-dedup.
+    let win_n = windows.len();
+    let mut win_blocked: Vec<Vec<bool>> = (0..win_n)
+        .map(|i| vec![false; win_candidates[i].len()])
+        .collect();
+
+    for win_idx in 0..win_n {
+        let candidates = &win_candidates[win_idx];
+        if candidates.is_empty() {
+            continue;
+        }
+        // Sort indices by length descending so that the longest entry per diagonal
+        // is processed first (and blocks shorter overlapping entries on the same diagonal).
+        let mut by_len: Vec<usize> = (0..candidates.len()).collect();
+        by_len.sort_by(|&a, &b| candidates[b].length.cmp(&candidates[a].length));
+
+        // For each diagonal, track accepted [ps_rstart, ps_rend) ranges.
+        let mut diag_ranges: HashMap<i64, Vec<(usize, usize)>> = HashMap::new();
+        for &ci in &by_len {
+            let cand = &candidates[ci];
+            let diag = cand.forward_pos as i64 - cand.ps_rstart as i64;
+            let ps_rend = cand.ps_rstart + cand.length;
+
+            let blocked = diag_ranges.get(&diag).is_some_and(|ranges| {
+                ranges.iter().any(|&(rs, re)| {
+                    (cand.ps_rstart >= rs && cand.ps_rstart < re) || (ps_rend >= rs && ps_rend < re)
+                })
+            });
+
+            if blocked {
+                win_blocked[win_idx][ci] = true;
+            } else {
+                diag_ranges
+                    .entry(diag)
+                    .or_default()
+                    .push((cand.ps_rstart, ps_rend));
+            }
+        }
+    }
+
+    // Process each window's candidates in original discovery order,
+    // skipping pre-dedup-blocked entries.
+    let mut too_many_anchors = false; // STAR: MARKER_TOO_MANY_ANCHORS_PER_WINDOW
+    'outer: for win_idx in 0..win_n {
+        if !windows[win_idx].alive {
+            continue;
+        }
+        for (ci, cand) in win_candidates[win_idx].iter().enumerate() {
+            if win_blocked[win_idx][ci] {
+                continue; // blocked by a longer overlapping entry on same diagonal
+            }
+
+            let seed_idx = cand.seed_idx;
+            let seed = &seeds[seed_idx];
+            let length = cand.length;
+            let forward_pos = cand.forward_pos;
+            let sa_pos = cand.sa_pos;
+            let n_loci = cand.n_loci;
+            let is_anchor_seed = cand.is_anchor;
+            let new_ps_rstart = cand.ps_rstart;
+            let new_ps_rend = new_ps_rstart + length;
+
             let window = &mut windows[win_idx];
 
             // STAR's WALrec early rejection (assignAlignToWindow line 20):
@@ -617,51 +734,29 @@ pub fn cluster_seeds(
                 continue;
             }
 
-            // STAR's overlap detection (assignAlignToWindow lines 28-84):
-            // Check if new entry overlaps an existing entry on the same diagonal.
-            // Same diagonal means (genome_pos - read_pos) is equal. If overlap
-            // found, keep the longer entry. This deduplicates shorter seeds
-            // subsumed by longer seeds at the same alignment position.
-            //
-            // CRITICAL: STAR uses positive-strand read coordinates for overlap
-            // detection (stitchPieces.cpp line 151: aRstart = Lread - (aLength+aRstart)
-            // for reverse-strand). Without this, reverse-strand seeds covering the
-            // same genomic exon have different diagonals → no overlap → anchor
-            // proliferation → window capacity overflow → splice-target seed eviction.
-            let (new_ps_rstart, new_ps_rend) = if window.is_reverse {
-                let ps = read_len - (length + seed.read_pos);
-                (ps, ps + length)
-            } else {
-                (seed.read_pos, seed.read_pos + length)
-            };
+            // Safety-net overlap detection: after pre-dedup, no overlapping entries
+            // should remain. This check handles any edge cases and matches STAR's
+            // assignAlignToWindow overlap logic for correctness.
             let new_diag = forward_pos as i64 - new_ps_rstart as i64;
             let mut overlap_idx = None;
             for (i, wa) in window.alignments.iter().enumerate() {
-                let (wa_ps_rstart, wa_ps_rend) = if window.is_reverse {
-                    let ps = read_len - (wa.length + wa.read_pos);
-                    (ps, ps + wa.length)
+                let wa_ps_rstart = if window.is_reverse {
+                    read_len - (wa.length + wa.read_pos)
                 } else {
-                    (wa.read_pos, wa.read_pos + wa.length)
+                    wa.read_pos
                 };
+                let wa_ps_rend = wa_ps_rstart + wa.length;
                 let wa_diag = wa.genome_pos as i64 - wa_ps_rstart as i64;
-                if new_diag == wa_diag {
-                    // Same diagonal — check for overlapping read ranges
-                    // in positive-strand coordinates (matches STAR's exact
-                    // overlap condition from assignAlignToWindow)
-                    if (new_ps_rstart >= wa_ps_rstart && new_ps_rstart < wa_ps_rend)
-                        || (new_ps_rend >= wa_ps_rstart && new_ps_rend < wa_ps_rend)
-                    {
-                        overlap_idx = Some(i);
-                        break;
-                    }
+                if new_diag == wa_diag
+                    && ((new_ps_rstart >= wa_ps_rstart && new_ps_rstart < wa_ps_rend)
+                        || (new_ps_rend >= wa_ps_rstart && new_ps_rend < wa_ps_rend))
+                {
+                    overlap_idx = Some(i);
+                    break;
                 }
             }
             if let Some(oi) = overlap_idx {
                 if length > window.alignments[oi].length {
-                    // New entry is longer — remove old and re-insert at correct
-                    // sorted position (matches STAR assignAlignToWindow lines 26-62).
-                    // The new entry may have a different length → different ps_rstart
-                    // → different sort position.
                     window.alignments.remove(oi);
                     let insert_pos = window.alignments.partition_point(|wa| {
                         let wa_ps = if window.is_reverse {
@@ -685,7 +780,6 @@ pub fn cluster_seeds(
                         },
                     );
                 }
-                // Either way (replaced or not), don't add as new entry
                 continue;
             }
 

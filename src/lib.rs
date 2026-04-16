@@ -20,7 +20,12 @@ use crate::params::{Parameters, RunMode};
 pub fn run(params: &Parameters) -> anyhow::Result<()> {
     params.validate()?;
 
-    info!("ruSTAR v{}", env!("CARGO_PKG_VERSION"));
+    info!(
+        "ruSTAR v{} ({} built {})",
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_SHORT_HASH"),
+        env!("BUILD_TIMESTAMP"),
+    );
     info!("runMode: {}", params.run_mode);
     info!("runThreadN: {}", params.run_thread_n);
 

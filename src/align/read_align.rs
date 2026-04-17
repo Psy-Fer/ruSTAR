@@ -23,11 +23,11 @@ fn per_read_seed(run_rng_seed: u64, read_name: &str) -> u64 {
     run_rng_seed.wrapping_mul(hasher.finish().wrapping_add(1))
 }
 
-/// Fisher–Yates shuffle the prefix of `items` whose `score_fn` equals the first element's score.
+/// Shuffle the prefix of `items` whose `score_fn` equals the first element's score.
 ///
-/// Mirrors STAR's `ReadAlign_multMapSelect` / `funPrimaryAlignMark` behavior:
-/// best-scoring alignments are randomized so primary selection (index 0) is
-/// not biased by upstream sort order. Non-tied elements are left alone.
+/// Mirrors STAR's `ReadAlign_multMapSelect` / `funPrimaryAlignMark`: best-scoring
+/// alignments are randomized so primary selection (index 0) is not biased by
+/// upstream sort order. Non-tied elements are left alone.
 fn shuffle_tied_prefix<T, F>(items: &mut [T], score_fn: F, seed: u64)
 where
     F: Fn(&T) -> i32,
@@ -334,8 +334,7 @@ pub fn align_read(
             .then_with(|| a.is_reverse.cmp(&b.is_reverse))
     });
 
-    // STAR's `funPrimaryAlignMark`: among alignments tied on best score, randomize
-    // which one is primary using `runRNGseed`. See `ReadAlign_multMapSelect.cpp:71-79`.
+    // Randomize primary among best-scoring ties (ReadAlign_multMapSelect.cpp:71-79).
     shuffle_tied_prefix(
         &mut transcripts,
         |t| t.score,

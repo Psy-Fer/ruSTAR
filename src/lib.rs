@@ -561,8 +561,8 @@ fn build_transcriptome_records_se(
 /// SAM record per projected pair per mate (2 records per projected hit, in
 /// mate1-then-mate2 order).
 #[allow(clippy::too_many_arguments)]
-fn build_transcriptome_records_pe(
-    both_mapped: &[&crate::align::read_align::PairedAlignment],
+fn build_transcriptome_records_pe<'a, I>(
+    both_mapped: I,
     read_name: &str,
     m1_seq: &[u8],
     m1_qual: &[u8],
@@ -572,12 +572,15 @@ fn build_transcriptome_records_pe(
     tr_idx: &crate::quant::transcriptome::TranscriptomeIndex,
     params: &Parameters,
     n_for_mapq: usize,
-) -> Result<Vec<noodles::sam::alignment::record_buf::RecordBuf>, error::Error> {
+) -> Result<Vec<noodles::sam::alignment::record_buf::RecordBuf>, error::Error>
+where
+    I: IntoIterator<Item = &'a crate::align::read_align::PairedAlignment>,
+{
     use crate::io::sam::SamWriter;
     use crate::quant::transcriptome::filter_and_project;
     use std::collections::HashMap;
 
-    if both_mapped.is_empty() || tr_idx.n_transcripts() == 0 {
+    if tr_idx.n_transcripts() == 0 {
         return Ok(Vec::new());
     }
 
@@ -1375,10 +1378,8 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                 // Transcriptome SAM projection (both-mapped pairs only)
                 let transcriptome_records: Vec<noodles::sam::alignment::record_buf::RecordBuf> =
                     if let Some(ref tidx) = tr_local {
-                        let bm_deref: Vec<&crate::align::read_align::PairedAlignment> =
-                            both_mapped.iter().map(|b| b.as_ref()).collect();
                         build_transcriptome_records_pe(
-                            &bm_deref,
+                            both_mapped.iter().map(|b| b.as_ref()),
                             &paired_read.name,
                             &m1_seq,
                             &m1_qual,

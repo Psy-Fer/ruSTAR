@@ -42,24 +42,20 @@ pub struct BamWriter {
 }
 
 impl BamWriter {
-    /// Create a new BAM writer with header from genome index
-    ///
-    /// # Arguments
-    /// * `output_path` - Path to output BAM file
-    /// * `genome` - Genome index with chromosome information
-    /// * `params` - Parameters (for @PG header)
-    pub fn create(output_path: &Path, genome: &Genome, params: &Parameters) -> Result<Self, Error> {
-        let file = File::create(output_path)?;
-        let buf_writer = BufWriter::new(file);
-
-        // Reuse SAM header building logic
-        let header = crate::io::sam::build_sam_header(genome, params)?;
-
-        // Create BAM writer (Writer::new handles BGZF compression internally)
+    /// Create a BAM writer at `output_path` with the given prepared header.
+    fn with_header(output_path: &Path, header: sam::Header) -> Result<Self, Error> {
+        let buf_writer = BufWriter::new(File::create(output_path)?);
         let mut writer = bam::io::Writer::new(buf_writer);
         writer.write_header(&header)?;
-
         Ok(Self { writer, header })
+    }
+
+    /// Create a new BAM writer with header from genome index.
+    pub fn create(output_path: &Path, genome: &Genome, params: &Parameters) -> Result<Self, Error> {
+        Self::with_header(
+            output_path,
+            crate::io::sam::build_sam_header(genome, params)?,
+        )
     }
 
     /// Create a BAM writer whose @SQ header lists the transcripts (not
@@ -70,21 +66,15 @@ impl BamWriter {
         tr_idx: &TranscriptomeIndex,
         params: &Parameters,
     ) -> Result<Self, Error> {
-        let file = File::create(output_path)?;
-        let buf_writer = BufWriter::new(file);
-
-        // Build one @SQ per transcript (name = transcript_id, length = t-space length).
         let refs = tr_idx
             .tr_ids
             .iter()
             .zip(tr_idx.tr_length.iter())
             .map(|(id, len)| (id.as_str(), *len as usize));
-        let header = crate::io::sam::build_sam_header_from_refs(refs, params)?;
-
-        let mut writer = bam::io::Writer::new(buf_writer);
-        writer.write_header(&header)?;
-
-        Ok(Self { writer, header })
+        Self::with_header(
+            output_path,
+            crate::io::sam::build_sam_header_from_refs(refs, params)?,
+        )
     }
 
     /// Access the underlying SAM header (needed by serial-write code paths

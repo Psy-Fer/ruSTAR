@@ -624,49 +624,42 @@ fn build_transcriptome_records_pe(
     let effective_n = n_alignments.max(n_for_mapq);
     let mapq = calculate_mapq(effective_n, params.out_sam_mapq_unique);
 
-    // Flatten: for each projected pair, build 2 records (mate1 + mate2).
-    let mut out: Vec<noodles::sam::alignment::record_buf::RecordBuf> =
-        Vec::with_capacity(n_alignments * 2);
-    for (i, (p1, p2)) in all_projected.iter().enumerate() {
-        // Build per-mate transcriptome records sharing the primary-hit flag.
-        // Use build_transcriptome_records on a single-element slice and clone
-        // the record, then patch the FIRST_SEGMENT / LAST_SEGMENT / paired
-        // flags.
-        let mut rec1 = SamWriter::build_transcriptome_records(
-            read_name,
-            m1_seq,
-            m1_qual,
-            std::slice::from_ref(p1),
-            mapq,
-            params,
-            if i == primary_hit { 0 } else { usize::MAX },
-        )?;
-        let mut rec2 = SamWriter::build_transcriptome_records(
-            read_name,
-            m2_seq,
-            m2_qual,
-            std::slice::from_ref(p2),
-            mapq,
-            params,
-            if i == primary_hit { 0 } else { usize::MAX },
-        )?;
-        // Patch paired flags.
-        for r in rec1.iter_mut() {
-            let mut f = r.flags();
-            f |= noodles::sam::alignment::record::Flags::SEGMENTED;
-            f |= noodles::sam::alignment::record::Flags::FIRST_SEGMENT;
-            *r.flags_mut() = f;
-        }
-        for r in rec2.iter_mut() {
-            let mut f = r.flags();
-            f |= noodles::sam::alignment::record::Flags::SEGMENTED;
-            f |= noodles::sam::alignment::record::Flags::LAST_SEGMENT;
-            *r.flags_mut() = f;
-        }
-        out.extend(rec1);
-        out.extend(rec2);
+    // Build one record per mate per projected pair in a single call each,
+    // then stamp paired flags and interleave as mate1, mate2, mate1, mate2…
+    let (p1s, p2s): (Vec<_>, Vec<_>) = all_projected.into_iter().unzip();
+    let mut rec1s = SamWriter::build_transcriptome_records(
+        read_name,
+        m1_seq,
+        m1_qual,
+        &p1s,
+        mapq,
+        params,
+        primary_hit,
+    )?;
+    let mut rec2s = SamWriter::build_transcriptome_records(
+        read_name,
+        m2_seq,
+        m2_qual,
+        &p2s,
+        mapq,
+        params,
+        primary_hit,
+    )?;
+
+    use noodles::sam::alignment::record::Flags;
+    for r in rec1s.iter_mut() {
+        *r.flags_mut() |= Flags::SEGMENTED | Flags::FIRST_SEGMENT;
+    }
+    for r in rec2s.iter_mut() {
+        *r.flags_mut() |= Flags::SEGMENTED | Flags::LAST_SEGMENT;
     }
 
+    let mut out: Vec<noodles::sam::alignment::record_buf::RecordBuf> =
+        Vec::with_capacity(n_alignments * 2);
+    for (r1, r2) in rec1s.into_iter().zip(rec2s) {
+        out.push(r1);
+        out.push(r2);
+    }
     Ok(out)
 }
 

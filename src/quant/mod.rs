@@ -234,13 +234,8 @@ impl GeneCounts {
     }
 
     /// Write `ReadsPerGene.out.tab` in STAR's format.
-    pub fn write_output(
-        &self,
-        path: &Path,
-        gene_ann: &GeneAnnotation,
-    ) -> Result<(), Error> {
-        let mut file = std::fs::File::create(path)
-            .map_err(|e| Error::io(e, path))?;
+    pub fn write_output(&self, path: &Path, gene_ann: &GeneAnnotation) -> Result<(), Error> {
+        let mut file = std::fs::File::create(path).map_err(|e| Error::io(e, path))?;
 
         macro_rules! wl {
             ($($arg:tt)*) => {
@@ -350,10 +345,7 @@ impl QuantContext {
         let exons = crate::junction::gtf::parse_gtf(gtf_path)?;
         let gene_ann = GeneAnnotation::from_gtf_exons(&exons, genome);
         let n = gene_ann.n_genes();
-        log::info!(
-            "quantMode GeneCounts: {} genes loaded from GTF",
-            n
-        );
+        log::info!("quantMode GeneCounts: {} genes loaded from GTF", n);
         let counts = GeneCounts::new(n);
         Ok(QuantContext { gene_ann, counts })
     }
@@ -381,7 +373,13 @@ mod tests {
         }
     }
 
-    fn make_gtf_exon(seqname: &str, start: u64, end: u64, strand: char, gene_id: &str) -> GtfRecord {
+    fn make_gtf_exon(
+        seqname: &str,
+        start: u64,
+        end: u64,
+        strand: char,
+        gene_id: &str,
+    ) -> GtfRecord {
         let mut attrs = std::collections::HashMap::new();
         attrs.insert("gene_id".to_string(), gene_id.to_string());
         attrs.insert("transcript_id".to_string(), "T1".to_string());
@@ -401,7 +399,12 @@ mod tests {
             genome_start: gs,
             genome_end: ge,
             is_reverse,
-            exons: vec![Exon { genome_start: gs, genome_end: ge, read_start: 0, read_end: (ge - gs) as usize }],
+            exons: vec![Exon {
+                genome_start: gs,
+                genome_end: ge,
+                read_start: 0,
+                read_end: (ge - gs) as usize,
+            }],
             cigar: vec![],
             score: 100,
             n_mismatch: 0,
@@ -417,7 +420,7 @@ mod tests {
     fn test_gene_annotation_basic() {
         let genome = make_genome();
         let exons = vec![
-            make_gtf_exon("chr1", 101, 200, '+', "G1"),  // 0-based: [100, 200)
+            make_gtf_exon("chr1", 101, 200, '+', "G1"), // 0-based: [100, 200)
             make_gtf_exon("chr1", 301, 400, '+', "G1"),
             make_gtf_exon("chr1", 501, 600, '-', "G2"),
         ];
@@ -426,7 +429,7 @@ mod tests {
         assert_eq!(ann.gene_ids[0], "G1");
         assert_eq!(ann.gene_ids[1], "G2");
         assert!(!ann.gene_is_reverse[0]); // G1 is +
-        assert!(ann.gene_is_reverse[1]);  // G2 is -
+        assert!(ann.gene_is_reverse[1]); // G2 is -
         assert_eq!(ann.chr_exons[0].len(), 3);
     }
 

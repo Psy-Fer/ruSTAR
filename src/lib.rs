@@ -10,6 +10,7 @@ pub mod index;
 pub mod io;
 pub mod junction;
 pub mod mapq;
+pub mod quant;
 pub mod stats;
 
 use log::info;
@@ -132,17 +133,29 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
     let mut params = params.clone();
     params.redefine_window_params(index.genome.n_genome);
 
+    // Build gene-count context if --quantMode GeneCounts was requested.
+    // GTF requirement is already validated in params.validate().
+    let quant_ctx: Option<std::sync::Arc<crate::quant::QuantContext>> =
+        if params.quant_gene_counts() {
+            let gtf_path = params.sjdb_gtf_file.as_ref().unwrap();
+            info!("quantMode GeneCounts: building gene annotation from {}", gtf_path.display());
+            let ctx = crate::quant::QuantContext::build(gtf_path, &index.genome)?;
+            Some(std::sync::Arc::new(ctx))
+        } else {
+            None
+        };
+
     let time_map_start = chrono::Local::now();
 
     // 2. Dispatch based on two-pass mode
     let stats = match params.twopass_mode {
         TwopassMode::None => {
             info!("Running single-pass alignment");
-            run_single_pass(&index, &params)?
+            run_single_pass(&index, &params, quant_ctx.as_ref())?
         }
         TwopassMode::Basic => {
             info!("Running two-pass alignment mode");
-            run_two_pass(&index, &params)?
+            run_two_pass(&index, &params, quant_ctx.as_ref())?
         }
     };
 
@@ -156,6 +169,13 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
     stats.write_log_final(&log_path, time_start, time_map_start, time_finish)?;
     info!("Wrote {}", log_path.display());
 
+    // Write ReadsPerGene.out.tab if quantMode GeneCounts was requested.
+    if let Some(ref ctx) = quant_ctx {
+        let quant_path = params.out_file_name_prefix.join("ReadsPerGene.out.tab");
+        ctx.counts.write_output(&quant_path, &ctx.gene_ann)?;
+        info!("Wrote {}", quant_path.display());
+    }
+
     info!("Alignment complete!");
     Ok(())
 }
@@ -164,6 +184,7 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
 fn run_single_pass(
     index: &std::sync::Arc<crate::index::GenomeIndex>,
     params: &Parameters,
+    quant_ctx: Option<&std::sync::Arc<crate::quant::QuantContext>>,
 ) -> anyhow::Result<std::sync::Arc<crate::stats::AlignmentStats>> {
     use crate::io::bam::BamWriter;
     use crate::io::sam::SamWriter;
@@ -173,6 +194,9 @@ fn run_single_pass(
     // Initialize statistics collectors
     let stats = Arc::new(crate::stats::AlignmentStats::new());
     let sj_stats = Arc::new(crate::junction::SpliceJunctionStats::new());
+
+    // Clone the quant Arc so each dispatch call can own a reference.
+    let quant = quant_ctx.map(Arc::clone);
 
     // 4. Route to SAM or BAM output based on --outSAMtype
     let out_type = params
@@ -193,8 +217,8 @@ fn run_single_pass(
 
             // Route to single-end or paired-end mode
             match params.read_files_in.len() {
-                1 => align_reads_single_end(params, index, &mut writer, &stats, &sj_stats),
-                2 => align_reads_paired_end(params, index, &mut writer, &stats, &sj_stats),
+                1 => align_reads_single_end(params, index, &mut writer, &stats, &sj_stats, quant.as_ref()),
+                2 => align_reads_paired_end(params, index, &mut writer, &stats, &sj_stats, quant.as_ref()),
                 n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
             }?;
         }
@@ -211,8 +235,8 @@ fn run_single_pass(
 
             // Route to single-end or paired-end mode (same functions as SAM, generic!)
             match params.read_files_in.len() {
-                1 => align_reads_single_end(params, index, &mut writer, &stats, &sj_stats),
-                2 => align_reads_paired_end(params, index, &mut writer, &stats, &sj_stats),
+                1 => align_reads_single_end(params, index, &mut writer, &stats, &sj_stats, quant.as_ref()),
+                2 => align_reads_paired_end(params, index, &mut writer, &stats, &sj_stats, quant.as_ref()),
                 n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
             }?;
 
@@ -245,10 +269,11 @@ fn run_single_pass(
 fn run_two_pass(
     index: &std::sync::Arc<crate::index::GenomeIndex>,
     params: &Parameters,
+    quant_ctx: Option<&std::sync::Arc<crate::quant::QuantContext>>,
 ) -> anyhow::Result<std::sync::Arc<crate::stats::AlignmentStats>> {
     use std::sync::Arc;
 
-    // PASS 1: Junction discovery
+    // PASS 1: Junction discovery (no quant counting in pass 1)
     info!("Two-pass mode: Pass 1 - Junction discovery");
     let (sj_stats_pass1, novel_junctions) = run_pass1(index, params)?;
 
@@ -277,9 +302,9 @@ fn run_two_pass(
         merged_index.junction_db.len()
     );
 
-    // PASS 2: Re-alignment with merged DB
+    // PASS 2: Re-alignment with merged DB (quant counts happen here)
     info!("Two-pass mode: Pass 2 - Re-alignment");
-    let stats = run_single_pass(&Arc::new(merged_index), params)?;
+    let stats = run_single_pass(&Arc::new(merged_index), params, quant_ctx)?;
 
     Ok(stats)
 }
@@ -312,10 +337,10 @@ fn run_pass1(
     // Create NullWriter (discard SAM/BAM output in pass 1)
     let mut null_writer = NullWriter;
 
-    // Align reads (single-end or paired-end)
+    // Align reads (single-end or paired-end); no quant counting in pass 1
     match params.read_files_in.len() {
-        1 => align_reads_single_end(&params_pass1, index, &mut null_writer, &stats, &sj_stats)?,
-        2 => align_reads_paired_end(&params_pass1, index, &mut null_writer, &stats, &sj_stats)?,
+        1 => align_reads_single_end(&params_pass1, index, &mut null_writer, &stats, &sj_stats, None)?,
+        2 => align_reads_paired_end(&params_pass1, index, &mut null_writer, &stats, &sj_stats, None)?,
         n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
     }
 
@@ -397,6 +422,7 @@ fn align_reads_single_end<W: AlignmentWriter>(
     writer: &mut W,
     stats: &std::sync::Arc<crate::stats::AlignmentStats>,
     sj_stats: &std::sync::Arc<crate::junction::SpliceJunctionStats>,
+    quant_ctx: Option<&std::sync::Arc<crate::quant::QuantContext>>,
 ) -> anyhow::Result<()> {
     use crate::align::read_align::align_read;
     use crate::io::fastq::{FastqReader, clip_read};
@@ -404,6 +430,8 @@ fn align_reads_single_end<W: AlignmentWriter>(
     use crate::params::OutFilterType;
     use rayon::prelude::*;
     use std::sync::Arc;
+
+    let quant = quant_ctx.map(Arc::clone);
 
     let read_file = &params.read_files_in[0];
     info!("Reading single-end from {}", read_file.display());
@@ -473,6 +501,7 @@ fn align_reads_single_end<W: AlignmentWriter>(
                 let stats = Arc::clone(&stats);
                 #[allow(clippy::needless_borrow)]
                 let sj_stats = Arc::clone(&sj_stats);
+                let quant = quant.as_ref().map(Arc::clone);
 
                 // Apply clipping
                 let (clipped_seq, clipped_qual) =
@@ -488,6 +517,9 @@ fn align_reads_single_end<W: AlignmentWriter>(
                 if clipped_seq.is_empty() {
                     stats.record_alignment(0, max_multimaps);
                     stats.record_unmapped_reason(crate::stats::UnmappedReason::Other);
+                    if let Some(ref q) = quant {
+                        q.counts.count_se_read(&[], 0, &q.gene_ann);
+                    }
                     if output_unmapped {
                         let record = SamWriter::build_unmapped_record(
                             &read.name,
@@ -530,6 +562,11 @@ fn align_reads_single_end<W: AlignmentWriter>(
                     );
                 } else if transcripts.len() == 1 {
                     stats.record_transcript_stats(&transcripts[0]);
+                }
+
+                // Gene-level quantification (lock-free atomic counts)
+                if let Some(ref q) = quant {
+                    q.counts.count_se_read(&transcripts, n_for_mapq, &q.gene_ann);
                 }
 
                 // Record junction statistics
@@ -683,6 +720,7 @@ fn align_reads_paired_end<W: AlignmentWriter>(
     writer: &mut W,
     stats: &std::sync::Arc<crate::stats::AlignmentStats>,
     sj_stats: &std::sync::Arc<crate::junction::SpliceJunctionStats>,
+    quant_ctx: Option<&std::sync::Arc<crate::quant::QuantContext>>,
 ) -> anyhow::Result<()> {
     use crate::align::read_align::{PairedAlignment, PairedAlignmentResult, align_paired_read};
     use crate::io::fastq::{PairedFastqReader, clip_read};
@@ -690,6 +728,8 @@ fn align_reads_paired_end<W: AlignmentWriter>(
     use crate::params::OutFilterType;
     use rayon::prelude::*;
     use std::sync::Arc;
+
+    let quant = quant_ctx.map(Arc::clone);
 
     info!(
         "Reading paired-end from {} and {}",
@@ -766,6 +806,7 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                 let stats = Arc::clone(&stats);
                 #[allow(clippy::needless_borrow)]
                 let sj_stats = Arc::clone(&sj_stats);
+                let quant = quant.as_ref().map(Arc::clone);
 
                 // Apply clipping to both mates
                 let (m1_seq, m1_qual) = clip_read(
@@ -790,6 +831,9 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                 if m1_seq.is_empty() || m2_seq.is_empty() {
                     stats.record_alignment(0, max_multimaps);
                     stats.record_unmapped_reason(crate::stats::UnmappedReason::Other);
+                    if let Some(ref q) = quant {
+                        q.counts.count_pe_read(&[], true, false, &q.gene_ann);
+                    }
                     if output_unmapped {
                         let records = SamWriter::build_paired_unmapped_records(
                             &paired_read.name,
@@ -853,6 +897,19 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                         stats.record_transcript_stats(&both_mapped[0].mate1_transcript);
                         stats.record_transcript_stats(&both_mapped[0].mate2_transcript);
                     }
+                }
+
+                // Gene-level quantification (lock-free atomic counts)
+                if let Some(ref q) = quant {
+                    // Dereference Box<PairedAlignment> to get &PairedAlignment slice.
+                    let bm_deref: Vec<&crate::align::read_align::PairedAlignment> =
+                        both_mapped.iter().map(|b| b.as_ref()).collect();
+                    q.counts.count_pe_read(
+                        &bm_deref,
+                        results.is_empty(),
+                        has_half_mapped,
+                        &q.gene_ann,
+                    );
                 }
 
                 // Record junction statistics

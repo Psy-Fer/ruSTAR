@@ -1,15 +1,13 @@
 /// Read alignment driver function
 use crate::align::score::{AlignmentScorer, SpliceMotif};
 use crate::align::seed::Seed;
-use crate::align::stitch::{
-    cluster_seeds, stitch_seeds_with_jdb_debug,
-};
+use crate::align::stitch::{cluster_seeds, stitch_seeds_with_jdb_debug};
 use crate::align::transcript::Transcript;
 use crate::error::Error;
 use crate::index::GenomeIndex;
 use crate::params::{IntronMotifFilter, IntronStrandFilter, Parameters};
 use crate::stats::UnmappedReason;
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::hash::{Hash, Hasher};
 
 /// Derive a deterministic per-read RNG seed from `run_rng_seed` + the read name.
@@ -34,20 +32,15 @@ fn shuffle_tied_prefix<T, F>(items: &mut [T], score_fn: F, seed: u64)
 where
     F: Fn(&T) -> i32,
 {
-    if items.len() < 2 {
+    let Some(first) = items.first() else {
         return;
-    }
-    let best = score_fn(&items[0]);
+    };
+    let best = score_fn(first);
     let tied = items.iter().take_while(|t| score_fn(t) == best).count();
     if tied < 2 {
         return;
     }
-    let mut rng = StdRng::seed_from_u64(seed);
-    // Knuth shuffle on [0..tied).
-    for i in (1..tied).rev() {
-        let j = rng.gen_range(0..=i);
-        items.swap(i, j);
-    }
+    items[..tied].shuffle(&mut StdRng::seed_from_u64(seed));
 }
 
 /// Result of aligning a single read: (transcripts, chimeric_alignments, n_for_mapq, unmapped_reason)
@@ -669,7 +662,10 @@ pub fn align_paired_read(
     // This correctly represents mate2 on - strand for FR pairs without explicit RC handling.
     let debug_name: &str = if debug_pe { read_name } else { "" };
     let mut mate1_transcripts: Vec<Transcript> = Vec::new();
-    for cluster in mate1_clusters.iter().take(params.align_windows_per_read_nmax) {
+    for cluster in mate1_clusters
+        .iter()
+        .take(params.align_windows_per_read_nmax)
+    {
         let ts = stitch_seeds_with_jdb_debug(
             cluster,
             mate1_seq,
@@ -683,7 +679,10 @@ pub fn align_paired_read(
     }
 
     let mut mate2_transcripts: Vec<Transcript> = Vec::new();
-    for cluster in mate2_clusters.iter().take(params.align_windows_per_read_nmax) {
+    for cluster in mate2_clusters
+        .iter()
+        .take(params.align_windows_per_read_nmax)
+    {
         let ts = stitch_seeds_with_jdb_debug(
             cluster,
             mate2_seq,
@@ -704,14 +703,9 @@ pub fn align_paired_read(
     let mut joint_pairs: Vec<PairedAlignment> = Vec::new();
     for t1 in &mate1_transcripts {
         for t2 in &mate2_transcripts {
-            if let Some(pair) = try_pair_transcripts(
-                t1,
-                t2,
-                len1,
-                len2,
-                params,
-                combined_score_threshold,
-            ) {
+            if let Some(pair) =
+                try_pair_transcripts(t1, t2, len1, len2, params, combined_score_threshold)
+            {
                 joint_pairs.push(pair);
             }
         }
@@ -895,12 +889,10 @@ pub fn align_paired_read(
 
     // Half-mapped fallback: report the best-scoring single-mate transcript.
     // Apply per-mate quality threshold (outFilterScoreMinOverLread * (len - 1)).
-    let thresh1 =
-        ((params.out_filter_score_min_over_lread * (len1 as f64 - 1.0)) as i32)
-            .max(params.out_filter_score_min);
-    let thresh2 =
-        ((params.out_filter_score_min_over_lread * (len2 as f64 - 1.0)) as i32)
-            .max(params.out_filter_score_min);
+    let thresh1 = ((params.out_filter_score_min_over_lread * (len1 as f64 - 1.0)) as i32)
+        .max(params.out_filter_score_min);
+    let thresh2 = ((params.out_filter_score_min_over_lread * (len2 as f64 - 1.0)) as i32)
+        .max(params.out_filter_score_min);
 
     let best_m1 = mate1_transcripts
         .into_iter()
@@ -1096,9 +1088,7 @@ fn filter_paired_transcripts(paired_alns: &mut Vec<PairedAlignment>, params: &Pa
     // the read is unmapped.
     //
     // Step 1: find the best pair and check quality thresholds on it.
-    let best_pa = paired_alns
-        .iter()
-        .max_by_key(|pa| pa.combined_wt_score);
+    let best_pa = paired_alns.iter().max_by_key(|pa| pa.combined_wt_score);
     if let Some(best) = best_pa {
         let mate1_len = (best.mate1_region.1 - best.mate1_region.0) as f64;
         let mate2_len = (best.mate2_region.1 - best.mate2_region.0) as f64;
@@ -1114,8 +1104,7 @@ fn filter_paired_transcripts(paired_alns: &mut Vec<PairedAlignment>, params: &Pa
         // per-mate spans are small (penalty ≈ −2 each → sum penalty −4 vs combined penalty −2).
         let combined_score = best.combined_wt_score;
         if combined_score < params.out_filter_score_min
-            || combined_score
-                < (params.out_filter_score_min_over_lread * combined_lread_m1) as i32
+            || combined_score < (params.out_filter_score_min_over_lread * combined_lread_m1) as i32
         {
             paired_alns.clear();
             return;
@@ -1129,8 +1118,7 @@ fn filter_paired_transcripts(paired_alns: &mut Vec<PairedAlignment>, params: &Pa
         // which directly mirrors STAR's joint transcript nMatch without extension inflation.
         let combined_match = best.combined_n_match;
         if combined_match < params.out_filter_match_nmin
-            || combined_match
-                < (params.out_filter_match_nmin_over_lread * combined_lread_m1) as u32
+            || combined_match < (params.out_filter_match_nmin_over_lread * combined_lread_m1) as u32
         {
             paired_alns.clear();
             return;

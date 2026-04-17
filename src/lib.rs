@@ -5,6 +5,7 @@ pub mod params;
 
 pub mod align;
 pub mod chimeric;
+pub mod cpu;
 pub mod genome;
 pub mod index;
 pub mod io;
@@ -21,7 +22,12 @@ use crate::params::{Parameters, RunMode};
 pub fn run(params: &Parameters) -> anyhow::Result<()> {
     params.validate()?;
 
-    info!("ruSTAR v{}", env!("CARGO_PKG_VERSION"));
+    info!("ruSTAR {}", env!("CARGO_PKG_VERSION"));
+    info!("{}", env!("VERSION_BODY"));
+    info!("{}", cpu::cpu_detected_line());
+    if let Some(hint) = cpu::upgrade_hint() {
+        info!("{hint}");
+    }
     info!("runMode: {}", params.run_mode);
     info!("runThreadN: {}", params.run_thread_n);
 

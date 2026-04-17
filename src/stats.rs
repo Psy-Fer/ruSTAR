@@ -406,11 +406,7 @@ impl AlignmentStats {
         let splices_noncanonical = splices[0];
 
         // Computed fields
-        let avg_input_read_length = if total_reads > 0 {
-            read_bases / total_reads
-        } else {
-            0
-        };
+        let avg_input_read_length = read_bases.checked_div(total_reads).unwrap_or(0);
 
         let avg_mapped_length = if uniquely_mapped > 0 {
             mapped_bases as f64 / uniquely_mapped as f64

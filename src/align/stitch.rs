@@ -2410,7 +2410,7 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
 
 /// Shared core: preprocessing + recursive stitcher, returns working transcripts + context.
 #[allow(clippy::too_many_arguments)]
-fn stitch_seeds_core(
+pub(crate) fn stitch_seeds_core(
     cluster: &SeedCluster,
     read_seq: &[u8],
     index: &GenomeIndex,

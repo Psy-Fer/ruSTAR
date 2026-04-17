@@ -470,6 +470,24 @@ fn rc_encode(seq: &[u8]) -> Vec<u8> {
         .collect()
 }
 
+/// Pick a random primary-hit index and compute the MAPQ for a set of
+/// transcriptome projections.  Shared by the SE and PE builders.
+fn pick_primary_and_mapq(
+    n_alignments: usize,
+    n_for_mapq: usize,
+    read_name: &str,
+    params: &Parameters,
+) -> (usize, u8) {
+    use crate::align::read_align::per_read_seed;
+    use crate::mapq::calculate_mapq;
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+
+    let mut rng = StdRng::seed_from_u64(per_read_seed(params.run_rng_seed, read_name));
+    let primary_hit = rng.gen_range(0..n_alignments);
+    let mapq = calculate_mapq(n_alignments.max(n_for_mapq), params.out_sam_mapq_unique);
+    (primary_hit, mapq)
+}
+
 /// Helper struct to hold alignment results from parallel processing
 struct AlignmentBatchResults {
     sam_records: crate::io::sam::BufferedSamRecords,
@@ -497,11 +515,8 @@ fn build_transcriptome_records_se(
     params: &Parameters,
     n_for_mapq: usize,
 ) -> Result<Vec<noodles::sam::alignment::record_buf::RecordBuf>, error::Error> {
-    use crate::align::read_align::per_read_seed;
     use crate::io::sam::SamWriter;
-    use crate::mapq::calculate_mapq;
     use crate::quant::transcriptome::filter_and_project;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
 
     if transcripts.is_empty() || tr_idx.n_transcripts() == 0 {
         return Ok(Vec::new());
@@ -509,31 +524,24 @@ fn build_transcriptome_records_se(
 
     let mode = params.quant_transcriptome_sam_output;
     let lread = read_seq.len() as u32;
-
-    // For each genome-space alignment, project + filter.  STAR passes the
-    // RC read to soft-clip extension when the alignment is on the reverse
-    // strand (`Read1[2]`); we mirror that here.
+    // STAR passes the RC read to soft-clip extension on reverse-strand
+    // alignments (`Read1[2]`); we mirror that here.
     let rc = rc_encode(read_seq);
 
     let mut projected_all: Vec<crate::align::transcript::Transcript> = Vec::new();
     for aln in transcripts {
         let bases: &[u8] = if aln.is_reverse { &rc } else { read_seq };
-        let proj = filter_and_project(aln, bases, genome, tr_idx, lread, mode, params);
-        projected_all.extend(proj);
+        projected_all.extend(filter_and_project(
+            aln, bases, genome, tr_idx, lread, mode, params,
+        ));
     }
 
     if projected_all.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Random primary selection among the projected alignments.
-    let seed = per_read_seed(params.run_rng_seed, read_name);
-    let mut rng = StdRng::seed_from_u64(seed);
-    let primary_hit = rng.gen_range(0..projected_all.len());
-
-    let n_alignments = projected_all.len();
-    let effective_n = n_alignments.max(n_for_mapq);
-    let mapq = calculate_mapq(effective_n, params.out_sam_mapq_unique);
+    let (primary_hit, mapq) =
+        pick_primary_and_mapq(projected_all.len(), n_for_mapq, read_name, params);
 
     SamWriter::build_transcriptome_records(
         read_name,
@@ -565,11 +573,9 @@ fn build_transcriptome_records_pe(
     params: &Parameters,
     n_for_mapq: usize,
 ) -> Result<Vec<noodles::sam::alignment::record_buf::RecordBuf>, error::Error> {
-    use crate::align::read_align::per_read_seed;
     use crate::io::sam::SamWriter;
-    use crate::mapq::calculate_mapq;
     use crate::quant::transcriptome::filter_and_project;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use std::collections::HashMap;
 
     if both_mapped.is_empty() || tr_idx.n_transcripts() == 0 {
         return Ok(Vec::new());
@@ -578,16 +584,15 @@ fn build_transcriptome_records_pe(
     let mode = params.quant_transcriptome_sam_output;
     let lread1 = m1_seq.len() as u32;
     let lread2 = m2_seq.len() as u32;
-
     let m1_rc = rc_encode(m1_seq);
     let m2_rc = rc_encode(m2_seq);
 
-    // Collect (mate1_proj, mate2_proj) for every transcript both mates reach.
+    // For each both-mapped pair, project each mate onto transcripts and pair
+    // up projections that land on the same transcript.
     let mut all_projected: Vec<(
         crate::align::transcript::Transcript,
         crate::align::transcript::Transcript,
     )> = Vec::new();
-
     for pair in both_mapped {
         let m1 = &pair.mate1_transcript;
         let m2 = &pair.mate2_transcript;
@@ -596,8 +601,6 @@ fn build_transcriptome_records_pe(
         let proj_m1 = filter_and_project(m1, m1_bases, genome, tr_idx, lread1, mode, params);
         let proj_m2 = filter_and_project(m2, m2_bases, genome, tr_idx, lread2, mode, params);
 
-        // Group by transcript_idx and pair them up.
-        use std::collections::HashMap;
         let mut by_tr1: HashMap<usize, Vec<&crate::align::transcript::Transcript>> = HashMap::new();
         for p in &proj_m1 {
             by_tr1.entry(p.chr_idx).or_default().push(p);
@@ -615,14 +618,8 @@ fn build_transcriptome_records_pe(
         return Ok(Vec::new());
     }
 
-    // Random primary selection.
-    let seed = per_read_seed(params.run_rng_seed, read_name);
-    let mut rng = StdRng::seed_from_u64(seed);
-    let primary_hit = rng.gen_range(0..all_projected.len());
-
     let n_alignments = all_projected.len();
-    let effective_n = n_alignments.max(n_for_mapq);
-    let mapq = calculate_mapq(effective_n, params.out_sam_mapq_unique);
+    let (primary_hit, mapq) = pick_primary_and_mapq(n_alignments, n_for_mapq, read_name, params);
 
     // Build one record per mate per projected pair in a single call each,
     // then stamp paired flags and interleave as mate1, mate2, mate1, mate2…

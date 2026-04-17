@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # rustsec/audit-check posts results as a check run on the commit.
+  checks: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Override the [profile.release] settings from Cargo.toml for CI: fat-LTO +
+  # codegen-units=1 are great for release binaries but ~10× slower to compile
+  # than thin-LTO, which bites hard on every matrix leg. Release binaries in
+  # release.yml unset these so they get the real profile.
+  CARGO_PROFILE_RELEASE_LTO: "thin"
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+
+jobs:
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+          - name: linux-x86_64-v3
+            os: ubuntu-latest
+            target_cpu: x86-64-v3
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+          - name: macos-aarch64
+            os: macos-latest
+          - name: windows-x86_64
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # ratchet:dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # ratchet:Swatinem/rust-cache@v2.9.1
+
+      - name: Detect host triple
+        if: matrix.target_cpu
+        shell: bash
+        run: echo "HOST_TRIPLE=$(rustc -vV | awk '/^host:/ {print $2}')" >> "$GITHUB_ENV"
+
+      - name: Build
+        shell: bash
+        run: >
+          cargo build --release
+          ${TARGET_CPU:+--target "$HOST_TRIPLE" --config "target.'$HOST_TRIPLE'.rustflags=['-C', 'target-cpu=$TARGET_CPU']"}
+        env:
+          TARGET_CPU: ${{ matrix.target_cpu || '' }}
+
+      - name: Test
+        shell: bash
+        run: >
+          cargo test --release
+          ${TARGET_CPU:+--target "$HOST_TRIPLE" --config "target.'$HOST_TRIPLE'.rustflags=['-C', 'target-cpu=$TARGET_CPU']"}
+        env:
+          TARGET_CPU: ${{ matrix.target_cpu || '' }}
+
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # ratchet:dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # ratchet:dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # ratchet:Swatinem/rust-cache@v2.9.1
+
+      - run: cargo clippy -- -D warnings
+
+  msrv:
+    name: MSRV check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
+
+      - name: Install Rust MSRV toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # ratchet:dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # ratchet:Swatinem/rust-cache@v2.9.1
+
+      - name: Check MSRV compiles
+        run: cargo check
+
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # ratchet:actions/checkout@v6.0.2
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

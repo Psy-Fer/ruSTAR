@@ -2542,7 +2542,7 @@ fn stitch_seeds_core(
     // With anchor-only filtering, this limit is rarely hit, but keep as a safety net.
     const MAX_WA_ENTRIES: usize = 200;
     if wa_entries.len() > MAX_WA_ENTRIES {
-        wa_entries.sort_by(|a, b| b.length.cmp(&a.length));
+        wa_entries.sort_by_key(|wa| std::cmp::Reverse(wa.length));
         wa_entries.truncate(MAX_WA_ENTRIES);
         wa_entries.sort_by(|a, b| a.read_pos.cmp(&b.read_pos).then(b.length.cmp(&a.length)));
     }
@@ -2587,7 +2587,11 @@ fn stitch_seeds_core(
     // This matches stitch_recurse's `do_left_first = !original_is_reverse`.
     // Mismatch budget for second ext carries over from first ext (STAR: scoreSeedBestMM[iS1]).
     {
-        let zero_ext = ExtendResult { extend_len: 0, max_score: 0, n_mismatch: 0 };
+        let zero_ext = ExtendResult {
+            extend_len: 0,
+            max_score: 0,
+            n_mismatch: 0,
+        };
         let do_left_first = !stitch_is_reverse;
         for wa in &mut wa_entries {
             let right_start = wa.read_pos + wa.length;

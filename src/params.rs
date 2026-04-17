@@ -229,7 +229,8 @@ impl std::str::FromStr for TwopassMode {
 #[command(
     name = "ruSTAR",
     about = "RNA-seq aligner (Rust reimplementation of STAR)",
-    version
+    version,
+    long_version = concat!(env!("CARGO_PKG_VERSION"), "\n", env!("VERSION_BODY")),
 )]
 pub struct Parameters {
     // ── Run ─────────────────────────────────────────────────────────────

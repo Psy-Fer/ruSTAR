@@ -1,7 +1,39 @@
 [package]
 name = "ruSTAR"
+# TODO: the `rustar` crate name is already taken on crates.io. A different
+# published name must be chosen before the first `cargo publish` (for example
+# `rustar-aligner` or `rustar-rnaseq`). The `publish-crate` job in
+# `.github/workflows/release.yml` is gated off until this is resolved.
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+authors = ["James Ferguson"]
+description = "A Rust reimplementation of STAR (Spliced Transcripts Alignment to a Reference), the RNA-seq aligner"
+license = "MIT"
+repository = "https://github.com/Psy-Fer/ruSTAR"
+readme = "README.md"
+keywords = ["bioinformatics", "rna-seq", "aligner", "sequencing", "star"]
+categories = ["command-line-utilities", "science"]
+exclude = [
+    "test/",
+    "tests/",
+    "docs/",
+    ".github/",
+    "Dockerfile",
+    ".dockerignore",
+    "ALIGNMENT_FIXES.md",
+    "BUGFIX_2026-02-09.md",
+    "PERFORMANCE_FIX.md",
+    "PHASE12_COMPLETE.md",
+    "ROADMAP.md",
+    "STAR_SA_RESEARCH.md",
+    "TESTING_SUMMARY.md",
+    "CLAUDE.md",
+]
+
+[[bin]]
+name = "ruSTAR"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -22,3 +54,16 @@ chrono = "0.4"
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+
+[build-dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# Whole-program LTO + a single codegen unit are worth the extra build time
+# for the seed-search and DP-extension inner loops. CI overrides these via
+# `CARGO_PROFILE_RELEASE_LTO=thin` / `CODEGEN_UNITS=16` env vars to keep
+# test-matrix runtime reasonable.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true

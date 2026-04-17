@@ -63,26 +63,10 @@ impl std::str::FromStr for QuantTranscriptomeSAMoutput {
     }
 }
 
-impl std::fmt::Display for QuantTranscriptomeSAMoutput {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BanSingleEndBanIndelsExtendSoftclip => {
-                write!(f, "BanSingleEnd_BanIndels_ExtendSoftclip")
-            }
-            Self::BanSingleEnd => write!(f, "BanSingleEnd"),
-            Self::BanSingleEndExtendSoftclip => write!(f, "BanSingleEnd_ExtendSoftclip"),
-        }
-    }
-}
-
 impl QuantTranscriptomeSAMoutput {
     /// Whether indels are permitted in the output.
     pub fn allow_indels(self) -> bool {
         !matches!(self, Self::BanSingleEndBanIndelsExtendSoftclip)
-    }
-    /// Whether single-mate-only PE alignments are permitted.
-    pub fn allow_single_end(self) -> bool {
-        false // all three modes ban single-end
     }
     /// Whether soft-clipped bases should be kept (true) or extended back into
     /// matched bases (false).
@@ -540,14 +524,10 @@ pub fn filter_and_project(
         return Vec::new();
     }
 
-    // (2) Single-end filter: for PE, we reject alignments where both ends of
-    // the read came from the same mate.  ruSTAR's `Transcript` does not carry
-    // per-block `EX_iFrag` tags — this check is enforced at the caller level
-    // (only invoking `filter_and_project` on both-mapped pair mates means we
-    // never see single-mate alignments here).  Left as a no-op guard: if a
-    // caller passes a single-mate alignment with `allow_single_end() == false`,
-    // we currently do not reject it.  See subtask-5 wiring where the filter is
-    // applied at the PE boundary.
+    // (2) Single-end filter: all three modes `BanSingleEnd*` reject PE
+    // alignments where both blocks come from one mate.  ruSTAR's `Transcript`
+    // carries no per-block mate tag, so the caller enforces this by only
+    // invoking `filter_and_project` on both-mapped pair mates.
 
     // (3) Soft-clip extension.
     let align_for_projection = if mode.allow_softclip() || !has_soft_clip(align) {

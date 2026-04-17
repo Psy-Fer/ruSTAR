@@ -77,12 +77,6 @@ impl BamWriter {
         )
     }
 
-    /// Access the underlying SAM header (needed by serial-write code paths
-    /// that build records outside of `write_batch`).
-    pub fn header(&self) -> &sam::Header {
-        &self.header
-    }
-
     /// Write batch of buffered records (for parallel processing)
     ///
     /// # Arguments
@@ -245,7 +239,7 @@ mod tests {
 
         // Header should contain exactly 1 @SQ entry (matching n_transcripts).
         let writer = writer.unwrap();
-        assert_eq!(writer.header().reference_sequences().len(), 1);
+        assert_eq!(writer.header.reference_sequences().len(), 1);
     }
 
     #[test]

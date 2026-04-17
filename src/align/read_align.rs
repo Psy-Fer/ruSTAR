@@ -9,6 +9,46 @@ use crate::error::Error;
 use crate::index::GenomeIndex;
 use crate::params::{IntronMotifFilter, IntronStrandFilter, Parameters};
 use crate::stats::UnmappedReason;
+use rand::{Rng, SeedableRng, rngs::StdRng};
+use std::hash::{Hash, Hasher};
+
+/// Derive a deterministic per-read RNG seed from `run_rng_seed` + the read name.
+///
+/// STAR seeds `std::mt19937` once per chunk/thread (`runRNGseed*(iChunk+1)`),
+/// then advances the state sequentially per read. ruSTAR parallelises per-read
+/// via rayon, so we instead fold the read name into the seed — this keeps tie
+/// breaks reproducible regardless of thread count while still honoring the
+/// user's `--runRNGseed` value.
+fn per_read_seed(run_rng_seed: u64, read_name: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    read_name.hash(&mut hasher);
+    run_rng_seed.wrapping_mul(hasher.finish().wrapping_add(1))
+}
+
+/// Fisher–Yates shuffle the prefix of `items` whose `score_fn` equals the first element's score.
+///
+/// Mirrors STAR's `ReadAlign_multMapSelect` / `funPrimaryAlignMark` behavior:
+/// best-scoring alignments are randomized so primary selection (index 0) is
+/// not biased by upstream sort order. Non-tied elements are left alone.
+fn shuffle_tied_prefix<T, F>(items: &mut [T], score_fn: F, seed: u64)
+where
+    F: Fn(&T) -> i32,
+{
+    if items.len() < 2 {
+        return;
+    }
+    let best = score_fn(&items[0]);
+    let tied = items.iter().take_while(|t| score_fn(t) == best).count();
+    if tied < 2 {
+        return;
+    }
+    let mut rng = StdRng::seed_from_u64(seed);
+    // Knuth shuffle on [0..tied).
+    for i in (1..tied).rev() {
+        let j = rng.gen_range(0..=i);
+        items.swap(i, j);
+    }
+}
 
 /// Result of aligning a single read: (transcripts, chimeric_alignments, n_for_mapq, unmapped_reason)
 pub type AlignReadResult = (
@@ -300,6 +340,14 @@ pub fn align_read(
             .then_with(|| a.genome_start.cmp(&b.genome_start))
             .then_with(|| a.is_reverse.cmp(&b.is_reverse))
     });
+
+    // STAR's `funPrimaryAlignMark`: among alignments tied on best score, randomize
+    // which one is primary using `runRNGseed`. See `ReadAlign_multMapSelect.cpp:71-79`.
+    shuffle_tied_prefix(
+        &mut transcripts,
+        |t| t.score,
+        per_read_seed(params.run_rng_seed, read_name),
+    );
 
     // Score-range filter: keep only alignments within outFilterMultimapScoreRange of the best.
     // (STAR's multMapSelect step — must run before quality filters.)
@@ -825,6 +873,13 @@ pub fn align_paired_read(
                     .cmp(&b.mate1_transcript.is_reverse)
             })
     });
+
+    // Randomize primary among best-scoring pairs (STAR's funPrimaryAlignMark).
+    shuffle_tied_prefix(
+        &mut joint_pairs,
+        |pa| pa.combined_wt_score,
+        per_read_seed(params.run_rng_seed, read_name),
+    );
 
     // Step 4: quality filter (mappedFilter).
     filter_paired_transcripts(&mut joint_pairs, params);
@@ -1749,5 +1804,56 @@ mod tests {
         {
             assert!(mate1_is_mapped);
         }
+    }
+
+    #[test]
+    fn shuffle_tied_prefix_is_deterministic() {
+        // Same seed + same input → same permutation on reruns.
+        let items: Vec<(i32, u32)> = (0..8).map(|i| (100, i)).collect();
+        let mut a = items.clone();
+        let mut b = items.clone();
+        shuffle_tied_prefix(&mut a, |t| t.0, 12345);
+        shuffle_tied_prefix(&mut b, |t| t.0, 12345);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn shuffle_tied_prefix_respects_ties() {
+        // Only the top-score prefix gets shuffled; lower-scored tail is left alone.
+        let mut items = vec![(100, 0u32), (100, 1), (100, 2), (50, 3), (40, 4)];
+        shuffle_tied_prefix(&mut items, |t| t.0, 777);
+        // Last two elements (non-tied) stay in place.
+        assert_eq!(items[3], (50, 3));
+        assert_eq!(items[4], (40, 4));
+        // Tied prefix contains the original three items in some order.
+        let mut top: Vec<u32> = items[..3].iter().map(|t| t.1).collect();
+        top.sort();
+        assert_eq!(top, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn shuffle_tied_prefix_different_seeds_can_diverge() {
+        // Probabilistic: for a tied set of 8, at least two seeds should disagree
+        // on the chosen primary. (Exhaustive over a small seed range is fine.)
+        let base: Vec<(i32, u32)> = (0..8).map(|i| (100, i)).collect();
+        let mut firsts = std::collections::HashSet::new();
+        for seed in 0..32u64 {
+            let mut v = base.clone();
+            shuffle_tied_prefix(&mut v, |t| t.0, seed);
+            firsts.insert(v[0].1);
+        }
+        assert!(
+            firsts.len() >= 2,
+            "expected different seeds to pick different primaries, got {:?}",
+            firsts
+        );
+    }
+
+    #[test]
+    fn shuffle_tied_prefix_noop_when_no_ties() {
+        let mut items = vec![(100, 0u32), (90, 1), (80, 2)];
+        let before = items.clone();
+        shuffle_tied_prefix(&mut items, |t| t.0, 42);
+        assert_eq!(items, before);
     }
 }

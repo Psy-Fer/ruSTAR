@@ -125,9 +125,10 @@ mod tests {
         let read_qual = vec![30, 30, 30, 30];
 
         // Build record using SAM builder
-        let record =
-            crate::io::sam::SamWriter::build_unmapped_record(read_name, &read_seq, &read_qual)
-                .unwrap();
+        let record = crate::io::sam::SamWriter::build_unmapped_record(
+            read_name, &read_seq, &read_qual, None,
+        )
+        .unwrap();
 
         let result = writer.write_batch(&[record]);
         assert!(result.is_ok(), "Writing unmapped read should succeed");
@@ -204,12 +205,14 @@ mod tests {
                 "read1",
                 &[0, 1, 2, 3],
                 &[30, 30, 30, 30],
+                None,
             )
             .unwrap(),
             crate::io::sam::SamWriter::build_unmapped_record(
                 "read2",
                 &[0, 1, 2, 3],
                 &[30, 30, 30, 30],
+                None,
             )
             .unwrap(),
         ];

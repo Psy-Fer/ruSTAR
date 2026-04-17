@@ -28,10 +28,7 @@ fn per_read_seed(run_rng_seed: u64, read_name: &str) -> u64 {
 /// Mirrors STAR's `ReadAlign_multMapSelect` / `funPrimaryAlignMark`: best-scoring
 /// alignments are randomized so primary selection (index 0) is not biased by
 /// upstream sort order. Non-tied elements are left alone.
-fn shuffle_tied_prefix<T, F>(items: &mut [T], score_fn: F, seed: u64)
-where
-    F: Fn(&T) -> i32,
-{
+fn shuffle_tied_prefix<T>(items: &mut [T], score_fn: impl Fn(&T) -> i32, seed: u64) {
     let Some(first) = items.first() else {
         return;
     };

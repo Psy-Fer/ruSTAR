@@ -461,6 +461,15 @@ fn run_pass1(
     Ok((sj_stats, novel_junctions))
 }
 
+/// Reverse-complement an encoded read (A=0,C=1,G=2,T=3,N=4).  Shared by the
+/// SE and PE transcriptome builders for the STAR `Read1[2]` soft-clip path.
+fn rc_encode(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
+        .rev()
+        .map(|&b| crate::io::fastq::complement_base(b))
+        .collect()
+}
+
 /// Helper struct to hold alignment results from parallel processing
 struct AlignmentBatchResults {
     sam_records: crate::io::sam::BufferedSamRecords,
@@ -501,26 +510,14 @@ fn build_transcriptome_records_se(
     let mode = params.quant_transcriptome_sam_output;
     let lread = read_seq.len() as u32;
 
-    // For each genome-space alignment, project + filter.  ruSTAR's
-    // `Transcript.read_seq` is always the forward (genome-strand) read; for
-    // reverse alignments STAR uses `Read1[2]` (the RC).  We approximate by
-    // passing the read bases in the alignment's orientation.
-    let fwd = read_seq.to_vec();
-    let rc: Vec<u8> = read_seq
-        .iter()
-        .rev()
-        .map(|&b| match b {
-            0 => 3u8,
-            1 => 2u8,
-            2 => 1u8,
-            3 => 0u8,
-            n => n,
-        })
-        .collect();
+    // For each genome-space alignment, project + filter.  STAR passes the
+    // RC read to soft-clip extension when the alignment is on the reverse
+    // strand (`Read1[2]`); we mirror that here.
+    let rc = rc_encode(read_seq);
 
     let mut projected_all: Vec<crate::align::transcript::Transcript> = Vec::new();
     for aln in transcripts {
-        let bases = if aln.is_reverse { &rc[..] } else { &fwd[..] };
+        let bases: &[u8] = if aln.is_reverse { &rc } else { read_seq };
         let proj = filter_and_project(aln, bases, genome, tr_idx, lread, mode, params);
         projected_all.extend(proj);
     }
@@ -582,21 +579,8 @@ fn build_transcriptome_records_pe(
     let lread1 = m1_seq.len() as u32;
     let lread2 = m2_seq.len() as u32;
 
-    // RC helpers (genome base encoding).
-    let rc_of = |seq: &[u8]| -> Vec<u8> {
-        seq.iter()
-            .rev()
-            .map(|&b| match b {
-                0 => 3u8,
-                1 => 2u8,
-                2 => 1u8,
-                3 => 0u8,
-                n => n,
-            })
-            .collect()
-    };
-    let m1_rc = rc_of(m1_seq);
-    let m2_rc = rc_of(m2_seq);
+    let m1_rc = rc_encode(m1_seq);
+    let m2_rc = rc_encode(m2_seq);
 
     // Collect (mate1_proj, mate2_proj) for every transcript both mates reach.
     let mut all_projected: Vec<(

@@ -384,10 +384,8 @@ fn align_to_one_transcript(
             return None;
         }
 
-        // Determine if this block starts a new projected exon or extends the
-        // previous one.  STAR starts a new projected exon on: (a) the first
-        // block, or (b) when the preceding canonSJ was a junction (>= 0).  We
-        // handle those boundaries via `mate_or_junction_before`.
+        // STAR starts a new projected exon on the first block or after a
+        // preceding canonSJ junction (>= 0); insertions coalesce.
         let start_new = iab == 0 || is_splice_boundary_before(align, iab);
 
         if start_new {

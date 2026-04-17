@@ -480,11 +480,12 @@ fn align_to_one_transcript(
         score: align.score,
         n_mismatch: align.n_mismatch,
         n_gap: align.n_gap,
-        // Splices collapse in t-space; leave junction metadata empty.
+        // Splices collapse in t-space; projected records don't carry junction
+        // metadata or a read_seq (the SAM writer uses the caller-supplied read).
         n_junction: 0,
         junction_motifs: Vec::new(),
         junction_annotated: Vec::new(),
-        read_seq: align.read_seq.clone(),
+        read_seq: Vec::new(),
     })
 }
 
@@ -492,24 +493,13 @@ fn align_to_one_transcript(
 /// semantics and return the resulting transcriptome-space projections.
 ///
 /// Mirrors STAR `ReadAlign::quantTranscriptome` (see
-/// `source/ReadAlign_quantTranscriptome.cpp:9-66`):
-///   1. If `!indel_ok && (n_ins > 0 || n_del > 0)` → skip.
-///   2. If `!single_end_ok && readNmates==2 && all blocks from same mate` →
-///      skip.  ruSTAR does not carry per-block mate tags on SE/PE transcript
-///      exons; callers should only invoke this function on both-mapped PE
-///      `PairedAlignment` mates, and single-end checks are effectively a
-///      no-op at the per-mate level.
-///   3. If `!softclip_ok` and the alignment has soft-clips at the 5'/3' ends,
-///      extend them back into matched bases.  Extension mismatches are added
-///      to `nMM1` and the alignment is rejected if `nMM + nMM1 >
-///      min(outFilterMismatchNmax, outFilterMismatchNoverLmax*(Lread-1))`.
-///   4. Finally call `align_to_transcripts` to project onto all transcripts.
+/// `source/ReadAlign_quantTranscriptome.cpp:9-66`): reject indels if banned,
+/// reject single-mate-only PE hits (caller enforces — ruSTAR lacks per-block
+/// mate tags), extend leading/trailing soft-clips if requested, then project.
 ///
-/// `genome_fwd_bases` is the forward-strand read sequence in genome base
-/// encoding (A=0,C=1,G=2,T=3,N=4), used for mismatch checks in the softclip
-/// extension step.  For reverse-strand alignments, STAR pulls the RC read via
-/// `Read1[roStr==0 ? 0 : 2]`; pass the RC-encoded bases here for reverse
-/// alignments.
+/// `read_bases_align_orientation` is the read in genome base encoding
+/// (A=0,C=1,G=2,T=3,N=4) already reversed/complemented when the alignment is
+/// on the reverse strand — STAR's `Read1[roStr==0 ? 0 : 2]`.
 pub fn filter_and_project(
     align: &Transcript,
     read_bases_align_orientation: &[u8],
@@ -519,17 +509,10 @@ pub fn filter_and_project(
     mode: QuantTranscriptomeSAMoutput,
     params: &Parameters,
 ) -> Vec<Transcript> {
-    // (1) Indel filter.
     if !mode.allow_indels() && align.n_gap > 0 {
         return Vec::new();
     }
 
-    // (2) Single-end filter: all three modes `BanSingleEnd*` reject PE
-    // alignments where both blocks come from one mate.  ruSTAR's `Transcript`
-    // carries no per-block mate tag, so the caller enforces this by only
-    // invoking `filter_and_project` on both-mapped pair mates.
-
-    // (3) Soft-clip extension.
     let align_for_projection = if mode.allow_softclip() || !has_soft_clip(align) {
         align.clone()
     } else {
@@ -539,7 +522,6 @@ pub fn filter_and_project(
         }
     };
 
-    // (4) Project onto transcripts.
     align_to_transcripts(&align_for_projection, idx, lread)
 }
 

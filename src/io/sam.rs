@@ -130,23 +130,6 @@ impl SamWriter {
         Ok(())
     }
 
-    /// Write unmapped read
-    ///
-    /// # Arguments
-    /// * `read_name` - Read identifier
-    /// * `read_seq` - Read sequence (encoded)
-    /// * `read_qual` - Quality scores
-    pub fn write_unmapped(
-        &mut self,
-        read_name: &str,
-        read_seq: &[u8],
-        read_qual: &[u8],
-    ) -> Result<(), Error> {
-        let record = Self::build_unmapped_record(read_name, read_seq, read_qual, None)?;
-        self.writer.write_alignment_record(&self.header, &record)?;
-        Ok(())
-    }
-
     /// Write batch of buffered records (for parallel processing)
     ///
     /// # Arguments
@@ -1298,21 +1281,6 @@ mod tests {
         let tmpfile = NamedTempFile::new().unwrap();
         let writer = SamWriter::create(tmpfile.path(), &genome, &params);
         assert!(writer.is_ok());
-    }
-
-    #[test]
-    fn test_write_unmapped() {
-        let genome = make_test_genome();
-        let params = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "test.fq"]);
-
-        let tmpfile = NamedTempFile::new().unwrap();
-        let mut writer = SamWriter::create(tmpfile.path(), &genome, &params).unwrap();
-
-        let read_seq = vec![0, 1, 2, 3]; // ACGT
-        let read_qual = vec![30, 30, 30, 30];
-
-        let result = writer.write_unmapped("read1", &read_seq, &read_qual);
-        assert!(result.is_ok());
     }
 
     #[test]

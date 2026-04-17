@@ -5,7 +5,7 @@
 /// - Building a junction database from annotated exons
 /// - Junction lookup during alignment (annotated vs novel)
 /// - Junction statistics collection for SJ.out.tab output
-mod gtf;
+pub(crate) mod gtf;
 mod sj_output;
 
 pub use sj_output::SpliceJunctionStats;

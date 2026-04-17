@@ -992,7 +992,10 @@ fn stitch_align_to_transcript(
             let first_exon = &wt.exons[0];
             let ex_g = first_exon.genome_start;
             let ex_r = first_exon.read_start as u64;
-            // Reject when gBstart + EX_R < EX_G (and EX_G >= EX_R to avoid false rejection near chr start)
+            // STAR stitchAlignToTranscript.cpp line 352:
+            // accept if gBstart + EX_R + alignEndsProtrude.nBasesMax >= EX_G || EX_G < EX_R
+            // With default alignEndsProtrude.nBasesMax=0 this simplifies to:
+            // reject if EX_G >= EX_R && gBstart + EX_R < EX_G
             let fwd_reject = ex_g >= ex_r && wa.genome_pos + ex_r < ex_g;
             if fwd_reject {
                 return None;
@@ -2404,36 +2407,6 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
     Ok(transcripts)
 }
 
-/// PE-aware stitch: returns WorkingTranscripts before finalization, plus stitching context.
-///
-/// Returns `(working_transcripts, stitch_cluster, stitch_is_reverse, stitch_read)`.
-/// The caller is responsible for:
-/// - Finding mate boundaries with `find_mate_boundary()`
-/// - Splitting with `split_working_transcript()`
-/// - Finalizing each half with `finalize_transcript()`
-/// - Restoring `is_reverse` and `read_seq` on finalized transcripts as needed
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn stitch_seeds_working(
-    cluster: &SeedCluster,
-    read_seq: &[u8],
-    index: &GenomeIndex,
-    scorer: &AlignmentScorer,
-    junction_db: Option<&crate::junction::SpliceJunctionDb>,
-    max_transcripts_per_window: usize,
-    align_mates_gap_max: u64,
-    debug_name: &str,
-) -> Result<(Vec<WorkingTranscript>, SeedCluster, bool, Vec<u8>), Error> {
-    stitch_seeds_core(
-        cluster,
-        read_seq,
-        index,
-        scorer,
-        junction_db,
-        max_transcripts_per_window,
-        align_mates_gap_max,
-        debug_name,
-    )
-}
 
 /// Shared core: preprocessing + recursive stitcher, returns working transcripts + context.
 #[allow(clippy::too_many_arguments)]
@@ -2777,182 +2750,7 @@ fn stitch_seeds_core(
     ))
 }
 
-/// Find the index of the first exon with mate_id=1 (mate2) in a joint PE transcript.
-///
-/// Returns `Some(idx)` only when both mate0 and mate1 exons exist in `wt`.
-/// Returns `None` for SE transcripts (all mate_id=2) or single-mate clusters.
-pub(crate) fn find_mate_boundary(wt: &WorkingTranscript) -> Option<usize> {
-    let has_mate0 = wt.exons.iter().any(|e| e.mate_id == 0);
-    let has_mate1 = wt.exons.iter().any(|e| e.mate_id == 1);
-    if !has_mate0 || !has_mate1 {
-        return None;
-    }
-    wt.exons.iter().position(|e| e.mate_id == 1)
-}
 
-/// Split a joint PE WorkingTranscript at the mate boundary.
-///
-/// Exon read coordinates for mate2 are adjusted by `-(len1 + spacer_len)` to map back
-/// into mate2-local read space (0..len2). Genome coordinates are unchanged.
-///
-/// Returns `None` if the split produces invalid exon coordinates (e.g. mate2 exons
-/// with read positions below the spacer boundary, indicating the WT was built from
-/// combined-read seeds that don't cleanly separate at the mate boundary).
-pub(crate) fn split_working_transcript(
-    wt: &WorkingTranscript,
-    boundary_idx: usize,
-    len1: usize,
-    spacer_len: usize,
-) -> Option<(WorkingTranscript, WorkingTranscript)> {
-    let offset = len1 + spacer_len;
-
-    let mate1_exons: Vec<ExonBlock> = wt.exons[..boundary_idx].to_vec();
-
-    // Validate mate1 exons: read positions must be within [0, len1)
-    for e in &wt.exons[..boundary_idx] {
-        if e.read_end > len1 {
-            return None;
-        }
-    }
-
-    // Validate mate2 exons: read_start >= offset (no underflow after adjustment)
-    for e in &wt.exons[boundary_idx..] {
-        if e.read_start < offset {
-            return None;
-        }
-    }
-
-    let mate2_exons: Vec<ExonBlock> = wt.exons[boundary_idx..]
-        .iter()
-        .map(|e| ExonBlock {
-            read_start: e.read_start - offset,
-            read_end: e.read_end.saturating_sub(offset),
-            genome_start: e.genome_start,
-            genome_end: e.genome_end,
-            mate_id: e.mate_id,
-        })
-        .collect();
-
-    // Compute per-mate scores from exon lengths (scoreMatch=1 per matched base).
-    // Copying wt.score (the full joint score) to both halves inflates each half's score
-    // by the other mate's contribution, causing low-quality joint pairs (e.g., those with
-    // a spurious short anchor seed) to outscore correct pairs after the log-gap penalty.
-    // Using Σ(exon_length) correctly attributes each matched base to the mate that produced it.
-    // Gap-fill scores between seeds are omitted (small, typically 0 for canonical junctions).
-    let wt1_score: i32 = mate1_exons
-        .iter()
-        .map(|e| (e.read_end - e.read_start) as i32)
-        .sum();
-    let wt2_score: i32 = mate2_exons
-        .iter()
-        .map(|e| (e.read_end - e.read_start) as i32)
-        .sum();
-
-    // Split junction data at the mate boundary.
-    // Junction entries record only SPLICE JUNCTIONS (del >= alignIntronMin); the inter-mate
-    // gap (mate boundary) does NOT produce an entry. So we cannot derive the split index by
-    // counting exon pairs — the mate boundary "consumes" an exon pair slot but no junction slot.
-    //
-    // Correct split: wt1 (first part) gets junctions [0, wt1_junc_end), and wt2 (second part)
-    // gets junctions [wt1_junc_end, n_junctions). Using wt1_junc_end as the start for wt2 ensures
-    // no junctions are lost or duplicated regardless of where the mate boundary falls.
-    //
-    // wt1_junc_end = min(boundary_idx - 1, n_junctions): the first part has at most boundary_idx-1
-    // consecutive exon pairs (capped at total junctions), each potentially a splice junction.
-    let n_junctions = wt.junction_motifs.len();
-    let wt1_junc_end = boundary_idx.saturating_sub(1).min(n_junctions);
-    let wt2_junc_start = wt1_junc_end;
-    let wt1_junction_motifs = wt.junction_motifs[..wt1_junc_end].to_vec();
-    let wt1_junction_annotated = wt.junction_annotated[..wt1_junc_end].to_vec();
-    let wt1_junction_shifts = wt.junction_shifts[..wt1_junc_end].to_vec();
-    let wt2_junction_motifs = wt.junction_motifs[wt2_junc_start..].to_vec();
-    let wt2_junction_annotated = wt.junction_annotated[wt2_junc_start..].to_vec();
-    let wt2_junction_shifts = wt.junction_shifts[wt2_junc_start..].to_vec();
-
-    let wt1 = WorkingTranscript {
-        read_start: mate1_exons.first().map(|e| e.read_start).unwrap_or(0),
-        read_end: mate1_exons.last().map(|e| e.read_end).unwrap_or(0),
-        genome_start: mate1_exons.first().map(|e| e.genome_start).unwrap_or(0),
-        genome_end: mate1_exons.last().map(|e| e.genome_end).unwrap_or(0),
-        exons: mate1_exons,
-        score: wt1_score,
-        n_mismatch: wt.n_mismatch,
-        n_gap: wt.n_gap,
-        n_junction: wt1_junction_motifs.len() as u32,
-        junction_motifs: wt1_junction_motifs,
-        junction_annotated: wt1_junction_annotated,
-        junction_shifts: wt1_junction_shifts,
-        n_anchor: wt.n_anchor,
-    };
-
-    let wt2 = WorkingTranscript {
-        read_start: mate2_exons.first().map(|e| e.read_start).unwrap_or(0),
-        read_end: mate2_exons.last().map(|e| e.read_end).unwrap_or(0),
-        genome_start: mate2_exons.first().map(|e| e.genome_start).unwrap_or(0),
-        genome_end: mate2_exons.last().map(|e| e.genome_end).unwrap_or(0),
-        exons: mate2_exons,
-        score: wt2_score,
-        n_mismatch: wt.n_mismatch,
-        n_gap: wt.n_gap,
-        n_junction: wt2_junction_motifs.len() as u32,
-        junction_motifs: wt2_junction_motifs,
-        junction_annotated: wt2_junction_annotated,
-        junction_shifts: wt2_junction_shifts,
-        n_anchor: wt.n_anchor,
-    };
-
-    Some((wt1, wt2))
-}
-
-/// Shift mate2-only WorkingTranscript read coords from combined-read space to mate2-local space.
-/// Combined-read positions [len1+spacer_len, ...) become [0, len2).
-/// Returns None if any exon's read_start < offset (invalid / would underflow).
-pub(crate) fn adjust_mate2_coords(
-    wt: &WorkingTranscript,
-    len1: usize,
-    spacer_len: usize,
-) -> Option<WorkingTranscript> {
-    let offset = len1 + spacer_len;
-    for e in &wt.exons {
-        if e.read_start < offset {
-            return None;
-        }
-    }
-    let mut adjusted = wt.clone();
-    for e in &mut adjusted.exons {
-        e.read_start -= offset;
-        e.read_end -= offset;
-    }
-    Some(adjusted)
-}
-
-/// Adjust read coordinates of a WorkingTranscript by subtracting `offset`.
-///
-/// Used to convert a single-mate-2 WorkingTranscript from combined-read space
-/// (positions len1+spacer_len .. len1+spacer_len+len2) to mate2-local space (0..len2).
-#[allow(dead_code)]
-pub(crate) fn adjust_wt_read_coords(wt: &WorkingTranscript, offset: usize) -> WorkingTranscript {
-    let adjusted_exons: Vec<ExonBlock> = wt
-        .exons
-        .iter()
-        .map(|e| ExonBlock {
-            read_start: e.read_start.saturating_sub(offset),
-            read_end: e.read_end.saturating_sub(offset),
-            genome_start: e.genome_start,
-            genome_end: e.genome_end,
-            mate_id: e.mate_id,
-        })
-        .collect();
-
-    WorkingTranscript {
-        read_start: wt.read_start.saturating_sub(offset),
-        read_end: wt.read_end.saturating_sub(offset),
-        genome_start: wt.genome_start,
-        genome_end: wt.genome_end,
-        exons: adjusted_exons,
-        ..wt.clone()
-    }
-}
 
 #[cfg(test)]
 mod tests {

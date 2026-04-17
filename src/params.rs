@@ -531,6 +531,12 @@ pub struct Parameters {
     #[arg(long = "sjdbScore", default_value_t = 2)]
     pub sjdb_score: i32,
 
+    // ── Quantification ──────────────────────────────────────────────────
+    /// Quantification mode(s): GeneCounts, TranscriptomeSAM, or empty for none.
+    /// Space-separated, e.g. `--quantMode GeneCounts`.
+    #[arg(long = "quantMode", num_args = 0..)]
+    pub quant_mode: Vec<String>,
+
     // ── Two-pass ────────────────────────────────────────────────────────
     /// Two-pass mode: None or Basic
     #[arg(long = "twopassMode", default_value = "None")]
@@ -701,7 +707,19 @@ impl Parameters {
             ));
         }
 
+        // quantMode GeneCounts requires a GTF file
+        if self.quant_gene_counts() && self.sjdb_gtf_file.is_none() {
+            return Err(crate::error::Error::Parameter(
+                "--quantMode GeneCounts requires --sjdbGTFfile".into(),
+            ));
+        }
+
         Ok(())
+    }
+
+    /// Returns true if `--quantMode GeneCounts` was requested.
+    pub fn quant_gene_counts(&self) -> bool {
+        self.quant_mode.iter().any(|m| m == "GeneCounts")
     }
 }
 

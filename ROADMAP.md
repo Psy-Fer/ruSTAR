@@ -23,6 +23,8 @@ Phase 1 (CLI) ✅
                                                                    └→ Phase 16.PE1-PE3 (recursive stitcher, PE joint DP, PE arch refactor) ✅
                                                                         └→ Phase 16.14 (Nstart fix, 99.5% pos) ✅
                                                                              └→ Phase 16.26-16.29 (SA range fix, rev-strand fix, extendAlign fix, STITCH-SJ fix) ✅
+                                                                                  └→ Phase 17.A (scoreSeedBest pre-extension on WA entries) ✅
+                                                                                       └→ Phase 17.B (per-mate seeding) [planned]
                                                               └→ Phase 17.1 (Log.final.out) ✅
                                                                    └→ Phase 17.2+ (features + polish)
                                                               └→ Phase 14 (STARsolo) [DEFERRED]
@@ -52,7 +54,7 @@ Paired-end (Phase 8) builds on threaded infrastructure. GTF/junctions (Phase 7) 
 | [13](docs/phase13_accuracy.md) | Performance + Accuracy | ✅ | 205 | 94.5% pos, 97.8% CIGAR, 2.1% splice |
 | [15](docs/phase15_sam_tags.md) | SAM Tags + PE Fix | ✅ | 235 | NH/HI/AS/NM/nM/XS/jM/jI/MD, PE fix |
 | [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: **8796/8926 (0 STAR-only)**, 2.2% splice, **MAPQ 100%**; PE: **8390/8390 (0 gap)**, 99.0% per-mate pos, 98.9% CIGAR, **4 MAPQ inflations**, 0 deflations; faithfulness: SE 98.5%+, PE 98.903%, SJ 96.97% (Phase 16.50) |
-| [17](docs/phase17_features.md) | Features + Polish | ✅* | 268 | Log.final.out, clippy cleanup, sorted BAM planned |
+| [17](docs/phase17_features.md) | Features + Polish | ✅* | 268 | Log.final.out, clippy cleanup, scoreSeedBest pre-ext (17.A); per-mate seeding (17.B) planned |
 | 14 | STARsolo | DEFERRED | — | Waiting for accuracy parity |
 
 *Partially complete — see linked docs for sub-phase status.
@@ -197,7 +199,7 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 
 **Adjusted SE summary (post Phase 16.29)**: 99.7% position agreement, 99.9% CIGAR, 2.2% splice rate (= STAR), 99.9% MAPQ, 26 actionable disagreements, 1 STAR-only / 1 ruSTAR-only. MAPQ inflation: 4 reads, MAPQ deflation: 4 reads.
 
-**PE parity (10k yeast pairs, 150 bp, post Phase 16.48):**
+**PE parity (10k yeast pairs, 150 bp, post Phase 17.C):**
 
 | Metric | ruSTAR | STAR |
 |--------|--------|------|
@@ -206,10 +208,10 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 | Net gap | **0 (exact match)** | — |
 | Per-mate position agreement | **99.0%** | — |
 | Per-mate CIGAR agreement | **98.9%** | — |
-| Faithfulness (pos+CIGAR+MAPQ+proper+NH) | **98.891%** | — |
+| Faithfulness (pos+CIGAR+MAPQ+proper+NH) | **98.915%** | — |
 | ruSTAR-only false positives | 2 | — |
 | STAR-only missed | 2 | — |
-| MAPQ inflations | 6 (rDNA/repeat) | — |
+| MAPQ inflations | **0** | — |
 | MAPQ deflations | **0** | — |
 
 **PE implementation path (summary):**
@@ -234,6 +236,7 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 - 16.47: PE mate2-subset dedup mate1.genome_end guard; 2→0 MAPQ deflations
 - 16.48: STAR-faithful TLEN formula; 808→38 TLEN diffs
 - D5: `pe_junctions_consistent` check wired into joint paths
+- 17.C: STAR-faithful SCORE-GATE + mappedFilter: relax per-WT threshold by `outFilterMultimapScoreRange`; apply absolute quality check to trBest only → **0 MAPQ inflations**
 
 **Position disagreement reclassification (2026-04-01):**
 
@@ -244,7 +247,7 @@ All 127 SE position disagreements (100 diff-chr + 27 same-chr) verified as **gen
 | Issue | Count | Difficulty |
 |-------|-------|------------|
 | SE CIGAR insertion placement | 1 | Hard — `ERR12389696.13573895` (AS=133 both, same pos, homopolymer seed-level tie) |
-| PE MAPQ inflation | 6 | Hard — root cause: STAR uses bin-only window key; ruSTAR uses (strand,bin). Architectural fix required (Phase 17+). |
+| PE NH diff (`.7118031`) | 1 pair | NH=6 vs STAR's 9 (both MAPQ=0, no MAPQ impact) — cross-copy pairs with larger penalty gap |
 | PE ruSTAR-only FPs | 2 | TBD — `.17779410` (616kb spurious intron), `.6302610` |
 | PE STAR-only | 2 | TBD — `.18919121`, `.6302610` |
 

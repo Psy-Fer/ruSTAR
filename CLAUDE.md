@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**268 tests passing, 0 clippy warnings.** SE: 8796/8926 compare_sam.py (98.5%), 2.2% splice rate (STAR: 2.2%), 66 shared junctions, **100.0% MAPQ agreement, MAPQ inflation: 0, deflation: 0**. 127 position disagreements (ALL verified as genuine ties). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **0 STAR-only / 0 ruSTAR-only SE reads**. PE: **8390/8390 both-mapped (0 gap, exact STAR match)**, 0 half-mapped, **4 MAPQ inflations** (rDNA/repeat secondary loci), **98.903% PE faithfulness** (Phase 16.50). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**274 tests passing, 0 clippy warnings.** SE: 8796/8926 compare_sam.py (98.5%), 2.2% splice rate (STAR: 2.2%), 66 shared junctions, **100.0% MAPQ agreement, MAPQ inflation: 0, deflation: 0**. 127 position disagreements (ALL verified as genuine ties). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **0 STAR-only / 0 ruSTAR-only SE reads**. PE: **8390/8390 both-mapped (0 gap, exact STAR match)**, 0 half-mapped, **0 MAPQ inflations** (fixed Phase 17.C), **98.915% PE faithfulness** (Phase 17.C). Phase 17.A complete: `scoreSeedBest` pre-extension stored as `pre_ext_score` on each `WindowAlignment`. Phase 17.C complete: STAR-faithful SCORE-GATE + STAR-faithful `mappedFilter`. Phase 17.8 complete: `--quantMode GeneCounts` outputs `ReadsPerGene.out.tab` with 3 independent counting passes; 0 col1 gene disagreements vs STAR on 10k SE yeast. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -69,6 +69,8 @@ src/
     mod.rs         -- GTF parsing, junction database, motif detection, two-pass filtering
     sj_output.rs   -- SJ.out.tab writer
     gtf.rs         -- GTF parser (internal)
+  quant/
+    mod.rs         -- Gene-level read counting (--quantMode GeneCounts, ReadsPerGene.out.tab)
   chimeric/
     mod.rs         -- Module exports
     detect.rs      -- Chimeric detection (Tier 1: soft-clip, Tier 2: multi-cluster)
@@ -171,8 +173,8 @@ See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
 
 - No coordinate-sorted BAM output (use `samtools sort`) — Phase 17.2
 - No PE chimeric detection — Phase 17.3
-- No `--quantMode GeneCounts` — Phase 17.8
 - No `--outStd SAM/BAM` (stdout output) — Phase 17.6
+- No `--outReadsUnmapped Fastx` — Phase 17.4
 - No STARsolo single-cell features — Phase 14 (deferred)
 
 See [docs/phase17_features.md](docs/phase17_features.md) for full feature status.

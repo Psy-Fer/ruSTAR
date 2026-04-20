@@ -15,7 +15,10 @@ use noodles::sam::alignment::record::data::field::Tag;
 use noodles::sam::alignment::record_buf::data::field::Value;
 use noodles::sam::alignment::record_buf::data::field::value::Array;
 use noodles::sam::alignment::record_buf::{QualityScores, RecordBuf, Sequence};
-use noodles::sam::header::record::value::{Map, map::Program};
+use noodles::sam::header::record::value::{
+    Map,
+    map::{Program, ReadGroup, tag::Other as HeaderOtherTag},
+};
 use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 use std::fs::File;
@@ -104,9 +107,11 @@ impl SamWriter {
         if params.out_sam_strand_field != "intronMotif" {
             attrs.remove("XS");
         }
+        let rg_id_owned = params.primary_rg_id()?;
+        let rg_id = rg_id_owned.as_deref();
 
         for (hit_index, transcript) in transcripts.iter().take(max_output).enumerate() {
-            let record = transcript_to_record(
+            let mut record = transcript_to_record(
                 transcript,
                 read_name,
                 read_seq,
@@ -117,27 +122,11 @@ impl SamWriter {
                 hit_index + 1, // 1-based
                 &attrs,
             )?;
+            maybe_insert_rg_tag(&mut record, rg_id);
 
             self.writer.write_alignment_record(&self.header, &record)?;
         }
 
-        Ok(())
-    }
-
-    /// Write unmapped read
-    ///
-    /// # Arguments
-    /// * `read_name` - Read identifier
-    /// * `read_seq` - Read sequence (encoded)
-    /// * `read_qual` - Quality scores
-    pub fn write_unmapped(
-        &mut self,
-        read_name: &str,
-        read_seq: &[u8],
-        read_qual: &[u8],
-    ) -> Result<(), Error> {
-        let record = Self::build_unmapped_record(read_name, read_seq, read_qual)?;
-        self.writer.write_alignment_record(&self.header, &record)?;
         Ok(())
     }
 
@@ -185,10 +174,12 @@ impl SamWriter {
     /// * `read_name` - Read identifier
     /// * `read_seq` - Read sequence (encoded)
     /// * `read_qual` - Quality scores
+    /// * `rg_id` - Optional read group ID to emit as `RG:Z:<id>` tag
     pub fn build_unmapped_record(
         read_name: &str,
         read_seq: &[u8],
         read_qual: &[u8],
+        rg_id: Option<&str>,
     ) -> Result<RecordBuf, Error> {
         let mut record = RecordBuf::default();
 
@@ -205,6 +196,8 @@ impl SamWriter {
 
         // Quality scores
         *record.quality_scores_mut() = QualityScores::from(read_qual.to_vec());
+
+        maybe_insert_rg_tag(&mut record, rg_id);
 
         Ok(record)
     }
@@ -243,10 +236,12 @@ impl SamWriter {
         if params.out_sam_strand_field != "intronMotif" {
             attrs.remove("XS");
         }
+        let rg_id_owned = params.primary_rg_id()?;
+        let rg_id = rg_id_owned.as_deref();
 
         let mut records = Vec::with_capacity(max_output);
         for (hit_index, transcript) in transcripts.iter().take(max_output).enumerate() {
-            let record = transcript_to_record(
+            let mut record = transcript_to_record(
                 transcript,
                 read_name,
                 read_seq,
@@ -257,6 +252,7 @@ impl SamWriter {
                 hit_index + 1, // 1-based
                 &attrs,
             )?;
+            maybe_insert_rg_tag(&mut record, rg_id);
             records.push(record);
         }
 
@@ -291,7 +287,7 @@ impl SamWriter {
         if paired_alignments.is_empty() {
             // Both mates unmapped
             return Self::build_paired_unmapped_records(
-                read_name, mate1_seq, mate1_qual, mate2_seq, mate2_qual,
+                read_name, mate1_seq, mate1_qual, mate2_seq, mate2_qual, params,
             );
         }
 
@@ -307,6 +303,8 @@ impl SamWriter {
         if params.out_sam_strand_field != "intronMotif" {
             attrs.remove("XS");
         }
+        let rg_id_owned = params.primary_rg_id()?;
+        let rg_id = rg_id_owned.as_deref();
 
         let mut records = Vec::with_capacity(max_output * 2);
 
@@ -317,7 +315,7 @@ impl SamWriter {
             let combined_score = paired_aln.combined_wt_score;
 
             // Create record for mate1 (this=mate1, mate=mate2)
-            let rec1 = build_paired_mate_record(
+            let mut rec1 = build_paired_mate_record(
                 read_name,
                 mate1_seq,
                 mate1_qual,
@@ -333,10 +331,11 @@ impl SamWriter {
                 combined_score,
                 &attrs,
             )?;
+            maybe_insert_rg_tag(&mut rec1, rg_id);
             records.push(rec1);
 
             // Create record for mate2 (this=mate2, mate=mate1)
-            let rec2 = build_paired_mate_record(
+            let mut rec2 = build_paired_mate_record(
                 read_name,
                 mate2_seq,
                 mate2_qual,
@@ -352,6 +351,7 @@ impl SamWriter {
                 combined_score,
                 &attrs,
             )?;
+            maybe_insert_rg_tag(&mut rec2, rg_id);
             records.push(rec2);
         }
 
@@ -389,6 +389,8 @@ impl SamWriter {
         if params.out_sam_strand_field != "intronMotif" {
             attrs.remove("XS");
         }
+        let rg_id_owned = params.primary_rg_id()?;
+        let rg_id = rg_id_owned.as_deref();
 
         // Compute mapped mate's per-chr position for co-location
         let chr_start = genome.chr_start[mapped_transcript.chr_idx];
@@ -491,6 +493,7 @@ impl SamWriter {
             );
             data.insert(Tag::new(b'M', b'D'), Value::String(BString::from(md)));
         }
+        maybe_insert_rg_tag(&mut mapped_rec, rg_id);
 
         // --- Build unmapped mate record ---
         let mut unmapped_rec = RecordBuf::default();
@@ -530,6 +533,7 @@ impl SamWriter {
         let unmapped_seq_bytes: Vec<u8> = unmapped_seq.iter().map(|&b| decode_base(b)).collect();
         *unmapped_rec.sequence_mut() = Sequence::from(unmapped_seq_bytes);
         *unmapped_rec.quality_scores_mut() = QualityScores::from(unmapped_qual.to_vec());
+        maybe_insert_rg_tag(&mut unmapped_rec, rg_id);
 
         // Order: mate1 first, mate2 second
         if mate1_is_mapped {
@@ -550,8 +554,11 @@ impl SamWriter {
         mate1_qual: &[u8],
         mate2_seq: &[u8],
         mate2_qual: &[u8],
+        params: &Parameters,
     ) -> Result<Vec<RecordBuf>, Error> {
         let mut records = Vec::with_capacity(2);
+        let rg_id_owned = params.primary_rg_id()?;
+        let rg_id = rg_id_owned.as_deref();
 
         // Mate1 record
         let mut rec1 = RecordBuf::default();
@@ -567,6 +574,7 @@ impl SamWriter {
         let seq1_bytes: Vec<u8> = mate1_seq.iter().map(|&b| decode_base(b)).collect();
         *rec1.sequence_mut() = Sequence::from(seq1_bytes);
         *rec1.quality_scores_mut() = QualityScores::from(mate1_qual.to_vec());
+        maybe_insert_rg_tag(&mut rec1, rg_id);
         records.push(rec1);
 
         // Mate2 record
@@ -583,6 +591,7 @@ impl SamWriter {
         let seq2_bytes: Vec<u8> = mate2_seq.iter().map(|&b| decode_base(b)).collect();
         *rec2.sequence_mut() = Sequence::from(seq2_bytes);
         *rec2.quality_scores_mut() = QualityScores::from(mate2_qual.to_vec());
+        maybe_insert_rg_tag(&mut rec2, rg_id);
         records.push(rec2);
 
         Ok(records)
@@ -590,7 +599,7 @@ impl SamWriter {
 }
 
 /// Build paired SAM header from genome
-pub fn build_sam_header(genome: &Genome, _params: &Parameters) -> Result<sam::Header, Error> {
+pub fn build_sam_header(genome: &Genome, params: &Parameters) -> Result<sam::Header, Error> {
     let mut builder = sam::Header::builder();
 
     // @HD line (default version and unsorted)
@@ -610,10 +619,52 @@ pub fn build_sam_header(genome: &Genome, _params: &Parameters) -> Result<sam::He
         );
     }
 
+    // @RG lines from --outSAMattrRGline. When multiple input files share the
+    // same RG ID, only emit one @RG line.
+    let rg_lines = params.parsed_rg_lines()?;
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    for line in &rg_lines {
+        let mut fields = line.split('\t');
+        let id = fields
+            .next()
+            .and_then(|f| f.strip_prefix("ID:"))
+            .ok_or_else(|| Error::Parameter(format!("malformed RG line '{}'", line)))?;
+        if !seen_ids.insert(id.to_string()) {
+            continue;
+        }
+        let mut map = Map::<ReadGroup>::default();
+        for field in fields {
+            if field.len() < 3 || &field[2..3] != ":" {
+                return Err(Error::Parameter(format!(
+                    "RG field '{}' is not TAG:value",
+                    field
+                )));
+            }
+            let tag_bytes: [u8; 2] = field.as_bytes()[..2].try_into().unwrap();
+            let other_tag: HeaderOtherTag<_> =
+                HeaderOtherTag::try_from(tag_bytes).map_err(|e| {
+                    Error::Parameter(format!("invalid RG tag '{}': {}", &field[..2], e))
+                })?;
+            map.other_fields_mut().insert(other_tag, field[3..].into());
+        }
+        builder = builder.add_read_group(id, map);
+    }
+
     // @PG line
     builder = builder.add_program("ruSTAR", Map::<Program>::default());
 
     Ok(builder.build())
+}
+
+/// Insert `RG:Z:<id>` on the record when an ID is set. `sam_attribute_set()`
+/// auto-adds `RG` to the attribute set whenever an RG line is configured, so
+/// `rg_id.is_some()` implies the attribute is wanted — no extra gate needed.
+fn maybe_insert_rg_tag(record: &mut RecordBuf, rg_id: Option<&str>) {
+    if let Some(id) = rg_id {
+        record
+            .data_mut()
+            .insert(Tag::READ_GROUP, Value::String(BString::from(id)));
+    }
 }
 
 /// Convert Transcript to SAM record
@@ -1130,6 +1181,99 @@ mod tests {
     }
 
     #[test]
+    fn test_build_sam_header_with_rg() {
+        let genome = make_test_genome();
+        let params = Parameters::parse_from(vec![
+            "ruSTAR",
+            "--readFilesIn",
+            "test.fq",
+            "--outSAMattrRGline",
+            "ID:rg0",
+            "SM:sample0",
+            "LB:lib0",
+        ]);
+        let header = build_sam_header(&genome, &params).unwrap();
+        let rgs = header.read_groups();
+        assert_eq!(rgs.len(), 1);
+        assert!(rgs.contains_key(&b"rg0"[..]));
+        let map = rgs.get(&b"rg0"[..]).unwrap();
+        // SM and LB should be present as other_fields
+        let sm_tag = HeaderOtherTag::<_>::try_from([b'S', b'M']).unwrap();
+        let lb_tag = HeaderOtherTag::<_>::try_from([b'L', b'B']).unwrap();
+        let sm: &[u8] = map.other_fields().get(&sm_tag).unwrap().as_ref();
+        let lb: &[u8] = map.other_fields().get(&lb_tag).unwrap().as_ref();
+        assert_eq!(sm, b"sample0");
+        assert_eq!(lb, b"lib0");
+    }
+
+    #[test]
+    fn test_sam_output_includes_rg_header_and_tag() {
+        use crate::align::transcript::Exon;
+        use std::io::Read;
+
+        let genome = make_test_genome();
+        let params = Parameters::parse_from(vec![
+            "ruSTAR",
+            "--readFilesIn",
+            "test.fq",
+            "--outSAMattrRGline",
+            "ID:rg0",
+            "SM:sample0",
+        ]);
+
+        let tmpfile = NamedTempFile::new().unwrap();
+        let mut writer = SamWriter::create(tmpfile.path(), &genome, &params).unwrap();
+
+        let transcript = Transcript {
+            chr_idx: 0,
+            genome_start: 0,
+            genome_end: 4,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: 0,
+                genome_end: 4,
+                read_start: 0,
+                read_end: 4,
+            }],
+            cigar: vec![CigarOp::Match(4)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![0, 1, 2, 3],
+        };
+
+        writer
+            .write_alignment(
+                "read1",
+                &[0, 1, 2, 3],
+                &[30, 30, 30, 30],
+                &[transcript],
+                &genome,
+                &params,
+                1,
+            )
+            .unwrap();
+        drop(writer);
+
+        let mut contents = String::new();
+        std::fs::File::open(tmpfile.path())
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        assert!(
+            contents.contains("@RG\tID:rg0\tSM:sample0"),
+            "missing @RG header; got:\n{contents}"
+        );
+        assert!(
+            contents.contains("RG:Z:rg0"),
+            "missing RG:Z tag on record; got:\n{contents}"
+        );
+    }
+
+    #[test]
     fn test_sam_writer_creation() {
         let genome = make_test_genome();
         let params = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "test.fq"]);
@@ -1137,21 +1281,6 @@ mod tests {
         let tmpfile = NamedTempFile::new().unwrap();
         let writer = SamWriter::create(tmpfile.path(), &genome, &params);
         assert!(writer.is_ok());
-    }
-
-    #[test]
-    fn test_write_unmapped() {
-        let genome = make_test_genome();
-        let params = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "test.fq"]);
-
-        let tmpfile = NamedTempFile::new().unwrap();
-        let mut writer = SamWriter::create(tmpfile.path(), &genome, &params).unwrap();
-
-        let read_seq = vec![0, 1, 2, 3]; // ACGT
-        let read_qual = vec![30, 30, 30, 30];
-
-        let result = writer.write_unmapped("read1", &read_seq, &read_qual);
-        assert!(result.is_ok());
     }
 
     #[test]
@@ -1207,6 +1336,7 @@ mod tests {
         let mate1_qual = vec![30, 30, 30, 30];
         let mate2_seq = vec![3, 2, 1, 0]; // TGCA
         let mate2_qual = vec![30, 30, 30, 30];
+        let params = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "t.fq"]);
 
         let records = SamWriter::build_paired_unmapped_records(
             "read1",
@@ -1214,6 +1344,7 @@ mod tests {
             &mate1_qual,
             &mate2_seq,
             &mate2_qual,
+            &params,
         )
         .unwrap();
 

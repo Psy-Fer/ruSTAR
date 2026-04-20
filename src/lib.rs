@@ -517,6 +517,7 @@ fn align_reads_single_end<W: AlignmentWriter>(
     let max_multimaps = params.out_filter_multimap_nmax as usize;
     let output_unmapped = params.out_sam_unmapped != params::OutSamUnmapped::None;
     let by_sjout = params.out_filter_type == OutFilterType::BySJout;
+    let rg_id_owned = params.primary_rg_id()?;
 
     // Buffer for BySJout mode: accumulate all results before filtering
     let mut bysj_buffer: Vec<AlignmentBatchResults> = Vec::new();
@@ -576,6 +577,7 @@ fn align_reads_single_end<W: AlignmentWriter>(
                             &read.name,
                             &clipped_seq,
                             &clipped_qual,
+                            rg_id_owned.as_deref(),
                         )?;
                         buffer.push(record);
                     }
@@ -643,6 +645,7 @@ fn align_reads_single_end<W: AlignmentWriter>(
                             &read.name,
                             &clipped_seq,
                             &clipped_qual,
+                            rg_id_owned.as_deref(),
                         )?;
                         buffer.push(record);
                     }
@@ -893,6 +896,7 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                             &m1_qual,
                             &m2_seq,
                             &m2_qual,
+                            params,
                         )?;
                         for record in records {
                             buffer.push(record);
@@ -1030,6 +1034,7 @@ fn align_reads_paired_end<W: AlignmentWriter>(
                             &m1_qual,
                             &m2_seq,
                             &m2_qual,
+                            params,
                         )?;
                         for record in records {
                             buffer.push(record);

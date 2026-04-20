@@ -306,6 +306,12 @@ pub struct Parameters {
     #[arg(long = "outSAMattributes", num_args = 1.., default_values_t = vec!["Standard".to_string()])]
     pub out_sam_attributes: Vec<String>,
 
+    /// Read group line(s) for the `@RG` SAM header. Space-separated fields;
+    /// a bare `,` separates multiple RG blocks. Each block must start with `ID:`.
+    /// Default `-` means no `@RG` line (matches STAR).
+    #[arg(long = "outSAMattrRGline", num_args = 1.., default_values_t = vec!["-".to_string()])]
+    pub out_sam_attr_rg_line: Vec<String>,
+
     /// Unmapped reads in SAM output: None or Within
     #[arg(long = "outSAMunmapped", default_value = "None")]
     pub out_sam_unmapped: OutSamUnmapped,
@@ -606,8 +612,11 @@ impl Parameters {
     /// - `"All"`      → {NH, HI, AS, NM, nM, MD, jM, jI, XS}
     /// - `"None"`     → {} (empty)
     /// - Explicit list (e.g. ["NH", "AS"]) → collected as-is
+    ///
+    /// `RG` is auto-appended when `--outSAMattrRGline` is set (STAR behavior,
+    /// `Parameters_samAttributes.cpp:201`).
     pub fn sam_attribute_set(&self) -> HashSet<String> {
-        match self
+        let mut attrs: HashSet<String> = match self
             .out_sam_attributes
             .iter()
             .map(String::as_str)
@@ -624,6 +633,83 @@ impl Parameters {
                 .collect(),
             ["None"] => HashSet::new(),
             tags => tags.iter().map(|s| s.to_string()).collect(),
+        };
+        if self.rg_line_set() {
+            attrs.insert("RG".to_string());
+        }
+        attrs
+    }
+
+    /// True if the user provided a non-default `--outSAMattrRGline`.
+    pub fn rg_line_set(&self) -> bool {
+        !self.out_sam_attr_rg_line.is_empty() && self.out_sam_attr_rg_line[0] != "-"
+    }
+
+    /// Parse `--outSAMattrRGline` into one tab-joined body per `@RG` block.
+    ///
+    /// Mirrors `Parameters_readFilesInit.cpp:65-82`: tokens are split on bare
+    /// `,` separators, and each resulting block's first token must begin with
+    /// `ID:`. An empty block (adjacent commas or a trailing comma) is an error.
+    pub fn parsed_rg_lines(&self) -> Result<Vec<String>, crate::error::Error> {
+        if !self.rg_line_set() {
+            return Ok(Vec::new());
+        }
+        self.out_sam_attr_rg_line
+            .split(|tok| tok == ",")
+            .map(|block| {
+                let first = block.first().ok_or_else(|| {
+                    crate::error::Error::Parameter(
+                        "--outSAMattrRGline: empty RG block".into(),
+                    )
+                })?;
+                if !first.starts_with("ID:") {
+                    return Err(crate::error::Error::Parameter(format!(
+                        "--outSAMattrRGline: first field of each RG line must start with 'ID:', got '{}'",
+                        first
+                    )));
+                }
+                Ok(block.join("\t"))
+            })
+            .collect()
+    }
+
+    /// Read group ID emitted on SAM records (the first RG line's `ID:` value).
+    /// Returns `None` when no RG line is configured.
+    pub fn primary_rg_id(&self) -> Result<Option<String>, crate::error::Error> {
+        Ok(self.parsed_rg_lines()?.first().and_then(|body| {
+            body.split('\t')
+                .next()?
+                .strip_prefix("ID:")
+                .map(str::to_owned)
+        }))
+    }
+
+    /// Per-file read group ID, replicated from a single RG line if needed.
+    /// Returns empty vec when no RG line is set.
+    pub fn rg_ids(&self) -> Result<Vec<String>, crate::error::Error> {
+        let lines = self.parsed_rg_lines()?;
+        if lines.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<String> = lines
+            .iter()
+            .map(|body| {
+                let first = body.split('\t').next().unwrap_or("");
+                first.trim_start_matches("ID:").to_string()
+            })
+            .collect();
+        let n_files = self.read_files_in.len().max(1);
+        if ids.len() > 1 && ids.len() != n_files {
+            return Err(crate::error::Error::Parameter(format!(
+                "--outSAMattrRGline: {} RG entries does not match --readFilesIn count {} (must be 1 or N)",
+                ids.len(),
+                n_files
+            )));
+        }
+        if ids.len() == 1 {
+            Ok(vec![ids[0].clone(); n_files])
+        } else {
+            Ok(ids)
         }
     }
 
@@ -717,6 +803,18 @@ impl Parameters {
                 "--quantMode GeneCounts requires --sjdbGTFfile".into(),
             ));
         }
+
+        // Read group: `RG` in outSAMattributes without an RG line is a fatal
+        // error (STAR: Parameters_samAttributes.cpp:206). STAR's "All" preset
+        // does NOT include RG, so only match a literal "RG" token here. Also
+        // parse the RG line to validate its ID: prefix and per-file RG count.
+        let user_wants_rg_attr = self.out_sam_attributes.iter().any(|a| a == "RG");
+        if !self.rg_line_set() && user_wants_rg_attr {
+            return Err(crate::error::Error::Parameter(
+                "--outSAMattributes contains RG tag, but --outSAMattrRGline is not set".into(),
+            ));
+        }
+        self.rg_ids()?;
 
         Ok(())
     }
@@ -1003,6 +1101,98 @@ mod tests {
     }
 
     #[test]
+    fn rg_line_default_unset() {
+        let p = parse(&["--readFilesIn", "r.fq"]);
+        assert!(!p.rg_line_set());
+        assert_eq!(p.parsed_rg_lines().unwrap(), Vec::<String>::new());
+        assert_eq!(p.rg_ids().unwrap(), Vec::<String>::new());
+        assert!(!p.sam_attribute_set().contains("RG"));
+    }
+
+    #[test]
+    fn rg_line_single() {
+        let p = parse(&[
+            "--readFilesIn",
+            "r.fq",
+            "--outSAMattrRGline",
+            "ID:foo",
+            "SM:bar",
+            "LB:lib1",
+        ]);
+        assert!(p.rg_line_set());
+        assert_eq!(
+            p.parsed_rg_lines().unwrap(),
+            vec!["ID:foo\tSM:bar\tLB:lib1".to_string()]
+        );
+        assert_eq!(p.rg_ids().unwrap(), vec!["foo".to_string()]);
+        assert!(p.sam_attribute_set().contains("RG"));
+    }
+
+    #[test]
+    fn rg_line_multi() {
+        let p = parse(&[
+            "--readFilesIn",
+            "r1.fq",
+            "r2.fq",
+            "--outSAMattrRGline",
+            "ID:a",
+            "SM:a",
+            ",",
+            "ID:b",
+            "LB:x",
+        ]);
+        let lines = p.parsed_rg_lines().unwrap();
+        assert_eq!(
+            lines,
+            vec!["ID:a\tSM:a".to_string(), "ID:b\tLB:x".to_string()]
+        );
+        assert_eq!(p.rg_ids().unwrap(), vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn rg_line_single_replicates_for_multi_file() {
+        let p = parse(&[
+            "--readFilesIn",
+            "r1.fq",
+            "r2.fq",
+            "--outSAMattrRGline",
+            "ID:foo",
+        ]);
+        assert_eq!(
+            p.rg_ids().unwrap(),
+            vec!["foo".to_string(), "foo".to_string()]
+        );
+    }
+
+    #[test]
+    fn rg_line_missing_id_prefix_errors() {
+        let p = parse(&["--readFilesIn", "r.fq", "--outSAMattrRGline", "SM:oops"]);
+        let err = p.parsed_rg_lines().unwrap_err();
+        assert!(err.to_string().contains("ID:"));
+    }
+
+    #[test]
+    fn rg_line_count_mismatch_errors() {
+        // 1 input file, 2 RG entries — mismatch (ids.len()>1 && != n_files).
+        let p = parse(&[
+            "--readFilesIn",
+            "r1.fq",
+            "--outSAMattrRGline",
+            "ID:a",
+            ",",
+            "ID:b",
+        ]);
+        let err = p.rg_ids().unwrap_err();
+        assert!(err.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn validate_rg_attr_without_line_errors() {
+        let p = parse(&["--readFilesIn", "r.fq", "--outSAMattributes", "NH", "RG"]);
+        let err = p.validate().unwrap_err();
+        assert!(err.to_string().contains("RG"));
+    }
+    
     fn run_rng_seed_override() {
         let p = parse(&["--readFilesIn", "r.fq", "--runRNGseed", "42"]);
         assert_eq!(p.run_rng_seed, 42);

@@ -2407,7 +2407,6 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
     Ok(transcripts)
 }
 
-
 /// Shared core: preprocessing + recursive stitcher, returns working transcripts + context.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn stitch_seeds_core(
@@ -2749,8 +2748,6 @@ pub(crate) fn stitch_seeds_core(
         stitch_read_owned,
     ))
 }
-
-
 
 #[cfg(test)]
 mod tests {

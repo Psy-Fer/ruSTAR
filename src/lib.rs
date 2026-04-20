@@ -144,7 +144,10 @@ fn align_reads(params: &Parameters) -> anyhow::Result<()> {
     let quant_ctx: Option<std::sync::Arc<crate::quant::QuantContext>> =
         if params.quant_gene_counts() {
             let gtf_path = params.sjdb_gtf_file.as_ref().unwrap();
-            info!("quantMode GeneCounts: building gene annotation from {}", gtf_path.display());
+            info!(
+                "quantMode GeneCounts: building gene annotation from {}",
+                gtf_path.display()
+            );
             let ctx = crate::quant::QuantContext::build(gtf_path, &index.genome)?;
             Some(std::sync::Arc::new(ctx))
         } else {
@@ -223,8 +226,22 @@ fn run_single_pass(
 
             // Route to single-end or paired-end mode
             match params.read_files_in.len() {
-                1 => align_reads_single_end(params, index, &mut writer, &stats, &sj_stats, quant.as_ref()),
-                2 => align_reads_paired_end(params, index, &mut writer, &stats, &sj_stats, quant.as_ref()),
+                1 => align_reads_single_end(
+                    params,
+                    index,
+                    &mut writer,
+                    &stats,
+                    &sj_stats,
+                    quant.as_ref(),
+                ),
+                2 => align_reads_paired_end(
+                    params,
+                    index,
+                    &mut writer,
+                    &stats,
+                    &sj_stats,
+                    quant.as_ref(),
+                ),
                 n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
             }?;
         }
@@ -241,8 +258,22 @@ fn run_single_pass(
 
             // Route to single-end or paired-end mode (same functions as SAM, generic!)
             match params.read_files_in.len() {
-                1 => align_reads_single_end(params, index, &mut writer, &stats, &sj_stats, quant.as_ref()),
-                2 => align_reads_paired_end(params, index, &mut writer, &stats, &sj_stats, quant.as_ref()),
+                1 => align_reads_single_end(
+                    params,
+                    index,
+                    &mut writer,
+                    &stats,
+                    &sj_stats,
+                    quant.as_ref(),
+                ),
+                2 => align_reads_paired_end(
+                    params,
+                    index,
+                    &mut writer,
+                    &stats,
+                    &sj_stats,
+                    quant.as_ref(),
+                ),
                 n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
             }?;
 
@@ -345,8 +376,22 @@ fn run_pass1(
 
     // Align reads (single-end or paired-end); no quant counting in pass 1
     match params.read_files_in.len() {
-        1 => align_reads_single_end(&params_pass1, index, &mut null_writer, &stats, &sj_stats, None)?,
-        2 => align_reads_paired_end(&params_pass1, index, &mut null_writer, &stats, &sj_stats, None)?,
+        1 => align_reads_single_end(
+            &params_pass1,
+            index,
+            &mut null_writer,
+            &stats,
+            &sj_stats,
+            None,
+        )?,
+        2 => align_reads_paired_end(
+            &params_pass1,
+            index,
+            &mut null_writer,
+            &stats,
+            &sj_stats,
+            None,
+        )?,
         n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
     }
 
@@ -572,7 +617,8 @@ fn align_reads_single_end<W: AlignmentWriter>(
 
                 // Gene-level quantification (lock-free atomic counts)
                 if let Some(ref q) = quant {
-                    q.counts.count_se_read(&transcripts, n_for_mapq, &q.gene_ann);
+                    q.counts
+                        .count_se_read(&transcripts, n_for_mapq, &q.gene_ann);
                 }
 
                 // Record junction statistics

@@ -242,6 +242,10 @@ pub struct Parameters {
     #[arg(long = "runThreadN", default_value_t = 1)]
     pub run_thread_n: usize,
 
+    /// Random number generator seed for tie-breaking among equal-scoring alignments
+    #[arg(long = "runRNGseed", default_value_t = 777)]
+    pub run_rng_seed: u64,
+
     // ── Genome ──────────────────────────────────────────────────────────
     /// Path to genome index directory
     #[arg(long = "genomeDir", default_value = "./GenomeDir")]
@@ -743,6 +747,7 @@ mod tests {
         let p = parse(&["--readFilesIn", "reads.fq"]);
         assert_eq!(p.run_mode, RunMode::AlignReads);
         assert_eq!(p.run_thread_n, 1);
+        assert_eq!(p.run_rng_seed, 777);
         assert_eq!(p.genome_dir, PathBuf::from("./GenomeDir"));
         assert_eq!(p.genome_sa_index_nbases, 14);
         assert_eq!(p.genome_chr_bin_nbits, 18);
@@ -995,6 +1000,12 @@ mod tests {
             "5",
         ]);
         assert_eq!(p.win_bin_window_dist(), 81_920); // 2^14 * 5
+    }
+
+    #[test]
+    fn run_rng_seed_override() {
+        let p = parse(&["--readFilesIn", "r.fq", "--runRNGseed", "42"]);
+        assert_eq!(p.run_rng_seed, 42);
     }
 
     #[test]

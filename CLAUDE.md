@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**274 tests passing, 0 clippy warnings.** SE: 8796/8926 compare_sam.py (98.5%), 2.2% splice rate (STAR: 2.2%), 66 shared junctions, **100.0% MAPQ agreement, MAPQ inflation: 0, deflation: 0**. 127 position disagreements (ALL verified as genuine ties). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **0 STAR-only / 0 ruSTAR-only SE reads**. PE: **8390/8390 both-mapped (0 gap, exact STAR match)**, 0 half-mapped, **0 MAPQ inflations** (fixed Phase 17.C), **98.915% PE faithfulness** (Phase 17.C). Phase 17.A complete: `scoreSeedBest` pre-extension stored as `pre_ext_score` on each `WindowAlignment`. Phase 17.C complete: STAR-faithful SCORE-GATE + STAR-faithful `mappedFilter`. Phase 17.8 complete: `--quantMode GeneCounts` outputs `ReadsPerGene.out.tab` with 3 independent counting passes; 0 col1 gene disagreements vs STAR on 10k SE yeast. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**278 tests passing, 0 clippy warnings.** SE: 8796/8926 compare_sam.py (98.5%), 2.2% splice rate (STAR: 2.2%), 66 shared junctions, **100.0% MAPQ agreement, MAPQ inflation: 0, deflation: 0**. 127 position disagreements (ALL verified as genuine ties). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **0 STAR-only / 0 ruSTAR-only SE reads**. PE: **8767 both-mapped** (STAR: 8390), **236 half-mapped** (new behavior), 28 MAPQ inflations / 192 deflations (rDNA N² problem), **98.2% per-mate position agreement**, **93.920% PE exact faithfulness** (pos+CIGAR+MAPQ+proper+NH). Phase 17.A: `scoreSeedBest` pre-extension. Phase 17.B: per-mate seeding. Phase 17.C: STAR-faithful SCORE-GATE + mappedFilter (0 MAPQ inflations). Phase 17.D: combined-span penalty fix + dedup ordering (248→236 half-mapped). Phase 17.8: `--quantMode GeneCounts`. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -130,7 +130,7 @@ predicates = "3"
 - Every phase uses differential testing against STAR where applicable
 - Test data tiers: synthetic micro-genome → chr22 → full human genome
 
-**Current test status**: 268/268 tests passing (264 unit + 4 integration), 0 clippy warnings
+**Current test status**: 278/278 tests passing (274 unit + 4 integration), 0 clippy warnings
 
 ## Known Issues — Disagreement Root Causes (10k SE yeast)
 
@@ -161,13 +161,15 @@ Previously listed issues now resolved:
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
 
-## PE Status (Updated 2026-04-09 — Phase 16.45)
+## PE Status (Updated 2026-04-17 — Phase 17.D)
 
-**Phase 16.45** (split_working_transcript junction split fix): **PE both-mapped = 8390/8390 (exact STAR match)**. PE MAPQ deflations: **16 → 0**. PE faithfulness: 98.784%.
+**Phase 17.D** (combined-span penalty + dedup ordering): **PE both-mapped = 8767** (STAR: 8390), **half-mapped = 236** (was 248 Phase 17.B), **98.2% per-mate position agreement**, **93.920% PE exact faithfulness**.
 
-**Root cause fixed**: `split_working_transcript` used `wt2_junc_start = boundary_idx.min(n_junctions)` to partition junction_shifts between the two mate portions. Since the inter-mate boundary does NOT produce a junction entry, the index offset was wrong: any junctions belonging to the second portion with index < boundary_idx were silently discarded. Fix: use `wt2_junc_start = wt1_junc_end` (junction split point = number of junctions in the first portion). For the specific case boundary_idx=1 (one mate2 exon in reverse cluster), wt1_junc_end=0 but wt2_junc_start was incorrectly set to 1, causing the 145907N junction's shift (jj_r=8) to be lost. finalize_transcript's overhang check then saw empty junction_shifts and passed the spurious 139M145907N11M alignment (11 < threshold 5+8=13 → should have been rejected).
+**Two fixes in Phase 17.D**:
+1. `try_pair_transcripts` now computes STAR-faithful combined-span penalty: `combined_wt_score = t1.score + t2.score - p1 - p2 + combined_p`. Previously double-applied per-mate span penalties → AS tag wrong for 99.6% of PE reads. Now 3.1%.
+2. Decision tree reordered to (1) position dedup → (2) score-range filter → (3) TooManyLoci → (4) quality filter. Fixes 12 half-mapped pairs.
 
-**Current PE parity**: ruSTAR=8390, STAR=8390, **0 gap**. 2 ruSTAR-only FPs (.17779410, .6302610). 2 STAR-only mates (.18919121 half-mapped, .6302610 half-mapped). 24 MAPQ inflations (rDNA/repeat multi-mappers). 0 MAPQ deflations.
+**Current PE parity**: 8767 vs STAR 8390 (+377 extra, mostly rDNA N² cross-copy pairs). 236 half-mapped. 28 MAPQ inflations / 192 deflations (rDNA N² problem). `.18919121` fixed (Phase 17.B). `.6302610` still FP.
 
 ## Remaining Limitations (Top 5)
 

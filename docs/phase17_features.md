@@ -2,7 +2,7 @@
 
 # Phase 17: Features + Polish
 
-**Status**: In Progress (17.1, 17.5, 17.8, 17.A, 17.B, 17.C complete)
+**Status**: In Progress (17.1, 17.5, 17.8, 17.A, 17.B, 17.C, 17.D complete)
 
 **Goal**: Production-ready features and quality-of-life improvements.
 
@@ -14,6 +14,7 @@
 | 17.A | `scoreSeedBest` pre-extension on WA entries (STAR faithful) | ✅ Complete |
 | 17.B | Per-mate seeding (fix `.18919121`, `.6302610` arch failures) | ✅ Complete — `.18919121` fixed; regressions under investigation |
 | 17.C | STAR-faithful SCORE-GATE + mappedFilter for PE (fix 4 MAPQ inflations) | ✅ Complete |
+| 17.D | PE combined-span penalty + dedup-before-score-range ordering (248→236 half-mapped) | ✅ Complete |
 | 17.2 | Coordinate-sorted BAM (`--outSAMtype BAM SortedByCoordinate`) | Planned |
 | 17.3 | Paired-end chimeric detection | Planned |
 | 17.4 | `--outReadsUnmapped Fastx` | Planned |
@@ -203,6 +204,27 @@ The ±1 discrepancies (N_unmapped + N_ambiguous) are a single read at a gene ove
 **Verification**: STAR debug trace on `.19790508` confirmed Score=197 cross-copy pair is INSERTED (`TR-INSERTED`) with `global_pass=1` because `scoreRange=1` (`outFilterMultimapScoreRange`). STAR's `mappedFilter` only checks `trBest->maxScore=198 >= 198` — passes.
 
 **Result**: 268/268 tests, 0 warnings, 8796/8926 SE (maintained), 8390/8390 PE (maintained), **0 MAPQ inflations** (was 4), **0 MAPQ deflations**, faithfulness 98.915% (was 98.903%).
+
+---
+
+## Phase 17.D: PE Combined-Span Penalty + Dedup Ordering ✅ (2026-04-17)
+
+**Problem 1**: `try_pair_transcripts` used `combined_wt_score = t1.score + t2.score`, double-applying the genomic-length penalty (each mate's finalized score already includes its own span penalty). This inflated the combined score relative to STAR's single-span formula, causing AS tag disagreements (was 99.6% of PE reads).
+
+**Fix**: STAR computes ONE genomic-length penalty over the full PE span. Per-mate approach must undo per-mate penalties and apply the combined penalty:
+```rust
+combined_wt_score = t1.score + t2.score - p1 - p2 + combined_p
+```
+where `p1 = genomic_length_penalty(t1_span)`, `p2 = genomic_length_penalty(t2_span)`, `combined_p = genomic_length_penalty(right.genome_end - left.genome_start)`.
+`try_pair_transcripts` now takes `scorer: &AlignmentScorer` to call `scorer.genomic_length_penalty()`.
+
+**Problem 2**: Decision tree ordering was score-range → dedup → TooManyLoci (wrong). STAR's ordering is multMapSelect → dedup → TooManyLoci. Also, dedup was running after score-range filter, meaning some duplicate pairs at the same position could escape the score-range window.
+
+**Fix** (`src/align/read_align.rs`): Reordered to: (1) position dedup, (2) score-range filter (multMapSelect), (3) TooManyLoci check, (4) sort by score, (5) quality filter (mappedFilter).
+
+**Result**: 278/278 tests, 0 warnings. **248 → 236 half-mapped** (12 pairs fixed by correct ordering). PE diff-AS dropped from 99.6% → 3.1%. PE both-mapped: 8767 (STAR: 8390). SE 8796/8926 maintained.
+
+**Investigation note**: Attempted quality-filter fallback (retry with pre-score-range pool when score-range winner fails quality) to recover additional half-mapped reads. The specific root cause of remaining 236 half-mapped: STAR's combined-read DP finds correct mate2 alignment with 0 mismatches; ruSTAR's per-mate DP finds a different alignment at the same position with 8 mismatches (combined_nm=14 > outFilterMismatchNmax=10). The fallback recovers 35 pairs but introduces ~100 position regressions (pairs at wrong positions passing individual quality checks). Reverted.
 
 ---
 

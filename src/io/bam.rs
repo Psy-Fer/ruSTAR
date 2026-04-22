@@ -173,6 +173,7 @@ mod tests {
                 genome_end: 104,
                 read_start: 0,
                 read_end: 4,
+                i_frag: 0,
             }],
             cigar: vec![CigarOp::Match(4)],
             score: 0,

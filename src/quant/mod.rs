@@ -410,6 +410,7 @@ mod tests {
                 genome_end: ge,
                 read_start: 0,
                 read_end: (ge - gs) as usize,
+                i_frag: 0,
             }],
             cigar: vec![],
             score: 100,

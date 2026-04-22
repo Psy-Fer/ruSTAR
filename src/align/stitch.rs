@@ -1878,6 +1878,9 @@ pub(crate) fn finalize_transcript(
                     genome_end: genome_pos_e + len as u64,
                     read_start: read_pos_e,
                     read_end: read_pos_e + len,
+                    // SE / mate1. PE pair-building in `try_pair_transcripts`
+                    // rewrites mate2's exons to `i_frag = 1`.
+                    i_frag: 0,
                 });
                 read_pos_e += len;
                 genome_pos_e += len as u64;

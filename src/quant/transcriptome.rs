@@ -1028,6 +1028,7 @@ fn align_to_one_transcript(
                 genome_end: tr_offset + len as u64,
                 read_start: block.read_start,
                 read_end: block.read_start + len,
+                i_frag: block.i_frag,
             });
         } else {
             // Coalesce: extend the last projected exon by this block's length
@@ -1938,6 +1939,7 @@ mod tests {
                 genome_end: ge,
                 read_start: rs,
                 read_end: re,
+                i_frag: 0,
             })
             .collect();
         let gs = proj_exons.first().map(|e| e.genome_start).unwrap_or(0);

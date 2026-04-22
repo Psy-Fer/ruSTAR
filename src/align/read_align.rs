@@ -2,7 +2,8 @@
 use crate::align::score::{AlignmentScorer, SpliceMotif};
 use crate::align::seed::Seed;
 use crate::align::stitch::{
-    cluster_seeds, stitch_seeds_with_jdb_debug,
+    cluster_seeds, finalize_transcript, split_combined_wt, stitch_seeds_core,
+    stitch_seeds_with_jdb_debug, PE_SPACER_BASE,
 };
 use crate::align::transcript::Transcript;
 use crate::error::Error;
@@ -539,15 +540,16 @@ pub fn align_read(
     ))
 }
 
-/// Align paired-end reads using per-mate independent seeding and pairwise cluster matching.
+/// Align paired-end reads using STAR's combined-read approach.
 ///
 /// # Algorithm
-/// 1. Seed mate1_seq and mate2_seq independently (correct Nstart per mate)
-/// 2. Cluster each mate's seeds independently
-/// 3. Stitch each mate's clusters independently via stitch_seeds_with_jdb
-/// 4. Pair compatible transcripts (same chr, opposite strand, within alignMatesGapMax)
-/// 5. Score-range filter → TooManyLoci check → dedup → quality filter
-/// 6. If no pairs: rescue as HalfMapped using single-mate transcripts
+/// 1. Build combined read: [mate1_seq | PE_SPACER_BASE | RC(mate2_seq)]
+/// 2. Seed each fragment (mate1_seq and RC(mate2_seq)) independently with per-fragment Nstart
+/// 3. Tag seeds with mate_id (0=mate1, 1=mate2); adjust read_pos to combined-read coords
+/// 4. Cluster and stitch combined seeds → WorkingTranscripts spanning both mates
+/// 5. Split each WT by mate_id → finalize each half → pair
+/// 6. Decision tree: dedup → score-range → TooManyLoci → quality filter
+/// 7. Half-mapped fallback from single-mate WTs
 ///
 /// # Arguments
 /// * `mate1_seq` - First mate sequence (encoded)
@@ -568,131 +570,241 @@ pub fn align_paired_read(
     let len2 = mate2_seq.len();
 
     let debug_pe = !params.read_name_filter.is_empty() && read_name == params.read_name_filter;
-
     let scorer = AlignmentScorer::from_params(params);
     let junction_db = if index.junction_db.is_empty() {
         None
     } else {
         Some(&index.junction_db)
     };
+    let debug_name: &str = if debug_pe { read_name } else { "" };
 
-    // Per-mate seeding: each mate seeded with its own Nstart positions.
-    // mate2_seq (forward orientation) gives Nstart 0,37,74,112 in legitimate 5'-sequence,
-    // avoiding adapter-RC contamination that RC(mate2) seeds at positions 0,37,74 would hit.
-    // mate2 reverse-cluster transcripts (is_reverse=true) = mate2 on - strand (FR pairs).
-    // mate2 forward-cluster transcripts (is_reverse=false) = mate2 on + strand (RF pairs).
-    let s1 = Seed::find_seeds(mate1_seq, index, params.seed_map_min, params, "")?;
-    let s2 = Seed::find_seeds(mate2_seq, index, params.seed_map_min, params, "")?;
+    // Build combined read: [mate1_seq | PE_SPACER_BASE | RC(mate2_seq)]
+    // STAR ReadAlign_oneRead.cpp: Read1[0][readLength[0]] = MARK_FRAG_SPACER_BASE
+    let rc_mate2: Vec<u8> = mate2_seq
+        .iter()
+        .rev()
+        .map(|&b| if b < 4 { 3 - b } else { b })
+        .collect();
+    let mut combined_read = Vec::with_capacity(len1 + 1 + len2);
+    combined_read.extend_from_slice(mate1_seq);
+    combined_read.push(PE_SPACER_BASE);
+    combined_read.extend_from_slice(&rc_mate2);
+    let combined_len = combined_read.len();
 
-    let mate1_clusters = cluster_seeds(&s1, index, params, len1);
-    let mate2_clusters = cluster_seeds(&s2, index, params, len2);
+    // Seed each fragment with its own Nstart (STAR qualitySplit per-fragment seeding).
+    // mate1_seq fragment: seeds have read_pos in 0..len1 → no adjustment for forward seeds.
+    //   search_rc=true seeds (in RC(mate1) coords 0..len1) need +=(len2+1) for RC(combined) coords.
+    // RC(mate2_seq) fragment: search_rc=false seeds need +=(len1+1) for combined coords.
+    //   search_rc=true seeds (in mate2 coords 0..len2) need no adjustment for RC(combined) coords.
+    let mut seeds1 = Seed::find_seeds(mate1_seq, index, params.seed_map_min, params, debug_name)?;
+    for s in &mut seeds1 {
+        s.mate_id = 0;
+        if s.search_rc {
+            s.read_pos += len2 + 1;
+        }
+    }
+
+    let mut seeds2 = Seed::find_seeds(&rc_mate2, index, params.seed_map_min, params, "")?;
+    for s in &mut seeds2 {
+        s.mate_id = 1;
+        if !s.search_rc {
+            s.read_pos += len1 + 1;
+        }
+    }
+
+    let mut combined_seeds = seeds1;
+    combined_seeds.extend(seeds2);
+
+    // Cluster combined seeds using the combined read length
+    let clusters = cluster_seeds(&combined_seeds, index, params, combined_len);
 
     if debug_pe {
         eprintln!(
-            "[DEBUG-PE] Per-mate: s1={} s2={} m1_clusters={} m2_clusters={}",
-            s1.len(),
-            s2.len(),
-            mate1_clusters.len(),
-            mate2_clusters.len()
+            "[DEBUG-PE] Combined: seeds={} clusters={}",
+            combined_seeds.len(),
+            clusters.len()
         );
-        for (i, c) in mate1_clusters.iter().enumerate() {
+        for (i, c) in clusters.iter().enumerate() {
             eprintln!(
-                "  m1_cluster[{}]: rev={} chr={} seeds={}",
-                i,
-                c.is_reverse,
-                c.chr_idx,
-                c.alignments.len()
-            );
-        }
-        for (i, c) in mate2_clusters.iter().enumerate() {
-            eprintln!(
-                "  m2_cluster[{}]: rev={} chr={} seeds={}",
-                i,
-                c.is_reverse,
-                c.chr_idx,
-                c.alignments.len()
+                "  cluster[{}]: rev={} chr={} seeds={}",
+                i, c.is_reverse, c.chr_idx, c.alignments.len()
             );
         }
     }
 
-    // Stitch each mate's clusters independently.
-    // For mate2 reverse clusters: stitch_seeds_with_jdb internally uses RC(mate2_seq) as
-    // stitch_read and sets transcript.is_reverse=true + transcript.read_seq=mate2_seq.
-    // This correctly represents mate2 on - strand for FR pairs without explicit RC handling.
-    let debug_name: &str = if debug_pe { read_name } else { "" };
-    let mut mate1_transcripts: Vec<Transcript> = Vec::new();
-    for cluster in mate1_clusters.iter().take(params.align_windows_per_read_nmax) {
-        let ts = stitch_seeds_with_jdb_debug(
-            cluster,
-            mate1_seq,
-            index,
-            &scorer,
-            junction_db,
-            params.align_transcripts_per_window_nmax,
-            debug_name,
-        )?;
-        mate1_transcripts.extend(ts);
-    }
-
-    let mut mate2_transcripts: Vec<Transcript> = Vec::new();
-    for cluster in mate2_clusters.iter().take(params.align_windows_per_read_nmax) {
-        let ts = stitch_seeds_with_jdb_debug(
-            cluster,
-            mate2_seq,
-            index,
-            &scorer,
-            junction_db,
-            params.align_transcripts_per_window_nmax,
-            debug_name,
-        )?;
-        mate2_transcripts.extend(ts);
-    }
-
-    // Combined score threshold: use len1+len2 as denominator (matches STAR's combined Lread-1).
+    // Combined score threshold: use len1+len2 as denominator
     let combined_score_threshold =
         (params.out_filter_score_min_over_lread * (len1 + len2) as f64) as i32;
 
-    // Pair compatible transcripts (opposite strand, same chr, within alignMatesGapMax)
     let mut joint_pairs: Vec<PairedAlignment> = Vec::new();
-    for t1 in &mate1_transcripts {
-        for t2 in &mate2_transcripts {
-            if let Some(pair) = try_pair_transcripts(
-                t1,
-                t2,
+    let mut single_mate1_transcripts: Vec<Transcript> = Vec::new();
+    let mut single_mate2_transcripts: Vec<Transcript> = Vec::new();
+
+    // Stitch combined clusters, split WTs by mate_id, finalize each half
+    for cluster in clusters.iter().take(params.align_windows_per_read_nmax) {
+        let (wts, stitch_cluster, stitch_is_reverse, stitch_read) = stitch_seeds_core(
+            cluster,
+            &combined_read,
+            index,
+            &scorer,
+            junction_db,
+            params.align_transcripts_per_window_nmax,
+            params.align_mates_gap_max.into(),
+            debug_name,
+        )?;
+
+        for wt in &wts {
+            // Save the combined-WT score from stitch_recurse: includes all aligned bases,
+            // mismatch penalties (-1 each), and outer extension max_scores. This is the
+            // correct value for the AS tag (STAR's primaryScore for combined-read PE).
+            let combined_raw_score = wt.score;
+
+            match split_combined_wt(
+                wt,
                 len1,
                 len2,
-                params,
-                combined_score_threshold,
-                &scorer,
+                stitch_is_reverse,
+                scorer.align_intron_min,
             ) {
-                joint_pairs.push(pair);
+                Some((m1_wt, m2_wt)) => {
+                    // Determine read slices and extension order for each mate.
+                    // The mate whose sequence appears directly (not RC'd) in stitch_read:
+                    //   original_is_reverse=false (left-first, + strand 5' at left).
+                    // The mate whose RC appears in stitch_read:
+                    //   original_is_reverse=true (right-first, - strand 5' at right).
+                    let (m1_read_slice, m1_orig_rev, m2_read_slice, m2_orig_rev) =
+                        if stitch_is_reverse {
+                            // stitch_read = [mate2(0..len2) | SPACER | RC(mate1)(len2+1..)]
+                            (
+                                &stitch_read[len2 + 1..], // RC(mate1_seq)
+                                true,                     // mate1 5' at right in RC
+                                &stitch_read[..len2],     // mate2_seq
+                                false,                    // mate2 5' at left
+                            )
+                        } else {
+                            // stitch_read = [mate1(0..len1) | SPACER | RC(mate2)(len1+1..)]
+                            (
+                                &stitch_read[..len1],     // mate1_seq
+                                false,                    // mate1 5' at left
+                                &stitch_read[len1 + 1..], // RC(mate2_seq)
+                                true,                     // mate2 5' at right in RC
+                            )
+                        };
+
+                    // Suppress inner-side extensions for each mate.
+                    // Inner = 3' end: right for forward (orig_is_rev=false), left for reverse.
+                    // This matches STAR's combined-read behavior where only the outer 5' ends
+                    // are extended (by stitch_recurse), not the inner 3' ends toward the insert.
+                    let Some(mut t1) = finalize_transcript(
+                        &m1_wt,
+                        m1_read_slice,
+                        index,
+                        &scorer,
+                        &stitch_cluster,
+                        m1_orig_rev,
+                        m1_orig_rev,   // no_left_ext = inner for reverse (orig_is_rev=true)
+                        !m1_orig_rev,  // no_right_ext = inner for forward (orig_is_rev=false)
+                    ) else {
+                        continue;
+                    };
+                    let Some(mut t2) = finalize_transcript(
+                        &m2_wt,
+                        m2_read_slice,
+                        index,
+                        &scorer,
+                        &stitch_cluster,
+                        m2_orig_rev,
+                        m2_orig_rev,   // no_left_ext = inner for reverse (orig_is_rev=true)
+                        !m2_orig_rev,  // no_right_ext = inner for forward (orig_is_rev=false)
+                    ) else {
+                        continue;
+                    };
+
+                    // Set final strand and read sequences:
+                    // Forward cluster: mate1 on +, mate2 on - (FR pair)
+                    // Reverse cluster: mate1 on -, mate2 on + (RF pair)
+                    if stitch_is_reverse {
+                        t1.is_reverse = true;
+                        t2.is_reverse = false;
+                    } else {
+                        t1.is_reverse = false;
+                        t2.is_reverse = true;
+                    }
+                    t1.read_seq = mate1_seq.to_vec();
+                    t2.read_seq = mate2_seq.to_vec();
+
+                    // Compute STAR-faithful combined AS: original stitch_recurse score
+                    // (includes mismatch penalties + outer extension scores) plus a single
+                    // genomic-span penalty covering the full PE locus.
+                    let combined_span =
+                        t1.genome_end.max(t2.genome_end) - t1.genome_start.min(t2.genome_start);
+                    let combined_score_override = Some(
+                        combined_raw_score + scorer.genomic_length_penalty(combined_span),
+                    );
+
+                    if let Some(pair) = try_pair_transcripts(
+                        &t1,
+                        &t2,
+                        len1,
+                        len2,
+                        params,
+                        combined_score_threshold,
+                        &scorer,
+                        combined_score_override,
+                    ) {
+                        joint_pairs.push(pair);
+                    }
+                }
+                None => {
+                    // Single-mate WT: save for half-mapped fallback
+                    let all_m1 = wt.exons.iter().all(|e| e.mate_id == 0);
+                    let all_m2 = wt.exons.iter().all(|e| e.mate_id == 1);
+                    if all_m1 {
+                        let (read_slice, orig_rev) = if stitch_is_reverse {
+                            (&stitch_read[len2 + 1..], true)
+                        } else {
+                            (&stitch_read[..len1], false)
+                        };
+                        if let Some(mut t) = finalize_transcript(
+                            wt,
+                            read_slice,
+                            index,
+                            &scorer,
+                            &stitch_cluster,
+                            orig_rev,
+                            false,
+                            false,
+                        ) {
+                            t.is_reverse = stitch_is_reverse;
+                            t.read_seq = mate1_seq.to_vec();
+                            single_mate1_transcripts.push(t);
+                        }
+                    } else if all_m2 {
+                        let (read_slice, orig_rev) = if stitch_is_reverse {
+                            (&stitch_read[..len2], false)
+                        } else {
+                            (&stitch_read[len1 + 1..], true)
+                        };
+                        if let Some(mut t) = finalize_transcript(
+                            wt,
+                            read_slice,
+                            index,
+                            &scorer,
+                            &stitch_cluster,
+                            orig_rev,
+                            false,
+                            false,
+                        ) {
+                            t.is_reverse = !stitch_is_reverse;
+                            t.read_seq = mate2_seq.to_vec();
+                            single_mate2_transcripts.push(t);
+                        }
+                    }
+                }
             }
         }
     }
 
-    if debug_pe {
-        eprintln!(
-            "[DEBUG-PE] After pairing: pairs={} m1_ts={} m2_ts={}",
-            joint_pairs.len(),
-            mate1_transcripts.len(),
-            mate2_transcripts.len()
-        );
-        for (i, pa) in joint_pairs.iter().enumerate() {
-            eprintln!(
-                "  pair[{}]: M1 chr={} pos={} rev={} score={} | M2 chr={} pos={} rev={} score={} | combined={}",
-                i,
-                pa.mate1_transcript.chr_idx,
-                pa.mate1_transcript.genome_start,
-                pa.mate1_transcript.is_reverse,
-                pa.mate1_transcript.score,
-                pa.mate2_transcript.chr_idx,
-                pa.mate2_transcript.genome_start,
-                pa.mate2_transcript.is_reverse,
-                pa.mate2_transcript.score,
-                pa.combined_wt_score
-            );
-        }
-    }
 
     // --- Decision tree: dedup, score-filter, quality-filter, then half-mapped fallback ---
 
@@ -852,11 +964,11 @@ pub fn align_paired_read(
         ((params.out_filter_score_min_over_lread * (len2 as f64 - 1.0)) as i32)
             .max(params.out_filter_score_min);
 
-    let best_m1 = mate1_transcripts
+    let best_m1 = single_mate1_transcripts
         .into_iter()
         .filter(|t| t.score >= thresh1)
         .max_by_key(|t| t.score);
-    let best_m2 = mate2_transcripts
+    let best_m2 = single_mate2_transcripts
         .into_iter()
         .filter(|t| t.score >= thresh2)
         .max_by_key(|t| t.score);
@@ -908,6 +1020,7 @@ pub fn align_paired_read(
 /// Attempt to pair two per-mate transcripts into a PairedAlignment.
 ///
 /// Returns `None` if the mates are incompatible (same strand, different chr, too far, etc.).
+#[allow(clippy::too_many_arguments)]
 fn try_pair_transcripts(
     t1: &Transcript,
     t2: &Transcript,
@@ -916,6 +1029,7 @@ fn try_pair_transcripts(
     params: &Parameters,
     combined_score_threshold: i32,
     scorer: &AlignmentScorer,
+    combined_wt_score_override: Option<i32>,
 ) -> Option<PairedAlignment> {
     // Must be same chromosome
     if t1.chr_idx != t2.chr_idx {
@@ -950,17 +1064,19 @@ fn try_pair_transcripts(
         return None;
     }
 
-    // Combined score: STAR computes a single genomic-length penalty for the combined WT span.
-    // Per-mate scores each include their own span penalty (negative). We undo those and apply
-    // the combined span penalty, matching STAR's ReadAlign_stitchWindowSeeds.cpp behavior.
-    // combined_score = (t1.score - p1) + (t2.score - p2) + combined_p
-    let t1_span = t1.genome_end - t1.genome_start;
-    let t2_span = t2.genome_end - t2.genome_start;
+    // Combined score: use override if provided (combined-read path supplies the original
+    // stitch_recurse score + combined-span penalty, which correctly includes mismatch
+    // penalties). Fallback formula (per-mate path) undoes per-mate span penalties and
+    // applies a single combined-span penalty.
     let combined_span = right.genome_end - left.genome_start;
-    let p1 = scorer.genomic_length_penalty(t1_span);
-    let p2 = scorer.genomic_length_penalty(t2_span);
-    let combined_p = scorer.genomic_length_penalty(combined_span);
-    let combined_wt_score = t1.score + t2.score - p1 - p2 + combined_p;
+    let combined_wt_score = combined_wt_score_override.unwrap_or_else(|| {
+        let t1_span = t1.genome_end - t1.genome_start;
+        let t2_span = t2.genome_end - t2.genome_start;
+        let p1 = scorer.genomic_length_penalty(t1_span);
+        let p2 = scorer.genomic_length_penalty(t2_span);
+        let combined_p = scorer.genomic_length_penalty(combined_span);
+        t1.score + t2.score - p1 - p2 + combined_p
+    });
 
     // SCORE-GATE: reject pairs where score is below the absolute floor
     if combined_wt_score + params.out_filter_multimap_score_range < combined_score_threshold {

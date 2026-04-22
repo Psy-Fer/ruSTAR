@@ -7,7 +7,7 @@ use crate::index::GenomeIndex;
 
 /// STAR's MARK_FRAG_SPACER_BASE (IncludeDefine.h:174).
 /// Separates mate1 and mate2 fragments in the combined PE read.
-const PE_SPACER_BASE: u8 = 11;
+pub(crate) const PE_SPACER_BASE: u8 = 11;
 
 /// Count mismatches in an alignment by comparing read sequence to genome sequence.
 ///
@@ -606,6 +606,7 @@ pub fn cluster_seeds(
         n_loci: usize,
         is_anchor: bool,
         ps_rstart: usize, // positive-strand read start (sort key)
+        mate_id: u8,      // STAR: iFrag (overlap dedup must respect fragment boundaries)
     }
 
     let mut win_candidates: Vec<Vec<WinCandidate>> =
@@ -652,6 +653,7 @@ pub fn cluster_seeds(
                 n_loci,
                 is_anchor: is_anchor_seed,
                 ps_rstart,
+                mate_id: seed.mate_id,
             });
         }
     }
@@ -683,14 +685,17 @@ pub fn cluster_seeds(
         let mut by_len: Vec<usize> = (0..candidates.len()).collect();
         by_len.sort_by(|&a, &b| candidates[b].length.cmp(&candidates[a].length));
 
-        // For each diagonal, track accepted [ps_rstart, ps_rend) ranges.
-        let mut diag_ranges: HashMap<i64, Vec<(usize, usize)>> = HashMap::new();
+        // For each (diagonal, mate_id) pair, track accepted [ps_rstart, ps_rend) ranges.
+        // STAR's assignAlignToWindow checks aFrag==WA[iA][WA_iFrag] before overlap test:
+        // seeds from different fragments are never treated as overlapping duplicates.
+        let mut diag_ranges: HashMap<(i64, u8), Vec<(usize, usize)>> = HashMap::new();
         for &ci in &by_len {
             let cand = &candidates[ci];
             let diag = cand.forward_pos as i64 - cand.ps_rstart as i64;
             let ps_rend = cand.ps_rstart + cand.length;
+            let key = (diag, cand.mate_id);
 
-            let blocked = diag_ranges.get(&diag).is_some_and(|ranges| {
+            let blocked = diag_ranges.get(&key).is_some_and(|ranges| {
                 ranges.iter().any(|&(rs, re)| {
                     (cand.ps_rstart >= rs && cand.ps_rstart < re) || (ps_rend >= rs && ps_rend < re)
                 })
@@ -700,7 +705,7 @@ pub fn cluster_seeds(
                 win_blocked[win_idx][ci] = true;
             } else {
                 diag_ranges
-                    .entry(diag)
+                    .entry(key)
                     .or_default()
                     .push((cand.ps_rstart, ps_rend));
             }
@@ -741,9 +746,15 @@ pub fn cluster_seeds(
             // Safety-net overlap detection: after pre-dedup, no overlapping entries
             // should remain. This check handles any edge cases and matches STAR's
             // assignAlignToWindow overlap logic for correctness.
+            // STAR checks aFrag==WA[iA][WA_iFrag] before overlap test — seeds from
+            // different mate fragments are never merged.
+            let new_mate_id = cand.mate_id;
             let new_diag = forward_pos as i64 - new_ps_rstart as i64;
             let mut overlap_idx = None;
             for (i, wa) in window.alignments.iter().enumerate() {
+                if wa.mate_id != new_mate_id {
+                    continue; // STAR: only merge seeds from the same fragment
+                }
                 let wa_ps_rstart = if window.is_reverse {
                     read_len - (wa.length + wa.read_pos)
                 } else {
@@ -1557,6 +1568,7 @@ pub(crate) fn finalize_transcript(
     cluster: &SeedCluster,
     original_is_reverse: bool,
     no_left_ext: bool,
+    no_right_ext: bool,
 ) -> Option<Transcript> {
     use crate::align::transcript::Exon;
 
@@ -1605,7 +1617,7 @@ pub(crate) fn finalize_transcript(
             zero_extend.clone()
         };
         let transcript_len_after_first = transcript_len + left.extend_len;
-        let right = if alignment_end < read_seq.len() {
+        let right = if alignment_end < read_seq.len() && !no_right_ext {
             extend_alignment(
                 read_seq,
                 alignment_end,
@@ -1625,7 +1637,7 @@ pub(crate) fn finalize_transcript(
         (left, right)
     } else {
         // Reverse: extend right (5') first, then left (3')
-        let right = if alignment_end < read_seq.len() {
+        let right = if alignment_end < read_seq.len() && !no_right_ext {
             extend_alignment(
                 read_seq,
                 alignment_end,
@@ -2277,6 +2289,165 @@ fn stitch_recurse(
     }
 }
 
+/// Split a combined-read WorkingTranscript by mate_id into per-mate WorkingTranscripts.
+///
+/// The combined read is `[mate1_seq | PE_SPACER_BASE | RC(mate2_seq)]`. After stitching,
+/// each WorkingTranscript has ExonBlocks tagged with mate_id (0=mate1, 1=mate2). This
+/// function splits them and adjusts read_pos offsets so each half can be finalized
+/// independently with its mate's read slice.
+///
+/// # Layout in stitch_read
+/// - `stitch_is_reverse=false`: `[mate1(0..len1) | SPACER | RC(mate2)(len1+1..)]`
+/// - `stitch_is_reverse=true`:  `[mate2(0..len2) | SPACER | RC(mate1)(len2+1..)]`
+///
+/// # Returns
+/// `Some((m1_wt, m2_wt))` if both mates are present; `None` for single-mate WTs.
+pub(crate) fn split_combined_wt(
+    wt: &WorkingTranscript,
+    len1: usize,
+    len2: usize,
+    stitch_is_reverse: bool,
+    align_intron_min: u32,
+) -> Option<(WorkingTranscript, WorkingTranscript)> {
+    // Read-pos offsets: subtract from each exon's read_start/read_end to get coords
+    // within the mate's slice (mate1_seq or RC(mate2_seq) / mate2_seq / RC(mate1_seq)).
+    let (m1_offset, m2_offset) = if stitch_is_reverse {
+        (len2 + 1, 0usize)
+    } else {
+        (0usize, len1 + 1)
+    };
+
+    let mut m1_exons: Vec<ExonBlock> = Vec::new();
+    let mut m2_exons: Vec<ExonBlock> = Vec::new();
+    let mut m1_jm: Vec<crate::align::score::SpliceMotif> = Vec::new();
+    let mut m1_ja: Vec<bool> = Vec::new();
+    let mut m1_js: Vec<(u32, u32)> = Vec::new();
+    let mut m2_jm: Vec<crate::align::score::SpliceMotif> = Vec::new();
+    let mut m2_ja: Vec<bool> = Vec::new();
+    let mut m2_js: Vec<(u32, u32)> = Vec::new();
+    let mut junction_idx = 0usize;
+
+    for (i, ex) in wt.exons.iter().enumerate() {
+        if ex.mate_id == 0 {
+            let mut ex1 = ex.clone();
+            ex1.read_start = ex1.read_start.saturating_sub(m1_offset);
+            ex1.read_end -= m1_offset;
+            m1_exons.push(ex1);
+        } else if ex.mate_id == 1 {
+            let mut ex2 = ex.clone();
+            ex2.read_start = ex2.read_start.saturating_sub(m2_offset);
+            ex2.read_end -= m2_offset;
+            m2_exons.push(ex2);
+        }
+
+        // Classify the gap to the next exon as splice junction or mate boundary
+        if i + 1 < wt.exons.len() && junction_idx < wt.junction_motifs.len() {
+            let next = &wt.exons[i + 1];
+            let genome_gap = next.genome_start as i64 - ex.genome_end as i64;
+            let read_gap = next.read_start as i64 - ex.read_end as i64;
+            if genome_gap - read_gap.max(0) >= align_intron_min as i64 {
+                // Splice junction: assign to the mate both exons belong to
+                if ex.mate_id == next.mate_id {
+                    if ex.mate_id == 0 {
+                        m1_jm.push(wt.junction_motifs[junction_idx]);
+                        m1_ja.push(wt.junction_annotated[junction_idx]);
+                        m1_js.push(wt.junction_shifts[junction_idx]);
+                    } else if ex.mate_id == 1 {
+                        m2_jm.push(wt.junction_motifs[junction_idx]);
+                        m2_ja.push(wt.junction_annotated[junction_idx]);
+                        m2_js.push(wt.junction_shifts[junction_idx]);
+                    }
+                }
+                junction_idx += 1;
+            }
+        }
+    }
+
+    if m1_exons.is_empty() || m2_exons.is_empty() {
+        return None;
+    }
+
+    // STAR PE-CHECK2 (stitchAlignToTranscript.cpp): reject combined WTs where
+    // mate1's genomic end exceeds mate2's estimated genomic end. This prevents
+    // false mate1 splice junctions where the splice extends past what mate2 covers.
+    //
+    // For forward cluster: m1 exon coords are in mate1_seq space, m2 in rc_mate2_seq space.
+    // m2_est_end = last_m2_exon.genome_start + (len2 - last_m2_exon.read_start)
+    //            = genome_start + remaining_rc_mate2_bases
+    // Reject if m1_genome_end > m2_est_end.
+    //
+    // For reverse cluster (stitch_is_reverse=true): roles swap — mate2 is forward,
+    // mate1 is reverse. m1 exons are in rc_mate1 space, m2 exons in mate2_seq space.
+    // m1_est_end = last_m1_exon.genome_start + (len1 - last_m1_exon.read_start)
+    // Reject if m2_genome_end > m1_est_end.
+    // STAR PE-CHECK2 only fires when mate1 has a splice junction (multiple exons).
+    // For single-exon mate1, the geometry is simple and the check is not needed
+    // (and would cause false rejections for overlapping/closely-mapped pairs).
+    {
+        let m1_last = m1_exons.last().unwrap();
+        let m2_last = m2_exons.last().unwrap();
+        if !stitch_is_reverse && m1_exons.len() > 1 {
+            let m2_est_end = m2_last.genome_start
+                + (len2 as u64).saturating_sub(m2_last.read_start as u64);
+            if m1_last.genome_end > m2_est_end {
+                return None;
+            }
+        } else if stitch_is_reverse && m2_exons.len() > 1 {
+            let m1_est_end = m1_last.genome_start
+                + (len1 as u64).saturating_sub(m1_last.read_start as u64);
+            if m2_last.genome_end > m1_est_end {
+                return None;
+            }
+        }
+    }
+
+    let m1_read_start = m1_exons.iter().map(|e| e.read_start).min().unwrap();
+    let m1_read_end = m1_exons.iter().map(|e| e.read_end).max().unwrap();
+    let m1_genome_start = m1_exons.iter().map(|e| e.genome_start).min().unwrap();
+    let m1_genome_end = m1_exons.iter().map(|e| e.genome_end).max().unwrap();
+    let m2_read_start = m2_exons.iter().map(|e| e.read_start).min().unwrap();
+    let m2_read_end = m2_exons.iter().map(|e| e.read_end).max().unwrap();
+    let m2_genome_start = m2_exons.iter().map(|e| e.genome_start).min().unwrap();
+    let m2_genome_end = m2_exons.iter().map(|e| e.genome_end).max().unwrap();
+
+    // Approximate per-mate score from exon coverage (includes inner spacer extensions)
+    let m1_score: i32 = m1_exons.iter().map(|e| (e.read_end - e.read_start) as i32).sum();
+    let m2_score: i32 = m2_exons.iter().map(|e| (e.read_end - e.read_start) as i32).sum();
+
+    Some((
+        WorkingTranscript {
+            exons: m1_exons,
+            score: m1_score,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: m1_jm.len() as u32,
+            junction_motifs: m1_jm,
+            junction_annotated: m1_ja,
+            junction_shifts: m1_js,
+            n_anchor: 0,
+            read_start: m1_read_start,
+            read_end: m1_read_end,
+            genome_start: m1_genome_start,
+            genome_end: m1_genome_end,
+        },
+        WorkingTranscript {
+            exons: m2_exons,
+            score: m2_score,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: m2_jm.len() as u32,
+            junction_motifs: m2_jm,
+            junction_annotated: m2_ja,
+            junction_shifts: m2_js,
+            n_anchor: 0,
+            read_start: m2_read_start,
+            read_end: m2_read_end,
+            genome_start: m2_genome_start,
+            genome_end: m2_genome_end,
+        },
+    ))
+}
+
 /// Inner implementation of stitch_seeds_with_jdb with optional debug logging.
 /// When `debug_read_name` is non-empty, detailed info is logged to stderr.
 ///
@@ -2313,6 +2484,7 @@ pub(crate) fn stitch_seeds_with_jdb_debug(
             scorer,
             &stitch_cluster,
             stitch_is_reverse,
+            false,
             false,
         ) {
             // Restore original reverse-strand flag and read sequence for SAM output.
@@ -2438,8 +2610,12 @@ pub(crate) fn stitch_seeds_core(
         use std::collections::HashMap;
         let read_len = read_seq.len();
         let is_rev = cluster.is_reverse;
-        // For each diagonal, find the longest seed per merged interval
-        let mut diag_seeds: HashMap<i64, Vec<(usize, usize, usize)>> = HashMap::new();
+        // For each (diagonal, mate_id) pair, find the longest seed per merged interval.
+        // STAR's assignAlignToWindow checks aFrag==WA[iA][WA_iFrag] before overlap test:
+        // seeds from different fragments are never treated as duplicates.
+        type DiagMateKey = (i64, u8);
+        type DiagSeeds = Vec<(usize, usize, usize)>;
+        let mut diag_seeds: HashMap<DiagMateKey, DiagSeeds> = HashMap::new();
         for (idx, wa) in wa_entries.iter().enumerate() {
             let ps = if is_rev {
                 read_len - (wa.length + wa.read_pos)
@@ -2448,7 +2624,7 @@ pub(crate) fn stitch_seeds_core(
             };
             let diag = wa.genome_pos as i64 - ps as i64;
             diag_seeds
-                .entry(diag)
+                .entry((diag, wa.mate_id))
                 .or_default()
                 .push((ps, ps + wa.length, idx));
         }

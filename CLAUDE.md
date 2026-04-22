@@ -32,7 +32,7 @@ Always run `cargo clippy`, `cargo fmt --check`, and `cargo test` before consider
 
 ## Current Status
 
-**278 tests passing, 0 clippy warnings.** SE: 8796/8926 compare_sam.py (98.5%), 2.2% splice rate (STAR: 2.2%), 66 shared junctions, **100.0% MAPQ agreement, MAPQ inflation: 0, deflation: 0**. 127 position disagreements (ALL verified as genuine ties). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **0 STAR-only / 0 ruSTAR-only SE reads**. PE: **8767 both-mapped** (STAR: 8390), **236 half-mapped** (new behavior), 28 MAPQ inflations / 192 deflations (rDNA N² problem), **98.2% per-mate position agreement**, **93.920% PE exact faithfulness** (pos+CIGAR+MAPQ+proper+NH). Phase 17.A: `scoreSeedBest` pre-extension. Phase 17.B: per-mate seeding. Phase 17.C: STAR-faithful SCORE-GATE + mappedFilter (0 MAPQ inflations). Phase 17.D: combined-span penalty fix + dedup ordering (248→236 half-mapped). Phase 17.8: `--quantMode GeneCounts`. See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
+**278 tests passing, 0 clippy warnings.** SE: 8796/8926 compare_sam.py (98.5%), 2.2% splice rate (STAR: 2.2%), 66 shared junctions, **100.0% MAPQ agreement, MAPQ inflation: 0, deflation: 0**. 127 position disagreements (ALL verified as genuine ties). 1 CIGAR-only disagree (ERR12389696.13573895, insertion placement, seed-level tie). **0 STAR-only / 0 ruSTAR-only SE reads**. PE: **8642 both-mapped** (STAR: 8390), **356 half-mapped**, 42 MAPQ inflations / 42 deflations, **98.6% per-mate position agreement**, **97.370% PE exact faithfulness** (pos+CIGAR+MAPQ+proper+NH). Phase 17.A: `scoreSeedBest` pre-extension. Phase 17.B: per-mate seeding. Phase 17.C: STAR-faithful SCORE-GATE + mappedFilter. Phase 17.D: combined-span penalty fix + dedup ordering. Phase 17.8: `--quantMode GeneCounts`. Phase E fix (2026-04-21): mate_id-aware diagonal dedup in `stitch_seeds_core` (93.920%→97.370% PE faithfulness). See [ROADMAP.md](ROADMAP.md) for detailed phase tracking and [docs/](docs/) for per-phase notes.
 
 ## Source Layout
 
@@ -161,15 +161,13 @@ Previously listed issues now resolved:
 
 See [ROADMAP.md](ROADMAP.md) and [docs/](docs/) for full issue tracking.
 
-## PE Status (Updated 2026-04-17 — Phase 17.D)
+## PE Status (Updated 2026-04-21 — Phase E fix)
 
-**Phase 17.D** (combined-span penalty + dedup ordering): **PE both-mapped = 8767** (STAR: 8390), **half-mapped = 236** (was 248 Phase 17.B), **98.2% per-mate position agreement**, **93.920% PE exact faithfulness**.
+**Phase E fix** (mate_id-aware diagonal dedup in `stitch_seeds_core`): **PE both-mapped = 8642** (STAR: 8390), **half-mapped = 356**, **98.6% per-mate position agreement**, **97.370% PE exact faithfulness** (was 93.920%).
 
-**Two fixes in Phase 17.D**:
-1. `try_pair_transcripts` now computes STAR-faithful combined-span penalty: `combined_wt_score = t1.score + t2.score - p1 - p2 + combined_p`. Previously double-applied per-mate span penalties → AS tag wrong for 99.6% of PE reads. Now 3.1%.
-2. Decision tree reordered to (1) position dedup → (2) score-range filter → (3) TooManyLoci → (4) quality filter. Fixes 12 half-mapped pairs.
+**Root cause fixed**: `stitch_seeds_core` had a diagonal dedup keyed by diagonal only (`HashMap<i64, ...>`), not `(diagonal, mate_id)`. For palindromic PE reads (mate1_seq=RC(mate2_seq)), both mates' seeds land on the same diagonal → one mate was silently dropped, preventing pairing. Fix: use `(i64, u8)` key = `(diagonal, mate_id)`.
 
-**Current PE parity**: 8767 vs STAR 8390 (+377 extra, mostly rDNA N² cross-copy pairs). 236 half-mapped. 28 MAPQ inflations / 192 deflations (rDNA N² problem). `.18919121` fixed (Phase 17.B). `.6302610` still FP.
+**Current PE parity**: 8642 vs STAR 8390 (+252 extra, rDNA N² cross-copy pairs). 356 half-mapped (includes former false pairings now correctly half-mapped). 42 MAPQ inflations / 42 deflations. `.18919121` fixed. `.6302610` still FP.
 
 ## Remaining Limitations (Top 5)
 

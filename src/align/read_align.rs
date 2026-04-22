@@ -2,7 +2,7 @@
 use crate::align::score::{AlignmentScorer, SpliceMotif};
 use crate::align::seed::Seed;
 use crate::align::stitch::{cluster_seeds, stitch_seeds_with_jdb_debug};
-use crate::align::transcript::Transcript;
+use crate::align::transcript::{Exon, Transcript};
 use crate::error::Error;
 use crate::index::GenomeIndex;
 use crate::params::{IntronMotifFilter, IntronStrandFilter, Parameters};
@@ -69,6 +69,52 @@ pub struct PairedAlignment {
     /// Combined coverage: sum of exon read spans from both mates.
     /// Mirrors STAR's nMatch check in mappedFilter.
     pub combined_n_match: u32,
+}
+
+impl PairedAlignment {
+    /// Build a STAR-style combined two-mate `Transcript` for transcriptome
+    /// projection.
+    ///
+    /// Matches STAR's single-`Transcript`-per-pair model: mate1 exons with
+    /// `i_frag = 0`, then mate2 exons rewritten to `i_frag = 1`. Only
+    /// meaningful for pairs on the same chromosome and strand — both are
+    /// invariants of a `PairedAlignment` (checked in `try_pair_transcripts`).
+    ///
+    /// The returned transcript's `cigar` is empty: transcriptome BAM
+    /// emission generates per-mate CIGARs from the split exon list rather
+    /// than consuming a combined one.
+    pub fn combined_transcript_for_projection(&self) -> Transcript {
+        let m1 = &self.mate1_transcript;
+        let m2 = &self.mate2_transcript;
+
+        let mut exons: Vec<Exon> = Vec::with_capacity(m1.exons.len() + m2.exons.len());
+        for e in &m1.exons {
+            let mut ee = e.clone();
+            ee.i_frag = 0;
+            exons.push(ee);
+        }
+        for e in &m2.exons {
+            let mut ee = e.clone();
+            ee.i_frag = 1;
+            exons.push(ee);
+        }
+
+        Transcript {
+            chr_idx: m1.chr_idx,
+            genome_start: m1.genome_start.min(m2.genome_start),
+            genome_end: m1.genome_end.max(m2.genome_end),
+            is_reverse: m1.is_reverse,
+            exons,
+            cigar: Vec::new(),
+            score: m1.score + m2.score,
+            n_mismatch: m1.n_mismatch + m2.n_mismatch,
+            n_gap: m1.n_gap + m2.n_gap,
+            n_junction: m1.n_junction + m2.n_junction,
+            junction_motifs: Vec::new(),
+            junction_annotated: Vec::new(),
+            read_seq: Vec::new(),
+        }
+    }
 }
 
 /// Result of paired-end alignment, covering all mapping outcomes.
@@ -1280,6 +1326,50 @@ mod tests {
             junction_db: crate::junction::SpliceJunctionDb::empty(),
             transcriptome: None,
         }
+    }
+
+    #[test]
+    fn combined_transcript_for_projection_rewrites_mate2_ifrag() {
+        use crate::align::transcript::CigarOp;
+
+        let make_tr = |gs: u64, ge: u64, rs: usize, re: usize| Transcript {
+            chr_idx: 0,
+            genome_start: gs,
+            genome_end: ge,
+            is_reverse: false,
+            exons: vec![Exon {
+                genome_start: gs,
+                genome_end: ge,
+                read_start: rs,
+                read_end: re,
+                i_frag: 0,
+            }],
+            cigar: vec![CigarOp::Match((ge - gs) as u32)],
+            score: 100,
+            n_mismatch: 0,
+            n_gap: 0,
+            n_junction: 0,
+            junction_motifs: vec![],
+            junction_annotated: vec![],
+            read_seq: vec![],
+        };
+        let pair = PairedAlignment {
+            mate1_transcript: make_tr(1000, 1100, 0, 100),
+            mate2_transcript: make_tr(1300, 1400, 0, 100),
+            mate1_region: (0, 100),
+            mate2_region: (0, 100),
+            is_proper_pair: true,
+            insert_size: 400,
+            combined_wt_score: 200,
+            combined_n_match: 200,
+        };
+        let combined = pair.combined_transcript_for_projection();
+        assert_eq!(combined.exons.len(), 2);
+        assert_eq!(combined.exons[0].i_frag, 0);
+        assert_eq!(combined.exons[1].i_frag, 1);
+        assert_eq!(combined.genome_start, 1000);
+        assert_eq!(combined.genome_end, 1400);
+        assert_eq!(combined.score, 200);
     }
 
     #[test]

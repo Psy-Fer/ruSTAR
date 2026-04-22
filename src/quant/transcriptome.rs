@@ -405,6 +405,98 @@ impl TranscriptomeIndex {
         self.tr_end[i].saturating_sub(1)
     }
 
+    /// Write `sjdbList.fromGTF.out.tab` into `dir`, byte-for-byte matching
+    /// STAR's `GTF_transcriptGeneSJ.cpp:115-171` format:
+    ///
+    /// - No header line.
+    /// - Per-junction line: `chr\tstart(1-based)\tend(1-based)\tstrand\tgenes\n`
+    ///
+    /// Junctions come from consecutive exon pairs within each transcript
+    /// where an intron exists. `start` and `end` are 1-based chromosome-local
+    /// positions of the first and last base of the intron. `strand` is `.`,
+    /// `+`, or `-` (mapping STAR's `transcriptStrand` 0/1/2). Duplicate
+    /// junctions (same chr/start/end/strand) across multiple transcripts
+    /// share a single record with comma-separated 1-based gene indices.
+    pub fn write_sjdb_list_from_gtf(&self, dir: &Path, genome: &Genome) -> Result<(), Error> {
+        let path = dir.join("sjdbList.fromGTF.out.tab");
+        let file = std::fs::File::create(&path).map_err(|e| Error::io(e, &path))?;
+        let mut out = std::io::BufWriter::new(file);
+
+        // Collect (sjStart_abs_0based_excl, sjEnd_abs_0based_incl, chr_idx,
+        // strand, gene_idx_1based) for every intron within every transcript.
+        let mut junctions: Vec<(u64, u64, usize, u8, u32)> = Vec::new();
+        for (tr_idx, exs) in self.tr_exons.iter().enumerate() {
+            let chr_idx = self.tr_chr_idx[tr_idx];
+            let strand = self.tr_strand[tr_idx];
+            let gene1 = self.tr_gene_idx[tr_idx] + 1;
+            for pair in exs.windows(2) {
+                let e0 = &pair[0];
+                let e1 = &pair[1];
+                // STAR: if e1.start <= e0.end+1, exons touch (no intron). In
+                // ruSTAR's 0-based half-open: e1.genome_start <= e0.genome_end.
+                if e1.genome_start <= e0.genome_end {
+                    continue;
+                }
+                junctions.push((
+                    e0.genome_end,       // sjStart: 0-based first intron base
+                    e1.genome_start - 1, // sjEnd: 0-based last intron base
+                    chr_idx,
+                    strand,
+                    gene1,
+                ));
+            }
+        }
+        // STAR sorts by sjStart only (funCompareUint2 on the first uint64).
+        // Keep it stable so gene list order across duplicates matches
+        // transcript-insertion order.
+        junctions.sort_by_key(|&(s, _, _, _, _)| s);
+
+        let strand_char = |s: u8| match s {
+            1 => '+',
+            2 => '-',
+            _ => '.',
+        };
+
+        // Dedup pass: merge genes across identical (chr, start, end, strand).
+        let mut i = 0;
+        while i < junctions.len() {
+            let (sj_start, sj_end, chr_idx, strand, gene1) = junctions[i];
+            let chr_offset = genome.chr_start[chr_idx];
+            let start_1based = sj_start + 1 - chr_offset;
+            let end_1based = (sj_end + 1) - chr_offset;
+            write!(
+                out,
+                "{}\t{}\t{}\t{}\t{}",
+                genome.chr_name[chr_idx],
+                start_1based,
+                end_1based,
+                strand_char(strand),
+                gene1
+            )
+            .map_err(|e| Error::io(e, &path))?;
+
+            // Append genes from subsequent entries with the same key.
+            let mut j = i + 1;
+            let mut seen: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+            seen.insert(gene1);
+            while j < junctions.len() {
+                let (s2, e2, c2, st2, g2) = junctions[j];
+                if s2 == sj_start && e2 == sj_end && c2 == chr_idx && st2 == strand {
+                    if seen.insert(g2) {
+                        write!(out, ",{g2}").map_err(|e| Error::io(e, &path))?;
+                    }
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            writeln!(out).map_err(|e| Error::io(e, &path))?;
+            i = j;
+        }
+
+        Ok(())
+    }
+
     /// Write `exonGeTrInfo.tab` into `dir`, byte-for-byte matching STAR's
     /// `GTF_transcriptGeneSJ.cpp:33-53` format:
     ///
@@ -1210,6 +1302,67 @@ mod tests {
              T_big\t300\t699\t199\t1\t1\t1\t0\n\
              T_mid\t800\t899\t699\t1\t1\t2\t0\n"
         );
+    }
+
+    #[test]
+    fn sjdb_list_from_gtf_tab_byte_format() {
+        let genome = make_genome();
+        // T1: exons [100,200) and [300,400) → intron [200,300), 1-based [201,299].
+        // T2: exons [600,700) and [800,900) → intron [700,800), 1-based [701,799].
+        let exons = vec![
+            make_exon_with_attrs("chr1", 101, 200, '+', "T1", &[("gene_id", "G1")]),
+            make_exon_with_attrs("chr1", 301, 400, '+', "T1", &[("gene_id", "G1")]),
+            make_exon_with_attrs("chr1", 601, 700, '-', "T2", &[("gene_id", "G2")]),
+            make_exon_with_attrs("chr1", 801, 900, '-', "T2", &[("gene_id", "G2")]),
+        ];
+        let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        idx.write_sjdb_list_from_gtf(dir.path(), &genome).unwrap();
+        let body = std::fs::read_to_string(dir.path().join("sjdbList.fromGTF.out.tab")).unwrap();
+        // Gene indices are 1-based: G1 → 1, G2 → 2.
+        assert_eq!(
+            body,
+            "chr1\t201\t300\t+\t1\n\
+             chr1\t701\t800\t-\t2\n"
+        );
+    }
+
+    #[test]
+    fn sjdb_list_dedups_and_merges_genes() {
+        let genome = make_genome();
+        // Two transcripts on DIFFERENT genes share the same junction.
+        // T1 gene G1 (idx 0, 1-based 1): exons [100,200) + [300,400)
+        // T2 gene G2 (idx 1, 1-based 2): exons [100,200) + [300,400)
+        let exons = vec![
+            make_exon_with_attrs("chr1", 101, 200, '+', "T1", &[("gene_id", "G1")]),
+            make_exon_with_attrs("chr1", 301, 400, '+', "T1", &[("gene_id", "G1")]),
+            make_exon_with_attrs("chr1", 101, 200, '+', "T2", &[("gene_id", "G2")]),
+            make_exon_with_attrs("chr1", 301, 400, '+', "T2", &[("gene_id", "G2")]),
+        ];
+        let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        idx.write_sjdb_list_from_gtf(dir.path(), &genome).unwrap();
+        let body = std::fs::read_to_string(dir.path().join("sjdbList.fromGTF.out.tab")).unwrap();
+        // Single line, genes comma-separated.
+        assert_eq!(body, "chr1\t201\t300\t+\t1,2\n");
+    }
+
+    #[test]
+    fn sjdb_list_single_exon_transcript_has_no_junctions() {
+        let genome = make_genome();
+        let exons = vec![make_exon_with_attrs(
+            "chr1",
+            101,
+            200,
+            '+',
+            "T1",
+            &[("gene_id", "G1")],
+        )];
+        let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        idx.write_sjdb_list_from_gtf(dir.path(), &genome).unwrap();
+        let body = std::fs::read_to_string(dir.path().join("sjdbList.fromGTF.out.tab")).unwrap();
+        assert_eq!(body, "");
     }
 
     #[test]

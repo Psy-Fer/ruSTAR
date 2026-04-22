@@ -7,6 +7,7 @@
 /// - Junction statistics collection for SJ.out.tab output
 pub(crate) mod gtf;
 mod sj_output;
+pub mod sjdb_insert;
 
 pub use sj_output::SpliceJunctionStats;
 pub(crate) use sj_output::{SjKey, encode_motif};

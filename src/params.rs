@@ -826,10 +826,18 @@ impl Parameters {
         }
         self.rg_ids()?;
 
-        // quantMode TranscriptomeSAM requires a GTF file
-        if self.quant_transcriptome_sam() && self.sjdb_gtf_file.is_none() {
+        // quantMode TranscriptomeSAM requires transcript annotations —
+        // either via --sjdbGTFfile or pre-generated transcriptInfo.tab
+        // et al in --genomeDir (persisted at genomeGenerate time). At
+        // validation time we can only enforce the genomeGenerate rule;
+        // for alignReads, GenomeIndex::load checks for the on-disk files
+        // and surfaces a clear error if neither source is available.
+        if self.run_mode == RunMode::GenomeGenerate
+            && self.quant_transcriptome_sam()
+            && self.sjdb_gtf_file.is_none()
+        {
             return Err(crate::error::Error::Parameter(
-                "--quantMode TranscriptomeSAM requires --sjdbGTFfile".into(),
+                "--quantMode TranscriptomeSAM requires --sjdbGTFfile at genomeGenerate".into(),
             ));
         }
 
@@ -1265,11 +1273,27 @@ mod tests {
     }
 
     #[test]
-    fn validate_transcriptome_sam_needs_gtf() {
-        let p = parse(&["--readFilesIn", "r.fq", "--quantMode", "TranscriptomeSAM"]);
+    fn validate_transcriptome_sam_at_genome_generate_needs_gtf() {
+        let p = parse(&[
+            "--runMode",
+            "genomeGenerate",
+            "--genomeFastaFiles",
+            "g.fa",
+            "--quantMode",
+            "TranscriptomeSAM",
+        ]);
         let err = p.validate().unwrap_err();
         assert!(err.to_string().contains("TranscriptomeSAM"));
         assert!(err.to_string().contains("sjdbGTFfile"));
+    }
+
+    #[test]
+    fn validate_transcriptome_sam_at_align_reads_tolerates_no_gtf() {
+        // alignReads: if --sjdbGTFfile is absent, the check is deferred to
+        // GenomeIndex::load which will either find transcriptInfo.tab in
+        // --genomeDir or surface a clear error at load time.
+        let p = parse(&["--readFilesIn", "r.fq", "--quantMode", "TranscriptomeSAM"]);
+        assert!(p.validate().is_ok());
     }
 
     #[test]

@@ -120,8 +120,9 @@ pub struct TranscriptomeIndex {
     pub tr_exons: Vec<Vec<TrExon>>,
     /// Total transcript-space length (sum of exon spans).
     pub tr_length: Vec<u32>,
-    /// First-exon offset into a flat global exon array, per transcript
-    /// (STAR's `trExI` column in `transcriptInfo.tab`).
+    /// First-exon offset into a flat global exon array, per transcript,
+    /// computed in STAR's SORTED-BY-(trStart, trEnd) order — matches the
+    /// `trExI` column in `transcriptInfo.tab`. Indexed by insertion position.
     pub tr_exi: Vec<u32>,
     /// Permutation of `0..n_transcripts` sorted by `(tr_start, tr_end)`.
     pub tr_order: Vec<usize>,
@@ -293,14 +294,6 @@ impl TranscriptomeIndex {
 
         let n_tr = tr_ids.len();
 
-        // Cumulative exon offset per transcript — matches STAR's `trExI` column.
-        let mut tr_exi: Vec<u32> = Vec::with_capacity(n_tr);
-        let mut cum: u32 = 0;
-        for exs in &tr_exons_vec {
-            tr_exi.push(cum);
-            cum = cum.saturating_add(exs.len() as u32);
-        }
-
         // Sorted view by (tr_start, tr_end) for binary-search +
         // running-max early-exit.
         let mut tr_order: Vec<usize> = (0..n_tr).collect();
@@ -309,6 +302,17 @@ impl TranscriptomeIndex {
                 .cmp(&tr_start[b])
                 .then_with(|| tr_end[a].cmp(&tr_end[b]))
         });
+
+        // Cumulative exon offset in SORTED order — matches STAR's `trExI`,
+        // where exons in `exonInfo.tab` are grouped by transcript in sorted
+        // transcript order. `tr_exi[i]` (insertion position i) = sum of exon
+        // counts of transcripts that come BEFORE `i` in sorted order.
+        let mut tr_exi: Vec<u32> = vec![0; n_tr];
+        let mut cum: u32 = 0;
+        for &sorted_idx in &tr_order {
+            tr_exi[sorted_idx] = cum;
+            cum = cum.saturating_add(tr_exons_vec[sorted_idx].len() as u32);
+        }
 
         let tr_starts_sorted: Vec<u64> = tr_order.iter().map(|&i| tr_start[i]).collect();
         let mut tr_end_max_sorted: Vec<u64> = Vec::with_capacity(n_tr);
@@ -968,21 +972,45 @@ mod tests {
     }
 
     #[test]
-    fn tr_exi_cumulative() {
+    fn tr_exi_sorted_cumulative() {
         let genome = make_genome();
-        // T1: 3 exons, T2: 2 exons, T3: 1 exon.  tr_exi = [0, 3, 5].
+        // Three transcripts with non-overlapping starts: T1 [100..600),
+        // T2 [700..900), T3 [1100..1300) — sorted order = insertion order.
+        // Counts: T1=3, T2=2, T3=1. tr_exi in sorted order = [0, 3, 5].
         let exons = vec![
             make_exon("chr1", 101, 200, '+', "G1", "T1"),
             make_exon("chr1", 301, 400, '+', "G1", "T1"),
             make_exon("chr1", 501, 600, '+', "G1", "T1"),
-            make_exon("chr1", 101, 200, '+', "G1", "T2"),
-            make_exon("chr1", 301, 400, '+', "G1", "T2"),
-            make_exon("chr1", 101, 300, '+', "G2", "T3"),
+            make_exon("chr1", 701, 800, '+', "G1", "T2"),
+            make_exon("chr1", 801, 900, '+', "G1", "T2"),
+            make_exon("chr2", 101, 200, '+', "G2", "T3"),
         ];
         let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
         assert_eq!(idx.tr_exi, vec![0, 3, 5]);
-        let total: u32 = idx.tr_exons.iter().map(|e| e.len() as u32).sum();
-        assert_eq!(total, 6);
+    }
+
+    #[test]
+    fn tr_exi_respects_sort_order_not_insertion_order() {
+        let genome = make_genome();
+        // T_late inserted first but sorts LAST (starts 501); T_early inserted
+        // second and sorts FIRST (starts 101). tr_exi must reflect sorted
+        // cumulative count: T_early gets 0, T_late gets 1 (T_early's exon count).
+        let exons = vec![
+            make_exon("chr1", 501, 600, '+', "G1", "T_late"),
+            make_exon("chr1", 101, 200, '+', "G1", "T_early"),
+        ];
+        let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        // Insertion order: [T_late, T_early]
+        assert_eq!(
+            idx.tr_ids,
+            vec!["T_late".to_string(), "T_early".to_string()]
+        );
+        // Sorted order: T_early (pos 0), T_late (pos 1)
+        // tr_order maps sorted → insertion: tr_order[0] = 1 (T_early), tr_order[1] = 0 (T_late)
+        assert_eq!(idx.tr_order, vec![1, 0]);
+        // tr_exi by insertion position: T_late (insertion 0, sort pos 1) = 1,
+        // T_early (insertion 1, sort pos 0) = 0.
+        assert_eq!(idx.tr_exi, vec![1, 0]);
     }
 
     #[test]

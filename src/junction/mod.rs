@@ -63,20 +63,23 @@ impl SpliceJunctionDb {
     pub fn from_gtf(gtf_path: &Path, genome: &Genome) -> Result<Self, Error> {
         log::info!("Loading GTF annotations from: {}", gtf_path.display());
 
-        // Parse GTF and extract exon features
         let exons = gtf::parse_gtf(gtf_path)?;
         log::debug!("Parsed {} exon features from GTF", exons.len());
 
-        // Extract junctions from consecutive exons
-        let junctions_vec = gtf::extract_junctions_from_exons(exons, genome)?;
-        log::info!(
-            "Extracted {} annotated junctions from GTF",
-            junctions_vec.len()
-        );
+        let raw = gtf::extract_junctions_from_exons(exons, genome)?;
+        log::info!("Extracted {} annotated junctions from GTF", raw.len());
 
-        // Build HashMap for fast lookup
-        let mut junctions = HashMap::new();
-        for (chr_idx, intron_start, intron_end, strand) in junctions_vec {
+        Ok(Self::from_raw_junctions(&raw))
+    }
+
+    /// Build junction database from a pre-extracted list of annotated
+    /// junctions `(chr_idx, intron_start, intron_end, strand)`. Used by
+    /// the `genomeGenerate` path so it can share the parsed GTF with
+    /// `TranscriptomeIndex` and the `sjdb_insert` pipeline without
+    /// re-parsing the file.
+    pub fn from_raw_junctions(raw: &[(usize, u64, u64, u8)]) -> Self {
+        let mut junctions = HashMap::with_capacity(raw.len());
+        for &(chr_idx, intron_start, intron_end, strand) in raw {
             let key = JunctionKey {
                 chr_idx,
                 intron_start,
@@ -85,8 +88,7 @@ impl SpliceJunctionDb {
             };
             junctions.insert(key, JunctionInfo { annotated: true });
         }
-
-        Ok(Self { junctions })
+        Self { junctions }
     }
 
     /// Check if a junction is annotated in the GTF

@@ -78,12 +78,17 @@ ln -sfn rustar_index index
      --genomeSAindexNbases 5 --sjdbOverhang 49 --runThreadN 1 >/dev/null 2>&1
 rm -f index
 
-# Diff each file.
+# Diff each file. SA / SAindex are excluded because STAR's suffix-array
+# construction algorithm differs from ruSTAR's and produces a different
+# (but equally-valid) byte layout — the sort itself is deterministic but
+# STAR's bucketed parallel build breaks ties differently. Size parity is
+# verified separately below.
 pass=0
 fail=0
 for f in chrName.txt chrLength.txt chrStart.txt chrNameLength.txt \
          transcriptInfo.tab exonInfo.tab geneInfo.tab exonGeTrInfo.tab \
-         sjdbList.fromGTF.out.tab genomeParameters.txt; do
+         sjdbList.fromGTF.out.tab sjdbInfo.txt sjdbList.out.tab \
+         Genome genomeParameters.txt; do
     if diff -q "star_index/$f" "rustar_index/$f" >/dev/null 2>&1; then
         echo "✓ $f"
         pass=$((pass+1))
@@ -94,8 +99,21 @@ for f in chrName.txt chrLength.txt chrStart.txt chrNameLength.txt \
     fi
 done
 
+# SA / SAindex: size-only check (see comment above).
+for f in SA SAindex; do
+    star_size=$(wc -c <"star_index/$f")
+    rustar_size=$(wc -c <"rustar_index/$f")
+    if [[ "$star_size" == "$rustar_size" ]]; then
+        echo "~ $f size-only match ($star_size bytes) — content differs (expected, different SA algorithm)"
+        pass=$((pass+1))
+    else
+        echo "✗ $f size mismatch: STAR=$star_size ruSTAR=$rustar_size"
+        fail=$((fail+1))
+    fi
+done
+
 echo
-echo "RESULT: $pass/$((pass+fail)) files identical to STAR's output"
+echo "RESULT: $pass/$((pass+fail)) files identical (or size-matched) to STAR's output"
 if [[ $fail -gt 0 ]]; then
     exit 1
 fi

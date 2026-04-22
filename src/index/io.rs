@@ -90,8 +90,31 @@ impl GenomeIndex {
             sa_index,
             junction_db,
             transcriptome,
+            prepared_junctions: Vec::new(),
         })
     }
+}
+
+/// Read `genomeFileSizes\t<n_genome> <sa_size>` from genomeParameters.txt
+/// and return the first field (total genome byte count, including Gsj if
+/// sjdb was baked in). Returns `Ok(None)` if the file or line is absent,
+/// leaving the caller to fall back to the chr_start boundary.
+fn read_genome_file_size(genome_dir: &Path) -> Result<Option<u64>, Error> {
+    let path = genome_dir.join("genomeParameters.txt");
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Error::io(e, &path)),
+    };
+    for line in contents.lines() {
+        if let Some(rest) = line.strip_prefix("genomeFileSizes\t")
+            && let Some(first) = rest.split_whitespace().next()
+            && let Ok(v) = first.parse::<u64>()
+        {
+            return Ok(Some(v));
+        }
+    }
+    Ok(None)
 }
 
 /// Load genome from disk.
@@ -119,7 +142,14 @@ fn load_genome(genome_dir: &Path, _params: &Parameters) -> Result<Genome, Error>
         .collect();
 
     let n_chr_real = chr_name.len();
-    let n_genome = chr_start[n_chr_real]; // Last entry is total size
+
+    // `chr_start[n_chr_real]` is the forward boundary of REAL chromosomes
+    // only — it stays pinned at the pre-sjdb value in STAR (`chrStart.txt`).
+    // When sjdb has been baked into the index, the total genome size
+    // (real + Gsj) lives in `genomeParameters.txt` under `genomeFileSizes`.
+    // Prefer that value; fall back to the chr_start boundary for indices
+    // built without a GTF.
+    let n_genome = read_genome_file_size(genome_dir)?.unwrap_or(chr_start[n_chr_real]);
 
     // Load Genome sequence file
     let genome_path = genome_dir.join("Genome");

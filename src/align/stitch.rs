@@ -2368,31 +2368,19 @@ pub(crate) fn split_combined_wt(
     }
 
     // STAR PE-CHECK2 (stitchAlignToTranscript.cpp): reject combined WTs where
-    // mate1's genomic end exceeds mate2's estimated genomic end. This prevents
-    // false mate1 splice junctions where the splice extends past what mate2 covers.
-    //
-    // For forward cluster: m1 exon coords are in mate1_seq space, m2 in rc_mate2_seq space.
-    // m2_est_end = last_m2_exon.genome_start + (len2 - last_m2_exon.read_start)
-    //            = genome_start + remaining_rc_mate2_bases
-    // Reject if m1_genome_end > m2_est_end.
-    //
-    // For reverse cluster (stitch_is_reverse=true): roles swap — mate2 is forward,
-    // mate1 is reverse. m1 exons are in rc_mate1 space, m2 exons in mate2_seq space.
-    // m1_est_end = last_m1_exon.genome_start + (len1 - last_m1_exon.read_start)
-    // Reject if m2_genome_end > m1_est_end.
-    // STAR PE-CHECK2 only fires when mate1 has a splice junction (multiple exons).
-    // For single-exon mate1, the geometry is simple and the check is not needed
-    // (and would cause false rejections for overlapping/closely-mapped pairs).
+    // mate1's genomic end exceeds mate2's estimated genomic end.
+    // Applied unconditionally (not just for spliced mates) — STAR's debug shows
+    // PE-CHECK2 fires for single-exon mate1 too, correctly rejecting overlapping pairs.
     {
         let m1_last = m1_exons.last().unwrap();
         let m2_last = m2_exons.last().unwrap();
-        if !stitch_is_reverse && m1_exons.len() > 1 {
+        if !stitch_is_reverse {
             let m2_est_end = m2_last.genome_start
                 + (len2 as u64).saturating_sub(m2_last.read_start as u64);
             if m1_last.genome_end > m2_est_end {
                 return None;
             }
-        } else if stitch_is_reverse && m2_exons.len() > 1 {
+        } else {
             let m1_est_end = m1_last.genome_start
                 + (len1 as u64).saturating_sub(m1_last.read_start as u64);
             if m2_last.genome_end > m1_est_end {

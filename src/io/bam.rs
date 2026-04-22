@@ -3,12 +3,14 @@ use crate::error::Error;
 use crate::genome::Genome;
 use crate::params::Parameters;
 use crate::quant::transcriptome::TranscriptomeIndex;
+use byteorder::{LittleEndian, WriteBytesExt};
 use noodles::bam;
 use noodles::sam;
 use noodles::sam::alignment::io::Write as SamWrite;
 use noodles::sam::alignment::record_buf::RecordBuf;
+use std::ffi::CString;
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 /// Buffer for BAM records built by parallel threads
@@ -43,10 +45,21 @@ pub struct BamWriter {
 
 impl BamWriter {
     /// Create a BAM writer at `output_path` with the given prepared header.
+    ///
+    /// Uses a lenient header writer that bypasses noodles' SAM-spec
+    /// reference-name validator. STAR accepts `(` / `)` in reference names
+    /// (yeast tRNA transcripts like `tP(UGG)A`), which noodles' strict
+    /// validator rejects. Writing the SAM text portion of the BAM header
+    /// manually sidesteps that validation while preserving every other byte.
     fn with_header(output_path: &Path, header: sam::Header) -> Result<Self, Error> {
         let buf_writer = BufWriter::new(File::create(output_path)?);
-        let mut writer = bam::io::Writer::new(buf_writer);
-        writer.write_header(&header)?;
+        // Wrap in BGZF *before* writing header bytes so the header lands in
+        // BGZF blocks just like noodles would write it.
+        let mut bgzf = noodles::bgzf::Writer::new(buf_writer);
+        write_bam_header_lenient(&mut bgzf, &header)?;
+        // Reconstruct a bam::io::Writer on top of the already-BGZF-framed
+        // underlying stream so subsequent record writes use noodles.
+        let writer = bam::io::Writer::from(bgzf);
         Ok(Self { writer, header })
     }
 
@@ -94,6 +107,130 @@ impl BamWriter {
         log::info!("BAM file written successfully");
         Ok(())
     }
+}
+
+/// Write a BAM header that tolerates reference sequence names STAR emits
+/// (e.g. `tP(UGG)A`) but that noodles' SAM-spec validator rejects.
+///
+/// Replicates `noodles_bam::io::writer::header::write_header` byte-for-byte
+/// for compliant headers; the only divergence is that the SAM text block
+/// between `BAM\x01` and the binary reference list is produced via a local
+/// formatter instead of `sam::io::Writer::write_header`, so forbidden-char
+/// names pass through unchanged.
+///
+/// Binary reference list (after the text block) uses `CString::new` — the
+/// only constraint there is "no interior nul", which is enforced upstream
+/// via the usual UTF-8 input.
+fn write_bam_header_lenient<W: Write>(writer: &mut W, header: &sam::Header) -> Result<(), Error> {
+    const MAGIC: &[u8; 4] = b"BAM\x01";
+
+    writer.write_all(MAGIC)?;
+
+    // Build the SAM text block byte-for-byte identical to
+    // `sam::io::Writer::write_header` minus the name validator:
+    // `@HD`, `@SQ` (one per reference), `@RG` (if any), `@PG` (if any),
+    // `@CO` (if any), each line terminated by `\n`.
+    let text = render_sam_text_lenient(header);
+    let l_text = i32::try_from(text.len()).map_err(|_| {
+        Error::Index(format!(
+            "BAM SAM-text header exceeds i32::MAX bytes: {} bytes",
+            text.len()
+        ))
+    })?;
+    writer.write_i32::<LittleEndian>(l_text)?;
+    writer.write_all(&text)?;
+
+    // Binary reference list: n_ref then (l_name, name\0, l_ref) per ref.
+    let refs = header.reference_sequences();
+    let n_ref = i32::try_from(refs.len())
+        .map_err(|_| Error::Index("BAM reference count exceeds i32::MAX".into()))?;
+    writer.write_i32::<LittleEndian>(n_ref)?;
+    for (name, rs) in refs {
+        let c_name = CString::new(name.to_vec()).map_err(|e| {
+            Error::Index(format!("reference name contains interior NUL byte: {}", e))
+        })?;
+        let name_bytes = c_name.as_bytes_with_nul();
+        let l_name = u32::try_from(name_bytes.len()).map_err(|_| {
+            Error::Index(format!(
+                "reference name longer than u32::MAX: {} bytes",
+                name_bytes.len()
+            ))
+        })?;
+        writer.write_u32::<LittleEndian>(l_name)?;
+        writer.write_all(name_bytes)?;
+        let l_ref = i32::try_from(usize::from(rs.length()))
+            .map_err(|_| Error::Index("reference length exceeds i32::MAX".into()))?;
+        writer.write_i32::<LittleEndian>(l_ref)?;
+    }
+
+    Ok(())
+}
+
+fn render_sam_text_lenient(header: &sam::Header) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::new();
+
+    // @HD line. noodles' Map<Header> in this version doesn't expose
+    // sort_order/group_order via dedicated accessors; we serialize through
+    // the generic `other_fields` map (which includes SO/GO when set).
+    if let Some(hd) = header.header() {
+        buf.extend_from_slice(b"@HD\tVN:");
+        buf.extend_from_slice(hd.version().to_string().as_bytes());
+        for (tag, value) in hd.other_fields() {
+            buf.push(b'\t');
+            buf.extend_from_slice(tag.as_ref());
+            buf.push(b':');
+            buf.extend_from_slice(value);
+        }
+        buf.push(b'\n');
+    }
+
+    // @SQ lines. Use the raw bytes so forbidden characters pass through.
+    for (name, rs) in header.reference_sequences() {
+        buf.extend_from_slice(b"@SQ\tSN:");
+        buf.extend_from_slice(name);
+        buf.extend_from_slice(b"\tLN:");
+        buf.extend_from_slice(usize::from(rs.length()).to_string().as_bytes());
+        // Other optional @SQ fields (AH, AN, AS, DS, M5, SP, TP, UR) —
+        // ruSTAR doesn't set any today, so skip.
+        buf.push(b'\n');
+    }
+
+    // @RG lines.
+    for (id, rg) in header.read_groups() {
+        buf.extend_from_slice(b"@RG\tID:");
+        buf.extend_from_slice(id);
+        for (tag, value) in rg.other_fields() {
+            buf.push(b'\t');
+            buf.extend_from_slice(tag.as_ref());
+            buf.push(b':');
+            buf.extend_from_slice(value);
+        }
+        buf.push(b'\n');
+    }
+
+    // @PG lines — noodles' map doesn't guarantee insertion order; for
+    // ruSTAR we emit a single @PG with id "ruSTAR". If more are added
+    // later, pipe them in here.
+    for (id, pg) in header.programs().as_ref() {
+        buf.extend_from_slice(b"@PG\tID:");
+        buf.extend_from_slice(id);
+        for (tag, value) in pg.other_fields() {
+            buf.push(b'\t');
+            buf.extend_from_slice(tag.as_ref());
+            buf.push(b':');
+            buf.extend_from_slice(value);
+        }
+        buf.push(b'\n');
+    }
+
+    // @CO lines (comments).
+    for comment in header.comments() {
+        buf.extend_from_slice(b"@CO\t");
+        buf.extend_from_slice(comment);
+        buf.push(b'\n');
+    }
+
+    buf
 }
 
 #[cfg(test)]

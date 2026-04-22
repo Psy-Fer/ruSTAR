@@ -112,6 +112,9 @@ pub struct TranscriptomeIndex {
     pub tr_exons: Vec<Vec<TrExon>>,
     /// Total transcript-space length (sum of exon spans).
     pub tr_length: Vec<u32>,
+    /// First-exon offset into a flat global exon array, per transcript
+    /// (STAR's `trExI` column in `transcriptInfo.tab`).
+    pub tr_exi: Vec<u32>,
     /// Permutation of `0..n_transcripts` sorted by `(tr_start, tr_end)`.
     pub tr_order: Vec<usize>,
     /// `tr_start[tr_order[i]]` — for `binary_search`.
@@ -247,6 +250,14 @@ impl TranscriptomeIndex {
 
         let n_tr = tr_ids.len();
 
+        // Cumulative exon offset per transcript — matches STAR's `trExI` column.
+        let mut tr_exi: Vec<u32> = Vec::with_capacity(n_tr);
+        let mut cum: u32 = 0;
+        for exs in &tr_exons_vec {
+            tr_exi.push(cum);
+            cum = cum.saturating_add(exs.len() as u32);
+        }
+
         // Sorted view by (tr_start, tr_end) for binary-search +
         // running-max early-exit.
         let mut tr_order: Vec<usize> = (0..n_tr).collect();
@@ -273,6 +284,7 @@ impl TranscriptomeIndex {
             tr_end,
             tr_exons: tr_exons_vec,
             tr_length,
+            tr_exi,
             tr_order,
             tr_starts_sorted,
             tr_end_max_sorted,
@@ -842,6 +854,24 @@ mod tests {
         // Different lengths: T1 = 100+100 = 200, T2 = 100+200 = 300
         assert_eq!(idx.tr_length[0], 200);
         assert_eq!(idx.tr_length[1], 300);
+    }
+
+    #[test]
+    fn tr_exi_cumulative() {
+        let genome = make_genome();
+        // T1: 3 exons, T2: 2 exons, T3: 1 exon.  tr_exi = [0, 3, 5].
+        let exons = vec![
+            make_exon("chr1", 101, 200, '+', "G1", "T1"),
+            make_exon("chr1", 301, 400, '+', "G1", "T1"),
+            make_exon("chr1", 501, 600, '+', "G1", "T1"),
+            make_exon("chr1", 101, 200, '+', "G1", "T2"),
+            make_exon("chr1", 301, 400, '+', "G1", "T2"),
+            make_exon("chr1", 101, 300, '+', "G2", "T3"),
+        ];
+        let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        assert_eq!(idx.tr_exi, vec![0, 3, 5]);
+        let total: u32 = idx.tr_exons.iter().map(|e| e.len() as u32).sum();
+        assert_eq!(total, 6);
     }
 
     #[test]

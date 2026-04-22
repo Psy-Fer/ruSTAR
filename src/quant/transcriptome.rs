@@ -114,9 +114,8 @@ pub struct TranscriptomeIndex {
     pub tr_chr_idx: Vec<usize>,
     /// Strand per transcript: 1 = forward/`+`, 2 = reverse/`-`.
     pub tr_strand: Vec<u8>,
-    /// gene_id string per transcript.
-    pub tr_gene_id: Vec<String>,
     /// Index into `gene_ids` per transcript — matches STAR's `trGene` column.
+    /// Look up the string form via `gene_ids[tr_gene_idx[tr] as usize]`.
     pub tr_gene_idx: Vec<u32>,
     /// Unique gene IDs in first-seen order (STAR's `geneInfo.tab` column 1).
     pub gene_ids: Vec<String>,
@@ -171,7 +170,6 @@ impl TranscriptomeIndex {
         let mut tr_ids: Vec<String> = Vec::new();
         let mut tr_chr_idx: Vec<usize> = Vec::new();
         let mut tr_strand: Vec<u8> = Vec::new();
-        let mut tr_gene_id: Vec<String> = Vec::new();
         let mut tr_gene_idx: Vec<u32> = Vec::new();
         let mut tr_start: Vec<u64> = Vec::new();
         let mut tr_end: Vec<u64> = Vec::new();
@@ -306,7 +304,6 @@ impl TranscriptomeIndex {
             tr_ids.push(tid.clone());
             tr_chr_idx.push(chr_idx);
             tr_strand.push(strand_u8);
-            tr_gene_id.push(gene_id);
             tr_gene_idx.push(gene_idx);
             tr_start.push(start_abs);
             tr_end.push(end_abs);
@@ -348,7 +345,6 @@ impl TranscriptomeIndex {
             tr_ids,
             tr_chr_idx,
             tr_strand,
-            tr_gene_id,
             tr_gene_idx,
             gene_ids,
             gene_names,
@@ -438,12 +434,6 @@ impl TranscriptomeIndex {
             tr_chr_idx.push(chr_idx);
         }
 
-        // Legacy `tr_gene_id` string view from the integer index.
-        let tr_gene_id: Vec<String> = tr_gene_idx
-            .iter()
-            .map(|&g| gene_ids.get(g as usize).cloned().unwrap_or_default())
-            .collect();
-
         // Sorted view: transcripts are already in sorted order on disk, so
         // tr_order = identity.
         let tr_order: Vec<usize> = (0..n_tr).collect();
@@ -459,7 +449,6 @@ impl TranscriptomeIndex {
             tr_ids,
             tr_chr_idx,
             tr_strand,
-            tr_gene_id,
             tr_gene_idx,
             gene_ids,
             gene_names,
@@ -1432,7 +1421,7 @@ mod tests {
         let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
         assert_eq!(idx.n_transcripts(), 1);
         assert_eq!(idx.tr_ids[0], "T1");
-        assert_eq!(idx.tr_gene_id[0], "G1");
+        assert_eq!(idx.gene_ids[idx.tr_gene_idx[0] as usize], "G1");
         assert_eq!(idx.tr_strand[0], 1);
         assert_eq!(idx.tr_chr_idx[0], 0);
         // GTF 1-based 101 → absolute 0-based 100; end 200 → absolute 200 (exclusive)
@@ -1494,8 +1483,8 @@ mod tests {
         ];
         let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
         assert_eq!(idx.n_transcripts(), 2);
-        assert_eq!(idx.tr_gene_id[0], "G1");
-        assert_eq!(idx.tr_gene_id[1], "G1");
+        assert_eq!(idx.gene_ids[idx.tr_gene_idx[0] as usize], "G1");
+        assert_eq!(idx.gene_ids[idx.tr_gene_idx[1] as usize], "G1");
         // Different lengths: T1 = 100+100 = 200, T2 = 100+200 = 300
         assert_eq!(idx.tr_length[0], 200);
         assert_eq!(idx.tr_length[1], 300);

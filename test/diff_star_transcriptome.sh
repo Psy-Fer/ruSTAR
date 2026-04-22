@@ -60,21 +60,23 @@ with open("annotations.gtf", "w") as f:
     f.write('chr2\ttest\texon\t1301\t1400\t.\t+\t.\tgene_id "G4"; transcript_id "T4";\n')
 PYEOF
 
-# STAR and ruSTAR genomeGenerate — use the SAME genomeDir name (`index`)
-# so that the CLI-echo comment line in genomeParameters.txt matches too.
-# We just swap the on-disk directory between runs.
+# STAR and ruSTAR genomeGenerate. Both tools echo `--genomeDir <dir>`
+# into genomeParameters.txt's commandLineFull comment, so the two must
+# receive the SAME literal path string for that line to match byte-for-byte.
+# Run each in a subshell that symlinks `index` → the per-tool output dir,
+# pass `--genomeDir index` to both, then resolve the symlink away.
 rm -rf star_index rustar_index index
-mkdir index
+mkdir star_index rustar_index
+
+ln -sfn star_index index
 STAR --runMode genomeGenerate --genomeDir index \
      --genomeFastaFiles genome.fa --sjdbGTFfile annotations.gtf \
      --genomeSAindexNbases 5 --sjdbOverhang 49 --runThreadN 1 >/dev/null 2>&1
-mv index star_index
-
-mkdir index
+ln -sfn rustar_index index
 "$RUSTAR_BIN" --runMode genomeGenerate --genomeDir index \
      --genomeFastaFiles genome.fa --sjdbGTFfile annotations.gtf \
      --genomeSAindexNbases 5 --sjdbOverhang 49 --runThreadN 1 >/dev/null 2>&1
-mv index rustar_index
+rm -f index
 
 # Diff each file.
 pass=0

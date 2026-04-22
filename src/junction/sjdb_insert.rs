@@ -12,6 +12,10 @@
 //! The module is orchestrated from `index::GenomeIndex::build` after the
 //! base suffix array has been built.
 
+use std::fs::File;
+use std::io::{BufWriter, Write as _};
+use std::path::Path;
+
 use crate::align::score::detect_splice_motif;
 use crate::error::Error;
 use crate::genome::Genome;
@@ -293,6 +297,79 @@ fn sjdb_bounds_err(pj: &PreparedJunction, overhang: usize, reason: &str) -> Erro
         pj.original_end(),
         pj.chr_idx,
     ))
+}
+
+/// STAR's strand character table (`sjdbPrepare.cpp:198`): strand 0→'.',
+/// 1→'+', 2→'-'. Any other value is an internal error.
+fn strand_char(strand: u8) -> char {
+    match strand {
+        0 => '.',
+        1 => '+',
+        2 => '-',
+        _ => '?',
+    }
+}
+
+/// Write STAR's `sjdbInfo.txt` (`sjdbPrepare.cpp:196-215`).
+///
+/// Format: one header line `<n>\t<sjdbOverhang>\n` followed by one row per
+/// junction with six tab-separated fields:
+/// `stored_start  stored_end  motif  shift_left  shift_right  strand\n`.
+///
+/// `junctions` must already be in STAR's final sorted/deduped order.
+pub fn write_sjdb_info_tab(
+    path: &Path,
+    junctions: &[PreparedJunction],
+    sjdb_overhang: u32,
+) -> Result<(), Error> {
+    let file = File::create(path).map_err(|e| Error::io(e, path))?;
+    let mut w = BufWriter::new(file);
+    writeln!(w, "{}\t{}", junctions.len(), sjdb_overhang).map_err(|e| Error::io(e, path))?;
+    for pj in junctions {
+        writeln!(
+            w,
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            pj.stored_start(),
+            pj.stored_end(),
+            pj.motif,
+            pj.shift_left,
+            pj.shift_right,
+            pj.strand,
+        )
+        .map_err(|e| Error::io(e, path))?;
+    }
+    w.flush().map_err(|e| Error::io(e, path))?;
+    Ok(())
+}
+
+/// Write STAR's `sjdbList.out.tab` (`sjdbPrepare.cpp:197-219`).
+///
+/// Format: one row per junction with four tab-separated fields:
+/// `chr  <1-based start>  <1-based end>  <strand_char>\n`. Coordinates
+/// are chromosome-local and always reflect the pre-shift ("original")
+/// intron boundaries, regardless of motif type.
+pub fn write_sjdb_list_out_tab(
+    path: &Path,
+    junctions: &[PreparedJunction],
+    genome: &Genome,
+) -> Result<(), Error> {
+    let file = File::create(path).map_err(|e| Error::io(e, path))?;
+    let mut w = BufWriter::new(file);
+    for pj in junctions {
+        let chr_start = genome.chr_start[pj.chr_idx];
+        let name = &genome.chr_name[pj.chr_idx];
+        writeln!(
+            w,
+            "{}\t{}\t{}\t{}",
+            name,
+            pj.original_start() - chr_start + 1,
+            pj.original_end() - chr_start + 1,
+            strand_char(pj.strand),
+        )
+        .map_err(|e| Error::io(e, path))?;
+    }
+    w.flush().map_err(|e| Error::io(e, path))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -636,6 +713,101 @@ mod tests {
         let bad = pj(0, 100, 295, 1, 0, 1);
         let err = build_gsj(&[bad], &g, g.n_genome, 10).unwrap_err();
         assert!(format!("{}", err).contains("overruns"));
+    }
+
+    #[test]
+    fn write_sjdb_info_matches_star_format() {
+        // Bytes exactly match STAR's `sjdbPrepare.cpp:200+215` format:
+        // header "n\toverhang\n" then six tab-separated fields per row.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let junctions = vec![
+            // Canonical: stored = original = 87387..87499, motif 1, shiftR 1, strand 1.
+            PreparedJunction {
+                chr_idx: 0,
+                start_pos: 87387, // shifted — shift_left=0, so stored=original
+                end_pos: 87499,
+                motif: 1,
+                shift_left: 0,
+                shift_right: 1,
+                strand: 1,
+            },
+            // Non-canonical: stored = shifted (139187..139217).
+            PreparedJunction {
+                chr_idx: 0,
+                start_pos: 139187,
+                end_pos: 139217,
+                motif: 0,
+                shift_left: 0,
+                shift_right: 0,
+                strand: 1,
+            },
+        ];
+        write_sjdb_info_tab(tmp.path(), &junctions, 99).unwrap();
+        let bytes = std::fs::read(tmp.path()).unwrap();
+        assert_eq!(
+            bytes,
+            b"2\t99\n87387\t87499\t1\t0\t1\t1\n139187\t139217\t0\t0\t0\t1\n"
+        );
+    }
+
+    #[test]
+    fn write_sjdb_list_is_1_based_chr_local() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut genome = make_test_genome(vec![0u8; 200_000]);
+        genome.chr_name = vec!["I".to_string()];
+        // Canonical junction — stored == original — (motif>0 path).
+        let canon = PreparedJunction {
+            chr_idx: 0,
+            start_pos: 87387,
+            end_pos: 87499,
+            motif: 1,
+            shift_left: 0,
+            shift_right: 0,
+            strand: 1,
+        };
+        // Non-canonical with shift_left=3 — STAR writes
+        // `stored + shift_left + 1`, which is `original + 1`.
+        let noncan = PreparedJunction {
+            chr_idx: 0,
+            start_pos: 139184, // shifted
+            end_pos: 139214,
+            motif: 0,
+            shift_left: 3,
+            shift_right: 0,
+            strand: 0,
+        };
+        write_sjdb_list_out_tab(tmp.path(), &[canon, noncan], &genome).unwrap();
+        let bytes = std::fs::read(tmp.path()).unwrap();
+        assert_eq!(bytes, b"I\t87388\t87500\t+\nI\t139188\t139218\t.\n");
+    }
+
+    #[test]
+    fn write_sjdb_list_uses_chr_local_coords_for_second_chromosome() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        // Two chromosomes: chrA length 1000, chrB starts at 1000, length 1000.
+        let mut seq = vec![5u8; 4000];
+        seq[..2000].copy_from_slice(&vec![0u8; 2000]);
+        let genome = Genome {
+            sequence: seq,
+            n_genome: 2000,
+            n_chr_real: 2,
+            chr_name: vec!["chrA".to_string(), "chrB".to_string()],
+            chr_length: vec![1000, 1000],
+            chr_start: vec![0, 1000, 2000],
+        };
+        let pj_b = PreparedJunction {
+            chr_idx: 1,
+            start_pos: 1500,
+            end_pos: 1900,
+            motif: 1,
+            shift_left: 0,
+            shift_right: 0,
+            strand: 2,
+        };
+        write_sjdb_list_out_tab(tmp.path(), &[pj_b], &genome).unwrap();
+        let bytes = std::fs::read(tmp.path()).unwrap();
+        // chrB-local: 1500-1000+1 = 501, 1900-1000+1 = 901.
+        assert_eq!(bytes, b"chrB\t501\t901\t-\n");
     }
 
     #[test]

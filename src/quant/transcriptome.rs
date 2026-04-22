@@ -404,6 +404,38 @@ impl TranscriptomeIndex {
     fn tr_end_inclusive(&self, i: usize) -> u64 {
         self.tr_end[i].saturating_sub(1)
     }
+
+    /// Write `exonInfo.tab` into `dir`, byte-for-byte matching STAR's
+    /// `GTF_transcriptGeneSJ.cpp:86-112` format:
+    ///
+    /// - Header: total exon count across all transcripts.
+    /// - Per-exon line: `exStart_relative\texEnd_relative\texLenCum\n`
+    ///
+    /// Coordinates are transcript-relative (exon start/end minus transcript
+    /// start), 0-based, with `exEnd` INCLUSIVE (matches STAR's `exE`).
+    /// Exons are emitted in STAR's sort order: transcripts in `(tr_start,
+    /// tr_end)` order, exons within each transcript in genome order.
+    pub fn write_exon_info(&self, dir: &Path) -> Result<(), Error> {
+        let path = dir.join("exonInfo.tab");
+        let file = std::fs::File::create(&path).map_err(|e| Error::io(e, &path))?;
+        let mut out = std::io::BufWriter::new(file);
+
+        let total_exons: usize = self.tr_exons.iter().map(|e| e.len()).sum();
+        writeln!(out, "{total_exons}").map_err(|e| Error::io(e, &path))?;
+
+        for &i in &self.tr_order {
+            let tr_s = self.tr_start[i];
+            for ex in &self.tr_exons[i] {
+                // STAR's exEnd is 0-based INCLUSIVE; ruSTAR stores exclusive.
+                let ex_start_rel = ex.genome_start - tr_s;
+                let ex_end_rel = ex.genome_end.saturating_sub(1) - tr_s;
+                writeln!(out, "{}\t{}\t{}", ex_start_rel, ex_end_rel, ex.ex_len_cum)
+                    .map_err(|e| Error::io(e, &path))?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,6 +1132,55 @@ mod tests {
              T_small\t100\t199\t199\t1\t1\t0\t0\n\
              T_big\t300\t699\t199\t1\t1\t1\t0\n\
              T_mid\t800\t899\t699\t1\t1\t2\t0\n"
+        );
+    }
+
+    #[test]
+    fn exon_info_tab_byte_format() {
+        let genome = make_genome();
+        // T1: 2 exons at [100,200) and [300,400), total 200 bases.
+        // T2: 1 exon at [500,650), 150 bases.
+        let exons = vec![
+            make_exon_with_attrs("chr1", 101, 200, '+', "T1", &[("gene_id", "G1")]),
+            make_exon_with_attrs("chr1", 301, 400, '+', "T1", &[("gene_id", "G1")]),
+            make_exon_with_attrs("chr1", 501, 650, '+', "T2", &[("gene_id", "G1")]),
+        ];
+        let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        idx.write_exon_info(dir.path()).unwrap();
+        let body = std::fs::read_to_string(dir.path().join("exonInfo.tab")).unwrap();
+        // Order: T1 (sorted pos 0) then T2. Each exon: start_rel \t end_rel(incl) \t exLenCum
+        //   T1 tr_start = 100. Exon 1: 100-100=0, 200-1-100=99, lenCum=0.
+        //                      Exon 2: 300-100=200, 400-1-100=299, lenCum=100.
+        //   T2 tr_start = 500. Exon 1: 500-500=0, 650-1-500=149, lenCum=0.
+        assert_eq!(
+            body,
+            "3\n\
+             0\t99\t0\n\
+             200\t299\t100\n\
+             0\t149\t0\n"
+        );
+    }
+
+    #[test]
+    fn exon_info_respects_sort_order() {
+        let genome = make_genome();
+        // Insert T_late first, T_early second. In sorted order T_early comes first.
+        let exons = vec![
+            make_exon_with_attrs("chr1", 501, 600, '+', "T_late", &[("gene_id", "G1")]),
+            make_exon_with_attrs("chr1", 101, 200, '+', "T_early", &[("gene_id", "G1")]),
+        ];
+        let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        idx.write_exon_info(dir.path()).unwrap();
+        let body = std::fs::read_to_string(dir.path().join("exonInfo.tab")).unwrap();
+        // T_early first (sorted pos 0): 0 \t 99 \t 0
+        // T_late second:                0 \t 99 \t 0
+        assert_eq!(
+            body,
+            "2\n\
+             0\t99\t0\n\
+             0\t99\t0\n"
         );
     }
 

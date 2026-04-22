@@ -104,6 +104,14 @@ pub struct TranscriptomeIndex {
     pub tr_strand: Vec<u8>,
     /// gene_id string per transcript.
     pub tr_gene_id: Vec<String>,
+    /// Index into `gene_ids` per transcript — matches STAR's `trGene` column.
+    pub tr_gene_idx: Vec<u32>,
+    /// Unique gene IDs in first-seen order (STAR's `geneInfo.tab` column 1).
+    pub gene_ids: Vec<String>,
+    /// gene_name per gene (empty string if the GTF record had no `gene_name`).
+    pub gene_names: Vec<String>,
+    /// gene_biotype per gene (empty if absent).
+    pub gene_biotypes: Vec<String>,
     /// Absolute genome start of the first exon (0-based).
     pub tr_start: Vec<u64>,
     /// Absolute genome end of the last exon (0-based half-open).
@@ -148,10 +156,18 @@ impl TranscriptomeIndex {
         let mut tr_chr_idx: Vec<usize> = Vec::new();
         let mut tr_strand: Vec<u8> = Vec::new();
         let mut tr_gene_id: Vec<String> = Vec::new();
+        let mut tr_gene_idx: Vec<u32> = Vec::new();
         let mut tr_start: Vec<u64> = Vec::new();
         let mut tr_end: Vec<u64> = Vec::new();
         let mut tr_exons_vec: Vec<Vec<TrExon>> = Vec::new();
         let mut tr_length: Vec<u32> = Vec::new();
+
+        // Gene-interning pass: each unique gene_id gets a position-based
+        // integer index, matching STAR's geneInfo.tab / trGene column.
+        let mut gene_ids: Vec<String> = Vec::new();
+        let mut gene_names: Vec<String> = Vec::new();
+        let mut gene_biotypes: Vec<String> = Vec::new();
+        let mut gene_id_to_idx: HashMap<String, u32> = HashMap::new();
 
         for tid in &order {
             let mut recs = groups.remove(tid).unwrap();
@@ -237,11 +253,38 @@ impl TranscriptomeIndex {
             };
 
             let gene_id = first.attributes.get("gene_id").cloned().unwrap_or_default();
+            let gene_name = first
+                .attributes
+                .get("gene_name")
+                .cloned()
+                .unwrap_or_default();
+            let gene_biotype = first
+                .attributes
+                .get("gene_biotype")
+                .cloned()
+                .unwrap_or_default();
+
+            // Intern the gene — first transcript for each gene_id wins the
+            // name/biotype slot. Subsequent transcripts with a richer name or
+            // biotype do NOT overwrite (STAR's Transcriptome writer is
+            // first-seen-wins too).
+            let gene_idx = match gene_id_to_idx.get(&gene_id) {
+                Some(&i) => i,
+                None => {
+                    let i = gene_ids.len() as u32;
+                    gene_id_to_idx.insert(gene_id.clone(), i);
+                    gene_ids.push(gene_id.clone());
+                    gene_names.push(gene_name);
+                    gene_biotypes.push(gene_biotype);
+                    i
+                }
+            };
 
             tr_ids.push(tid.clone());
             tr_chr_idx.push(chr_idx);
             tr_strand.push(strand_u8);
             tr_gene_id.push(gene_id);
+            tr_gene_idx.push(gene_idx);
             tr_start.push(start_abs);
             tr_end.push(end_abs);
             tr_exons_vec.push(tr_exons);
@@ -280,6 +323,10 @@ impl TranscriptomeIndex {
             tr_chr_idx,
             tr_strand,
             tr_gene_id,
+            tr_gene_idx,
+            gene_ids,
+            gene_names,
+            gene_biotypes,
             tr_start,
             tr_end,
             tr_exons: tr_exons_vec,
@@ -854,6 +901,70 @@ mod tests {
         // Different lengths: T1 = 100+100 = 200, T2 = 100+200 = 300
         assert_eq!(idx.tr_length[0], 200);
         assert_eq!(idx.tr_length[1], 300);
+    }
+
+    fn make_exon_with_attrs(
+        seqname: &str,
+        start: u64,
+        end: u64,
+        strand: char,
+        transcript_id: &str,
+        gene_attrs: &[(&str, &str)],
+    ) -> GtfRecord {
+        let mut attrs = HashMap::new();
+        attrs.insert("transcript_id".to_string(), transcript_id.to_string());
+        for (k, v) in gene_attrs {
+            attrs.insert(k.to_string(), v.to_string());
+        }
+        GtfRecord {
+            seqname: seqname.to_string(),
+            feature: "exon".to_string(),
+            start,
+            end,
+            strand,
+            attributes: attrs,
+        }
+    }
+
+    #[test]
+    fn gene_interning_first_seen_wins() {
+        let genome = make_genome();
+        // Two transcripts on gene G1, one on gene G2. G1 name set via T1;
+        // T2 has no name — interning should NOT overwrite G1's name.
+        let exons = vec![
+            make_exon_with_attrs(
+                "chr1",
+                101,
+                200,
+                '+',
+                "T1",
+                &[
+                    ("gene_id", "G1"),
+                    ("gene_name", "GENE1"),
+                    ("gene_biotype", "protein_coding"),
+                ],
+            ),
+            make_exon_with_attrs("chr1", 301, 400, '+', "T2", &[("gene_id", "G1")]),
+            make_exon_with_attrs(
+                "chr1",
+                501,
+                600,
+                '+',
+                "T3",
+                &[("gene_id", "G2"), ("gene_name", "GENE2")],
+            ),
+        ];
+        let idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        assert_eq!(idx.gene_ids, vec!["G1".to_string(), "G2".to_string()]);
+        assert_eq!(
+            idx.gene_names,
+            vec!["GENE1".to_string(), "GENE2".to_string()]
+        );
+        assert_eq!(
+            idx.gene_biotypes,
+            vec!["protein_coding".to_string(), "".to_string()]
+        );
+        assert_eq!(idx.tr_gene_idx, vec![0, 0, 1]);
     }
 
     #[test]

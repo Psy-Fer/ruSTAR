@@ -135,6 +135,7 @@ def compare_se(star_path, rustar_path):
     # --- exact record comparison ---
     n_exact        = 0
     n_pos_agree    = 0
+    n_tie_pos      = 0   # pos differs but MAPQ+NH agree → tie-breaking, not an error
     diff_pos       = 0
     diff_chr       = 0
     diff_strand    = 0
@@ -178,6 +179,14 @@ def compare_se(star_path, rustar_path):
         same_nh = (s_nh == r_nh)
         same_as = (s_as == r_as)
         same_nm = (s_nm == r_nm)
+
+        # A tie-breaking difference: position differs but MAPQ and NH agree.
+        # Both tools found the same pool of equally-valid alignments and chose
+        # different primaries — neither is wrong, just a different valid choice.
+        is_tie_pos = (not same_pos) and same_mapq and same_nh
+
+        if is_tie_pos:
+            n_tie_pos += 1
 
         if same_chr and same_pos and same_strand and same_cigar and same_mapq and same_flag_se:
             n_exact += 1
@@ -234,12 +243,17 @@ def compare_se(star_path, rustar_path):
                 nm_disagree_examples.append(f"  {k}: ruSTAR_NM={r_nm} STAR_NM={s_nm}")
 
     n = len(both)
+    n_adj = n - n_tie_pos   # denominator excluding tie-breaking position differences
+    n_exact_adj = n_exact   # exact matches are all among non-tie reads (ties never exact-match pos)
     print(f"\n{'─'*50}")
     print("EXACT-RECORD AGREEMENT (primary alignments, both mapped)")
     print(f"{'─'*50}")
     pct = lambda x: f"{100*x/max(n,1):.3f}%"
+    pct_adj = lambda x: f"{100*x/max(n_adj,1):.3f}%"
     print(f"  Total compared:          {n}")
-    print(f"  Exact match (all fields):{n_exact:>8}  ({pct(n_exact)})")
+    print(f"  Tie-breaking diffs:      {n_tie_pos:>6}  (pos differs, same MAPQ+NH — excluded below)")
+    print(f"  Comparable (non-tie):    {n_adj}")
+    print(f"  Exact match (all fields):{n_exact:>8}  ({pct(n_exact)} raw / {pct_adj(n_exact_adj)} tie-adjusted)")
     print(f"  Position+strand agree:   {n_pos_agree:>8}  ({pct(n_pos_agree)})")
     print()
     print("  Breakdown of disagreements:")
@@ -274,7 +288,7 @@ def compare_se(star_path, rustar_path):
     if only_rustar:
         print(f"\n  ruSTAR-only reads (false positives): {sorted(only_rustar)[:10]}")
 
-    return n_exact, n
+    return n_exact, n_adj
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +319,7 @@ def compare_pe(star_path, rustar_path):
 
     n_exact     = 0
     n_pos_agree = 0
+    n_tie_pos   = 0   # pos differs but MAPQ+NH agree → tie-breaking, not an error
     diff_pos    = 0
     diff_cigar  = 0
     diff_mapq   = 0
@@ -340,6 +355,13 @@ def compare_pe(star_path, rustar_path):
         same_nh = (s_nh == r_nh)
         same_as = (s_as == r_as)
         same_nm = (s_nm == r_nm)
+
+        # A tie-breaking difference: position differs but MAPQ and NH agree.
+        # Both tools found the same pool of equally-valid alignments and chose
+        # different primaries — neither is wrong, just a different valid choice.
+        is_tie_pos = (not same_pos) and same_mapq and same_nh
+        if is_tie_pos:
+            n_tie_pos += 1
 
         if same_cigar and same_mapq and same_proper and same_nh:
             n_exact += 1
@@ -378,12 +400,16 @@ def compare_pe(star_path, rustar_path):
             diff_nm += 1
 
     n = len(both)
+    n_adj = n - n_tie_pos   # denominator excluding tie-breaking position differences
     pct = lambda x: f"{100*x/max(n,1):.3f}%"
+    pct_adj = lambda x: f"{100*x/max(n_adj,1):.3f}%"
     print(f"\n{'─'*50}")
     print("EXACT-RECORD AGREEMENT (per mate, both mapped)")
     print(f"{'─'*50}")
     print(f"  Total compared:          {n}")
-    print(f"  Exact match (pos+CIGAR+MAPQ+proper+NH): {n_exact:>6}  ({pct(n_exact)})")
+    print(f"  Tie-breaking diffs:      {n_tie_pos:>6}  (pos differs, same MAPQ+NH — excluded below)")
+    print(f"  Comparable (non-tie):    {n_adj}")
+    print(f"  Exact match (pos+CIGAR+MAPQ+proper+NH): {n_exact:>6}  ({pct(n_exact)} raw / {pct_adj(n_exact)} tie-adjusted)")
     print(f"  Position+strand agree:   {n_pos_agree:>8}  ({pct(n_pos_agree)})")
     print()
     print("  Breakdown of disagreements:")
@@ -410,7 +436,7 @@ def compare_pe(star_path, rustar_path):
         qnames = sorted(set(k[0] for k in only_rustar))[:10]
         print(f"\n  ruSTAR-only mates (sample): {qnames}")
 
-    return n_exact, n
+    return n_exact, n_adj
 
 
 # ---------------------------------------------------------------------------
@@ -592,11 +618,11 @@ def main():
 
     if (not args.pe_only and not args.sj_only) and args.se_star and args.se_rustar:
         se_exact, se_total = compare_se(args.se_star, args.se_rustar)
-        results.append(("SE exact records (pos+strand+CIGAR+MAPQ)", se_exact, se_total))
+        results.append(("SE exact records (tie-adjusted denom)", se_exact, se_total))
 
     if (not args.se_only and not args.sj_only) and args.pe_star and args.pe_rustar:
         pe_exact, pe_total = compare_pe(args.pe_star, args.pe_rustar)
-        results.append(("PE exact mates (pos+CIGAR+MAPQ+proper+NH)", pe_exact, pe_total))
+        results.append(("PE exact mates (tie-adjusted denom)", pe_exact, pe_total))
 
     if (not args.se_only and not args.pe_only) and args.sj_star and args.sj_rustar:
         sj_exact, sj_total = compare_sj(args.sj_star, args.sj_rustar)

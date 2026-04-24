@@ -2,12 +2,15 @@
 use crate::error::Error;
 use crate::genome::Genome;
 use crate::params::Parameters;
+use crate::quant::transcriptome::TranscriptomeIndex;
+use byteorder::{LittleEndian, WriteBytesExt};
 use noodles::bam;
 use noodles::sam;
 use noodles::sam::alignment::io::Write as SamWrite;
 use noodles::sam::alignment::record_buf::RecordBuf;
+use std::ffi::CString;
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 /// Buffer for BAM records built by parallel threads
@@ -41,24 +44,50 @@ pub struct BamWriter {
 }
 
 impl BamWriter {
-    /// Create a new BAM writer with header from genome index
+    /// Create a BAM writer at `output_path` with the given prepared header.
     ///
-    /// # Arguments
-    /// * `output_path` - Path to output BAM file
-    /// * `genome` - Genome index with chromosome information
-    /// * `params` - Parameters (for @PG header)
-    pub fn create(output_path: &Path, genome: &Genome, params: &Parameters) -> Result<Self, Error> {
-        let file = File::create(output_path)?;
-        let buf_writer = BufWriter::new(file);
-
-        // Reuse SAM header building logic
-        let header = crate::io::sam::build_sam_header(genome, params)?;
-
-        // Create BAM writer (Writer::new handles BGZF compression internally)
-        let mut writer = bam::io::Writer::new(buf_writer);
-        writer.write_header(&header)?;
-
+    /// Uses a lenient header writer that bypasses noodles' SAM-spec
+    /// reference-name validator. STAR accepts `(` / `)` in reference names
+    /// (yeast tRNA transcripts like `tP(UGG)A`), which noodles' strict
+    /// validator rejects. Writing the SAM text portion of the BAM header
+    /// manually sidesteps that validation while preserving every other byte.
+    fn with_header(output_path: &Path, header: sam::Header) -> Result<Self, Error> {
+        let buf_writer = BufWriter::new(File::create(output_path)?);
+        // Wrap in BGZF *before* writing header bytes so the header lands in
+        // BGZF blocks just like noodles would write it.
+        let mut bgzf = noodles::bgzf::Writer::new(buf_writer);
+        write_bam_header_lenient(&mut bgzf, &header)?;
+        // Reconstruct a bam::io::Writer on top of the already-BGZF-framed
+        // underlying stream so subsequent record writes use noodles.
+        let writer = bam::io::Writer::from(bgzf);
         Ok(Self { writer, header })
+    }
+
+    /// Create a new BAM writer with header from genome index.
+    pub fn create(output_path: &Path, genome: &Genome, params: &Parameters) -> Result<Self, Error> {
+        Self::with_header(
+            output_path,
+            crate::io::sam::build_sam_header(genome, params)?,
+        )
+    }
+
+    /// Create a BAM writer whose @SQ header lists the transcripts (not
+    /// chromosomes) from `tr_idx`.  Used for
+    /// `Aligned.toTranscriptome.out.bam`.
+    pub fn create_transcriptome(
+        output_path: &Path,
+        tr_idx: &TranscriptomeIndex,
+        params: &Parameters,
+    ) -> Result<Self, Error> {
+        let refs = tr_idx
+            .tr_ids
+            .iter()
+            .zip(tr_idx.tr_length.iter())
+            .map(|(id, len)| (id.as_str(), *len as usize));
+        Self::with_header(
+            output_path,
+            crate::io::sam::build_sam_header_from_refs(refs, params)?,
+        )
     }
 
     /// Write batch of buffered records (for parallel processing)
@@ -78,6 +107,130 @@ impl BamWriter {
         log::info!("BAM file written successfully");
         Ok(())
     }
+}
+
+/// Write a BAM header that tolerates reference sequence names STAR emits
+/// (e.g. `tP(UGG)A`) but that noodles' SAM-spec validator rejects.
+///
+/// Replicates `noodles_bam::io::writer::header::write_header` byte-for-byte
+/// for compliant headers; the only divergence is that the SAM text block
+/// between `BAM\x01` and the binary reference list is produced via a local
+/// formatter instead of `sam::io::Writer::write_header`, so forbidden-char
+/// names pass through unchanged.
+///
+/// Binary reference list (after the text block) uses `CString::new` — the
+/// only constraint there is "no interior nul", which is enforced upstream
+/// via the usual UTF-8 input.
+fn write_bam_header_lenient<W: Write>(writer: &mut W, header: &sam::Header) -> Result<(), Error> {
+    const MAGIC: &[u8; 4] = b"BAM\x01";
+
+    writer.write_all(MAGIC)?;
+
+    // Build the SAM text block byte-for-byte identical to
+    // `sam::io::Writer::write_header` minus the name validator:
+    // `@HD`, `@SQ` (one per reference), `@RG` (if any), `@PG` (if any),
+    // `@CO` (if any), each line terminated by `\n`.
+    let text = render_sam_text_lenient(header);
+    let l_text = i32::try_from(text.len()).map_err(|_| {
+        Error::Index(format!(
+            "BAM SAM-text header exceeds i32::MAX bytes: {} bytes",
+            text.len()
+        ))
+    })?;
+    writer.write_i32::<LittleEndian>(l_text)?;
+    writer.write_all(&text)?;
+
+    // Binary reference list: n_ref then (l_name, name\0, l_ref) per ref.
+    let refs = header.reference_sequences();
+    let n_ref = i32::try_from(refs.len())
+        .map_err(|_| Error::Index("BAM reference count exceeds i32::MAX".into()))?;
+    writer.write_i32::<LittleEndian>(n_ref)?;
+    for (name, rs) in refs {
+        let c_name = CString::new(name.to_vec()).map_err(|e| {
+            Error::Index(format!("reference name contains interior NUL byte: {}", e))
+        })?;
+        let name_bytes = c_name.as_bytes_with_nul();
+        let l_name = u32::try_from(name_bytes.len()).map_err(|_| {
+            Error::Index(format!(
+                "reference name longer than u32::MAX: {} bytes",
+                name_bytes.len()
+            ))
+        })?;
+        writer.write_u32::<LittleEndian>(l_name)?;
+        writer.write_all(name_bytes)?;
+        let l_ref = i32::try_from(usize::from(rs.length()))
+            .map_err(|_| Error::Index("reference length exceeds i32::MAX".into()))?;
+        writer.write_i32::<LittleEndian>(l_ref)?;
+    }
+
+    Ok(())
+}
+
+fn render_sam_text_lenient(header: &sam::Header) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::new();
+
+    // @HD line. noodles' Map<Header> in this version doesn't expose
+    // sort_order/group_order via dedicated accessors; we serialize through
+    // the generic `other_fields` map (which includes SO/GO when set).
+    if let Some(hd) = header.header() {
+        buf.extend_from_slice(b"@HD\tVN:");
+        buf.extend_from_slice(hd.version().to_string().as_bytes());
+        for (tag, value) in hd.other_fields() {
+            buf.push(b'\t');
+            buf.extend_from_slice(tag.as_ref());
+            buf.push(b':');
+            buf.extend_from_slice(value);
+        }
+        buf.push(b'\n');
+    }
+
+    // @SQ lines. Use the raw bytes so forbidden characters pass through.
+    for (name, rs) in header.reference_sequences() {
+        buf.extend_from_slice(b"@SQ\tSN:");
+        buf.extend_from_slice(name);
+        buf.extend_from_slice(b"\tLN:");
+        buf.extend_from_slice(usize::from(rs.length()).to_string().as_bytes());
+        // Other optional @SQ fields (AH, AN, AS, DS, M5, SP, TP, UR) —
+        // ruSTAR doesn't set any today, so skip.
+        buf.push(b'\n');
+    }
+
+    // @RG lines.
+    for (id, rg) in header.read_groups() {
+        buf.extend_from_slice(b"@RG\tID:");
+        buf.extend_from_slice(id);
+        for (tag, value) in rg.other_fields() {
+            buf.push(b'\t');
+            buf.extend_from_slice(tag.as_ref());
+            buf.push(b':');
+            buf.extend_from_slice(value);
+        }
+        buf.push(b'\n');
+    }
+
+    // @PG lines — noodles' map doesn't guarantee insertion order; for
+    // ruSTAR we emit a single @PG with id "ruSTAR". If more are added
+    // later, pipe them in here.
+    for (id, pg) in header.programs().as_ref() {
+        buf.extend_from_slice(b"@PG\tID:");
+        buf.extend_from_slice(id);
+        for (tag, value) in pg.other_fields() {
+            buf.push(b'\t');
+            buf.extend_from_slice(tag.as_ref());
+            buf.push(b':');
+            buf.extend_from_slice(value);
+        }
+        buf.push(b'\n');
+    }
+
+    // @CO lines (comments).
+    for comment in header.comments() {
+        buf.extend_from_slice(b"@CO\t");
+        buf.extend_from_slice(comment);
+        buf.push(b'\n');
+    }
+
+    buf
 }
 
 #[cfg(test)]
@@ -157,6 +310,7 @@ mod tests {
                 genome_end: 104,
                 read_start: 0,
                 read_end: 4,
+                i_frag: 0,
             }],
             cigar: vec![CigarOp::Match(4)],
             score: 0,
@@ -189,6 +343,41 @@ mod tests {
 
         let result = writer.finish();
         assert!(result.is_ok(), "Finishing BAM file should succeed");
+    }
+
+    #[test]
+    fn test_bam_transcriptome_writer_creation() {
+        use crate::junction::gtf::GtfRecord;
+        use crate::quant::transcriptome::TranscriptomeIndex;
+        use std::collections::HashMap;
+
+        let genome = create_test_genome();
+        // Stretch genome / exon to fit the tiny test chromosome.
+        let mut attrs = HashMap::new();
+        attrs.insert("gene_id".to_string(), "G1".to_string());
+        attrs.insert("transcript_id".to_string(), "T1".to_string());
+        let exons = vec![GtfRecord {
+            seqname: "chr1".to_string(),
+            feature: "exon".to_string(),
+            start: 1,
+            end: 8,
+            strand: '+',
+            attributes: attrs,
+        }];
+        let tr_idx = TranscriptomeIndex::from_gtf_exons(&exons, &genome).unwrap();
+        assert_eq!(tr_idx.n_transcripts(), 1);
+
+        let params = create_test_params();
+        let temp_file = NamedTempFile::new().unwrap();
+        let writer = BamWriter::create_transcriptome(temp_file.path(), &tr_idx, &params);
+        assert!(
+            writer.is_ok(),
+            "transcriptome BAM writer creation should succeed"
+        );
+
+        // Header should contain exactly 1 @SQ entry (matching n_transcripts).
+        let writer = writer.unwrap();
+        assert_eq!(writer.header.reference_sequences().len(), 1);
     }
 
     #[test]

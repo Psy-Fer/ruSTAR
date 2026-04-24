@@ -205,35 +205,105 @@ impl Genome {
             writeln!(f, "{}\t{}", name, len).map_err(|e| Error::io(e, &chr_name_length_path))?;
         }
 
-        // Write genomeParameters.txt
-        let genome_params_path = dir.join("genomeParameters.txt");
-        let mut f =
-            fs::File::create(&genome_params_path).map_err(|e| Error::io(e, &genome_params_path))?;
+        // Write genomeParameters.txt — byte-for-byte matching STAR's
+        // `genomeParametersWrite.cpp` layout (order, tab/space separators,
+        // trailing whitespace on vector values). STAR's loader reads these
+        // keys via `<<` streaming; the leading `###` comment lines are
+        // skipped.
+        self.write_genome_parameters_txt(dir, params)?;
 
-        writeln!(f, "### STAR genome generation parameters").unwrap();
-        writeln!(f, "versionGenome\t2.7.11b").unwrap(); // ruSTAR version (we can bump this)
+        Ok(())
+    }
 
-        // genomeFastaFiles (space-separated)
-        write!(f, "genomeFastaFiles").unwrap();
-        for path in &params.genome_fasta_files {
-            write!(f, "\t{}", path.display()).unwrap();
+    fn write_genome_parameters_txt(&self, dir: &Path, params: &Parameters) -> Result<(), Error> {
+        use std::fs;
+        use std::io::Write;
+
+        let path = dir.join("genomeParameters.txt");
+        let mut f = fs::File::create(&path).map_err(|e| Error::io(e, &path))?;
+
+        // STAR writes: `### <commandLineFull>\n` where commandLineFull is
+        // "<argv[0]>   --<name1> <val1>   --<name2> <val2> ...".  We emit
+        // the same skeleton using our known-at-invocation parameters.
+        // Not exposed for retrospective exact-byte match against an arbitrary
+        // STAR run's commandLineFull — see `docs/genome_params_divergence.md`
+        // for the short list of parameters we echo.
+        let fasta_list = params
+            .genome_fasta_files
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let gtf = params
+            .sjdb_gtf_file
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".to_string());
+        writeln!(
+            f,
+            "### STAR   --runMode genomeGenerate      --runThreadN {thr}   --genomeDir {dir}   --genomeFastaFiles {fa}      --genomeSAindexNbases {sai}   --sjdbGTFfile {gtf}   --sjdbOverhang {ov}",
+            thr = params.run_thread_n,
+            dir = dir.display(),
+            fa = fasta_list,
+            sai = params.genome_sa_index_nbases,
+            gtf = gtf,
+            ov = params.sjdb_overhang,
+        )
+        .map_err(|e| Error::io(e, &path))?;
+
+        // GstrandBit: floor(log2(nGenome + limitSjdbInsertNsj*sjdbLength))+1,
+        // clamped at a minimum of 32. STAR's default limitSjdbInsertNsj is
+        // 1e6, so the log-derived value is always >= 32 for sane genomes;
+        // use the clamped minimum directly.
+        writeln!(f, "### GstrandBit 32").map_err(|e| Error::io(e, &path))?;
+
+        // Value lines — exact order + tab/space separators match STAR's
+        // genomeParametersWrite.cpp:11-42.
+        writeln!(f, "versionGenome\t2.7.4a").map_err(|e| Error::io(e, &path))?;
+        writeln!(f, "genomeType\tFull").map_err(|e| Error::io(e, &path))?;
+
+        // Vectors: `key\t<v1> <v2> ... \n` with trailing space after each
+        // value (STAR emits one ostream `<<` per element).
+        write!(f, "genomeFastaFiles\t").map_err(|e| Error::io(e, &path))?;
+        for p in &params.genome_fasta_files {
+            write!(f, "{} ", p.display()).map_err(|e| Error::io(e, &path))?;
         }
-        writeln!(f).unwrap();
+        writeln!(f).map_err(|e| Error::io(e, &path))?;
 
-        writeln!(f, "genomeSAindexNbases\t{}", params.genome_sa_index_nbases).unwrap();
-        writeln!(f, "genomeChrBinNbits\t{}", params.genome_chr_bin_nbits).unwrap();
-        writeln!(f, "genomeSAsparseD\t{}", params.genome_sa_sparse_d).unwrap();
+        writeln!(f, "genomeSAindexNbases\t{}", params.genome_sa_index_nbases)
+            .map_err(|e| Error::io(e, &path))?;
+        writeln!(f, "genomeChrBinNbits\t{}", params.genome_chr_bin_nbits)
+            .map_err(|e| Error::io(e, &path))?;
+        writeln!(f, "genomeSAsparseD\t{}", params.genome_sa_sparse_d)
+            .map_err(|e| Error::io(e, &path))?;
 
-        // sjdb parameters
-        if let Some(ref gtf) = params.sjdb_gtf_file {
-            writeln!(f, "sjdbGTFfile\t{}", gtf.display()).unwrap();
-        } else {
-            writeln!(f, "sjdbGTFfile\t-").unwrap();
-        }
-        writeln!(f, "sjdbOverhang\t{}", params.sjdb_overhang).unwrap();
+        writeln!(f, "genomeTransformType\tNone").map_err(|e| Error::io(e, &path))?;
+        writeln!(f, "genomeTransformVCF\t-").map_err(|e| Error::io(e, &path))?;
 
-        // genomeFileSizes: <genome_size> <SA_size> (SA is 0 for now since we haven't built it)
-        writeln!(f, "genomeFileSizes\t{}\t0", self.n_genome).unwrap();
+        writeln!(f, "sjdbOverhang\t{}", params.sjdb_overhang).map_err(|e| Error::io(e, &path))?;
+
+        // sjdbFileChrStartEnd: empty vector → `-` plus STAR's trailing space.
+        writeln!(f, "sjdbFileChrStartEnd\t- ").map_err(|e| Error::io(e, &path))?;
+
+        let gtf_str = params
+            .sjdb_gtf_file
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "-".to_string());
+        writeln!(f, "sjdbGTFfile\t{}", gtf_str).map_err(|e| Error::io(e, &path))?;
+        writeln!(f, "sjdbGTFchrPrefix\t-").map_err(|e| Error::io(e, &path))?;
+        writeln!(f, "sjdbGTFfeatureExon\texon").map_err(|e| Error::io(e, &path))?;
+        writeln!(f, "sjdbGTFtagExonParentTranscript\ttranscript_id")
+            .map_err(|e| Error::io(e, &path))?;
+        writeln!(f, "sjdbGTFtagExonParentGene\tgene_id").map_err(|e| Error::io(e, &path))?;
+
+        writeln!(f, "sjdbInsertSave\tBasic").map_err(|e| Error::io(e, &path))?;
+
+        // genomeFileSizes: tab before the FIRST value, spaces between
+        // subsequent values (STAR's pattern of `<< "\t"` then `<< " "`).
+        // SA is 0 at this point because `Genome::write_index_files` runs
+        // before SA is known; `GenomeIndex::write` patches it after.
+        writeln!(f, "genomeFileSizes\t{} 0", self.n_genome).map_err(|e| Error::io(e, &path))?;
 
         Ok(())
     }

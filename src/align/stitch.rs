@@ -1890,6 +1890,9 @@ pub(crate) fn finalize_transcript(
                     genome_end: genome_pos_e + len as u64,
                     read_start: read_pos_e,
                     read_end: read_pos_e + len,
+                    // SE / mate1. PE pair-building in `try_pair_transcripts`
+                    // rewrites mate2's exons to `i_frag = 1`.
+                    i_frag: 0,
                 });
                 read_pos_e += len;
                 genome_pos_e += len as u64;
@@ -2375,14 +2378,14 @@ pub(crate) fn split_combined_wt(
         let m1_last = m1_exons.last().unwrap();
         let m2_last = m2_exons.last().unwrap();
         if !stitch_is_reverse {
-            let m2_est_end = m2_last.genome_start
-                + (len2 as u64).saturating_sub(m2_last.read_start as u64);
+            let m2_est_end =
+                m2_last.genome_start + (len2 as u64).saturating_sub(m2_last.read_start as u64);
             if m1_last.genome_end > m2_est_end {
                 return None;
             }
         } else {
-            let m1_est_end = m1_last.genome_start
-                + (len1 as u64).saturating_sub(m1_last.read_start as u64);
+            let m1_est_end =
+                m1_last.genome_start + (len1 as u64).saturating_sub(m1_last.read_start as u64);
             if m2_last.genome_end > m1_est_end {
                 return None;
             }
@@ -2399,8 +2402,14 @@ pub(crate) fn split_combined_wt(
     let m2_genome_end = m2_exons.iter().map(|e| e.genome_end).max().unwrap();
 
     // Approximate per-mate score from exon coverage (includes inner spacer extensions)
-    let m1_score: i32 = m1_exons.iter().map(|e| (e.read_end - e.read_start) as i32).sum();
-    let m2_score: i32 = m2_exons.iter().map(|e| (e.read_end - e.read_start) as i32).sum();
+    let m1_score: i32 = m1_exons
+        .iter()
+        .map(|e| (e.read_end - e.read_start) as i32)
+        .sum();
+    let m2_score: i32 = m2_exons
+        .iter()
+        .map(|e| (e.read_end - e.read_start) as i32)
+        .sum();
 
     Some((
         WorkingTranscript {
@@ -2966,6 +2975,7 @@ mod tests {
             suffix_array,
             sa_index,
             junction_db: crate::junction::SpliceJunctionDb::empty(),
+            transcriptome: None,
         }
     }
 
@@ -3084,6 +3094,7 @@ mod tests {
             suffix_array,
             sa_index,
             junction_db: crate::junction::SpliceJunctionDb::empty(),
+            transcriptome: None,
         }
     }
 

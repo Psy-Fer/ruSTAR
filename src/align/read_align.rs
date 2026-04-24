@@ -609,20 +609,6 @@ pub fn align_paired_read(
     // Cluster combined seeds using the combined read length
     let clusters = cluster_seeds(&combined_seeds, index, params, combined_len);
 
-    if debug_pe {
-        eprintln!(
-            "[DEBUG-PE] Combined: seeds={} clusters={}",
-            combined_seeds.len(),
-            clusters.len()
-        );
-        for (i, c) in clusters.iter().enumerate() {
-            eprintln!(
-                "  cluster[{}]: rev={} chr={} seeds={}",
-                i, c.is_reverse, c.chr_idx, c.alignments.len()
-            );
-        }
-    }
-
     // Combined score threshold: use len1+len2 as denominator
     let combined_score_threshold =
         (params.out_filter_score_min_over_lread * (len1 + len2) as f64) as i32;

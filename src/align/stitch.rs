@@ -2406,7 +2406,7 @@ pub(crate) fn split_combined_wt(
         WorkingTranscript {
             exons: m1_exons,
             score: m1_score,
-            n_mismatch: 0,
+            n_mismatch: wt.n_mismatch,
             n_gap: 0,
             n_junction: m1_jm.len() as u32,
             junction_motifs: m1_jm,
@@ -2421,7 +2421,7 @@ pub(crate) fn split_combined_wt(
         WorkingTranscript {
             exons: m2_exons,
             score: m2_score,
-            n_mismatch: 0,
+            n_mismatch: wt.n_mismatch,
             n_gap: 0,
             n_junction: m2_jm.len() as u32,
             junction_motifs: m2_jm,

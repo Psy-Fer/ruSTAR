@@ -2,8 +2,8 @@
 use crate::align::score::{AlignmentScorer, SpliceMotif};
 use crate::align::seed::Seed;
 use crate::align::stitch::{
-    PE_SPACER_BASE, cluster_seeds, finalize_transcript, split_combined_wt, stitch_seeds_core,
-    stitch_seeds_with_jdb_debug,
+    PE_SPACER_BASE, cluster_seeds, finalize_transcript, split_combined_wt,
+    stitch_seeds_core, stitch_seeds_with_jdb_debug,
 };
 use crate::align::transcript::{Exon, Transcript};
 use crate::error::Error;
@@ -210,7 +210,7 @@ pub fn align_read(
 
     // Step 2: Cluster seeds (STAR's bin-based windowing)
     // seed_per_window_nmax capacity eviction is handled inside cluster_seeds()
-    let clusters = cluster_seeds(&seeds, index, params, read_seq.len());
+    let clusters = cluster_seeds(&seeds, index, params, read_seq.len(), debug_read);
 
     if debug_read {
         eprintln!(
@@ -676,28 +676,38 @@ pub fn align_paired_read(
     combined_read.extend_from_slice(&rc_mate2);
     let combined_len = combined_read.len();
 
-    // STAR-faithful combined-read seeding: seed the full combined read as one unit.
-    // PE_SPACER_BASE=11 stops MMP search at the boundary — seeds never span mates.
-    // For 301bp: Nstart=7 (301/50+1). Position 129 gives ≤21bp seeds (spacer at 150)
-    // → less likely unique for repetitive (rDNA) sequences → fewer N² cross-copy pairings.
+    // STAR-faithful per-fragment seeding: seed each mate fragment separately using
+    // the fragment length for Nstart/Lstart, then merge into combined_read coords.
+    // STAR uses qualitySplit() starting positions based on fragment length (e.g. 150bp
+    // → Nstart=4, Lstart=37, starts={0,37,74,111}), NOT the combined length (301bp
+    // → Nstart=7, starts={0,43,...,129,...}). Using combined length creates a spurious
+    // start at position 129 (between mates) that can produce anchors widening windows
+    // beyond STAR's range, causing window overflow and eviction of valid 7M exon seeds.
     let mut combined_seeds = Seed::find_seeds(
-        &combined_read,
+        &combined_read[..len1],
         index,
         params.seed_map_min,
         params,
         debug_name,
     )?;
-    // After find_seeds, ALL seeds (search_rc=false and search_rc=true) have read_pos
-    // in combined_read coordinates. The RC conversion in search_direction_sparse:
-    //   seed.read_pos = combined_len - p - L (where p is position in RC(combined_read))
-    // maps RC positions back to combined_read space. So the same boundary applies:
-    // positions 0..len1 → mate1; positions len1+1.. → RC(mate2).
+    let mut m2_seeds = Seed::find_seeds(
+        &combined_read[len1 + 1..],
+        index,
+        params.seed_map_min,
+        params,
+        if debug_pe { debug_name } else { "" },
+    )?;
+    for s in &mut m2_seeds {
+        s.read_pos += len1 + 1;
+    }
+    combined_seeds.extend(m2_seeds);
+    // mate_id: positions 0..len1 → mate1(0); positions len1+1.. → RC(mate2)(1).
     for s in &mut combined_seeds {
         s.mate_id = if s.read_pos < len1 { 0 } else { 1 };
     }
 
     // Cluster combined seeds using the combined read length
-    let clusters = cluster_seeds(&combined_seeds, index, params, combined_len);
+    let clusters = cluster_seeds(&combined_seeds, index, params, combined_len, debug_pe);
 
     // Combined score threshold: use len1+len2 as denominator
     let combined_score_threshold =
@@ -721,7 +731,8 @@ pub fn align_paired_read(
         )?;
 
         for wt in &wts {
-            match split_combined_wt(wt, len1, len2, stitch_is_reverse, scorer.align_intron_min) {
+            let split_result = split_combined_wt(wt, len1, len2, stitch_is_reverse, scorer.align_intron_min);
+            match split_result {
                 Some((m1_wt, m2_wt)) => {
                     let (m1_read_slice, m1_orig_rev, m2_read_slice, m2_orig_rev) =
                         if stitch_is_reverse {

@@ -374,6 +374,7 @@ pub fn cluster_seeds(
     index: &GenomeIndex,
     params: &crate::params::Parameters,
     read_len: usize,
+    _debug: bool,
 ) -> Vec<SeedCluster> {
     use std::collections::HashMap;
 
@@ -580,6 +581,7 @@ pub fn cluster_seeds(
         for bin in (old_end + 1)..=new_end {
             win_bin.entry((strand, bin)).or_insert(win_idx);
         }
+
     }
 
     // Phase 4: Assign ALL seeds to windows (matches STAR's stitchPieces Phase 3).
@@ -629,14 +631,18 @@ pub fn cluster_seeds(
 
             let chr_idx = match index.genome.position_to_chr(forward_pos) {
                 Some(info) => info.0,
-                None => continue,
+                None => {
+                    continue;
+                }
             };
 
             let seed_bin = forward_pos >> win_bin_nbits;
 
             let win_idx = match win_bin.get(&(strand, seed_bin)) {
                 Some(&idx) if windows[idx].alive && windows[idx].chr_idx == chr_idx => idx,
-                _ => continue,
+                _ => {
+                    continue;
+                }
             };
 
             let ps_rstart = if windows[win_idx].is_reverse {
@@ -873,7 +879,7 @@ pub fn cluster_seeds(
 
     // Phase 5: Build SeedCluster output
     let mut clusters = Vec::with_capacity(windows.len());
-    for window in &windows {
+    for window in windows.iter() {
         if !window.alive || window.alignments.is_empty() {
             continue;
         }
@@ -1178,6 +1184,13 @@ fn stitch_align_to_transcript(
 
         // STAR: Del > alignIntronMax → reject (return -1000003)
         if del > scorer.align_intron_max && scorer.align_intron_max > 0 {
+            return None;
+        }
+
+        // STAR stitchAlignToTranscript.cpp: reject splice when exon B is too short
+        // (nBstart < alignSJoverhangMin). Prevents tiny exons from creating spurious
+        // splice paths that waste recursion budget with large introns.
+        if is_splice && eff_length < scorer.align_sj_overhang_min as usize {
             return None;
         }
 
@@ -2747,9 +2760,6 @@ pub(crate) fn stitch_seeds_core(
         }
     }
 
-    // Find last anchor index for the anchor constraint
-    let last_anchor_idx = wa_entries.iter().rposition(|wa| wa.is_anchor);
-
     // --- STAR stitchWindowSeeds.cpp: scoreSeedBest pre-extension ---
     //
     // Phase 1: Pre-extend each seed left and right (base case of scoreSeedBest DP).
@@ -2883,6 +2893,9 @@ pub(crate) fn stitch_seeds_core(
     // entry for future use in seed ordering (Phase B), but do not filter here.
     let _ = best_pre_score; // suppress unused warning
 
+    // Find last anchor index for the anchor constraint
+    let last_anchor_idx = wa_entries.iter().rposition(|wa| wa.is_anchor);
+
     // Run recursive include/exclude stitcher
     let mut working_transcripts: Vec<WorkingTranscript> = Vec::new();
     let mut recursion_count: u32 = 0;
@@ -3014,7 +3027,7 @@ mod tests {
             use clap::Parser;
             crate::params::Parameters::parse_from(vec!["ruSTAR"])
         };
-        let clusters = cluster_seeds(&seeds, &index, &params, 150);
+        let clusters = cluster_seeds(&seeds, &index, &params, 150, false);
 
         // With empty SA ranges, no clusters will be created
         assert_eq!(clusters.len(), 0);

@@ -134,21 +134,18 @@ fn compare_suffixes(
     let start_a = if reverse_a { pos_a + n_genome } else { pos_a };
     let start_b = if reverse_b { pos_b + n_genome } else { pos_b };
 
-    // Maximum comparison length
-    let max_len = n_genome.min(1000); // Limit to prevent excessive comparisons
+    // Compare up to n_genome bytes. Padding (5) stops the comparison early
+    // in practice. Out-of-bounds (RC suffixes near the genome boundary) is
+    // treated as padding so those entries sort correctly rather than falling
+    // through to the position-only fallback.
+    let max_len = n_genome;
 
-    // Compare byte by byte (simplified from STAR's 8-byte word comparison)
     for offset in 0..max_len {
         let idx_a = start_a + offset;
         let idx_b = start_b + offset;
 
-        // Check bounds
-        if idx_a >= sequence.len() || idx_b >= sequence.len() {
-            break;
-        }
-
-        let byte_a = sequence[idx_a];
-        let byte_b = sequence[idx_b];
+        let byte_a = if idx_a < sequence.len() { sequence[idx_a] } else { 5 };
+        let byte_b = if idx_b < sequence.len() { sequence[idx_b] } else { 5 };
 
         // Stop at padding (value 5) - this is STAR's sentinel
         let is_padding_a = byte_a == 5;

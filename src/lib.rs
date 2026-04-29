@@ -98,6 +98,15 @@ impl AlignmentWriter for crate::io::bam::BamWriter {
     }
 }
 
+impl AlignmentWriter for crate::io::bam::SortedBamWriter {
+    fn write_batch(
+        &mut self,
+        batch: &[noodles::sam::alignment::record_buf::RecordBuf],
+    ) -> Result<(), error::Error> {
+        self.write_batch(batch)
+    }
+}
+
 fn align_reads(params: &Parameters) -> anyhow::Result<()> {
     use crate::index::GenomeIndex;
 
@@ -218,7 +227,7 @@ fn run_single_pass(
     quant_ctx: Option<&std::sync::Arc<crate::quant::QuantContext>>,
     tr_idx: Option<&std::sync::Arc<crate::quant::transcriptome::TranscriptomeIndex>>,
 ) -> anyhow::Result<std::sync::Arc<crate::stats::AlignmentStats>> {
-    use crate::io::bam::BamWriter;
+    use crate::io::bam::{BamWriter, SortedBamWriter};
     use crate::io::sam::SamWriter;
     use crate::params::OutSamFormat;
     use std::sync::Arc;
@@ -288,43 +297,82 @@ fn run_single_pass(
             }?;
         }
         OutSamFormat::Bam => {
-            let output_path = params.out_file_name_prefix.join("Aligned.out.bam");
+            use crate::params::OutSamSortOrder;
+
+            let sorted = out_type.sort_order == Some(OutSamSortOrder::SortedByCoordinate);
+            let output_path = if sorted {
+                params
+                    .out_file_name_prefix
+                    .join("Aligned.sortedByCoord.out.bam")
+            } else {
+                params.out_file_name_prefix.join("Aligned.out.bam")
+            };
             info!("Writing BAM to {}", output_path.display());
 
-            // Create output directory if it doesn't exist
             if let Some(parent) = output_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
 
-            let mut writer = BamWriter::create(&output_path, &index.genome, params)?;
-
-            // Route to single-end or paired-end mode (same functions as SAM, generic!)
-            match params.read_files_in.len() {
-                1 => align_reads_single_end(
-                    params,
-                    index,
-                    &mut writer,
-                    &stats,
-                    &sj_stats,
-                    quant.as_ref(),
-                    tr.as_ref(),
-                    tr_writer.as_mut(),
-                ),
-                2 => align_reads_paired_end(
-                    params,
-                    index,
-                    &mut writer,
-                    &stats,
-                    &sj_stats,
-                    quant.as_ref(),
-                    tr.as_ref(),
-                    tr_writer.as_mut(),
-                ),
-                n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
-            }?;
-
-            // Finish BAM file (flush BGZF buffers)
-            writer.finish()?;
+            if sorted {
+                let mut writer =
+                    SortedBamWriter::create(&output_path, &index.genome, params)?;
+                match params.read_files_in.len() {
+                    1 => align_reads_single_end(
+                        params,
+                        index,
+                        &mut writer,
+                        &stats,
+                        &sj_stats,
+                        quant.as_ref(),
+                        tr.as_ref(),
+                        tr_writer.as_mut(),
+                    ),
+                    2 => align_reads_paired_end(
+                        params,
+                        index,
+                        &mut writer,
+                        &stats,
+                        &sj_stats,
+                        quant.as_ref(),
+                        tr.as_ref(),
+                        tr_writer.as_mut(),
+                    ),
+                    n => anyhow::bail!(
+                        "Invalid number of read files: {} (expected 1 or 2)",
+                        n
+                    ),
+                }?;
+                writer.finish()?;
+            } else {
+                let mut writer = BamWriter::create(&output_path, &index.genome, params)?;
+                match params.read_files_in.len() {
+                    1 => align_reads_single_end(
+                        params,
+                        index,
+                        &mut writer,
+                        &stats,
+                        &sj_stats,
+                        quant.as_ref(),
+                        tr.as_ref(),
+                        tr_writer.as_mut(),
+                    ),
+                    2 => align_reads_paired_end(
+                        params,
+                        index,
+                        &mut writer,
+                        &stats,
+                        &sj_stats,
+                        quant.as_ref(),
+                        tr.as_ref(),
+                        tr_writer.as_mut(),
+                    ),
+                    n => anyhow::bail!(
+                        "Invalid number of read files: {} (expected 1 or 2)",
+                        n
+                    ),
+                }?;
+                writer.finish()?;
+            }
         }
         OutSamFormat::None => {
             info!("Output format set to None, skipping alignment output");

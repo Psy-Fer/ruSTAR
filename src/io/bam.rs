@@ -43,6 +43,16 @@ pub struct BamWriter {
     header: sam::Header,
 }
 
+/// BAM file writer that collects all records in memory, sorts by coordinate,
+/// then writes a single sorted BAM file on `finish()`.
+///
+/// The header emits `SO:coordinate`. Unmapped records sort to the end.
+pub struct SortedBamWriter {
+    records: Vec<RecordBuf>,
+    output_path: std::path::PathBuf,
+    header: sam::Header,
+}
+
 impl BamWriter {
     /// Create a BAM writer at `output_path` with the given prepared header.
     ///
@@ -56,7 +66,7 @@ impl BamWriter {
         // Wrap in BGZF *before* writing header bytes so the header lands in
         // BGZF blocks just like noodles would write it.
         let mut bgzf = noodles::bgzf::Writer::new(buf_writer);
-        write_bam_header_lenient(&mut bgzf, &header)?;
+        write_bam_header_lenient(&mut bgzf, &header, None)?;
         // Reconstruct a bam::io::Writer on top of the already-BGZF-framed
         // underlying stream so subsequent record writes use noodles.
         let writer = bam::io::Writer::from(bgzf);
@@ -109,6 +119,56 @@ impl BamWriter {
     }
 }
 
+impl SortedBamWriter {
+    /// Create a sorted BAM writer. Records are buffered in memory until `finish()`.
+    pub fn create(
+        output_path: &Path,
+        genome: &crate::genome::Genome,
+        params: &Parameters,
+    ) -> Result<Self, Error> {
+        let header = crate::io::sam::build_sam_header(genome, params)?;
+        Ok(Self {
+            records: Vec::new(),
+            output_path: output_path.to_path_buf(),
+            header,
+        })
+    }
+
+    /// Buffer records — no disk I/O yet.
+    pub fn write_batch(&mut self, batch: &[RecordBuf]) -> Result<(), Error> {
+        self.records.extend_from_slice(batch);
+        Ok(())
+    }
+
+    /// Sort all buffered records by coordinate and write a single sorted BAM.
+    ///
+    /// Sort key: (reference_sequence_id, alignment_start).
+    /// Unmapped records (no reference) sort to the end.
+    pub fn finish(mut self) -> Result<(), Error> {
+        self.records.sort_by_key(|r| {
+            match (r.reference_sequence_id(), r.alignment_start()) {
+                (Some(chr), Some(pos)) => (chr, pos.get()),
+                // Unmapped: sort last
+                _ => (usize::MAX, 0),
+            }
+        });
+
+        let buf_writer = BufWriter::new(File::create(&self.output_path)?);
+        let mut bgzf = noodles::bgzf::Writer::new(buf_writer);
+        write_bam_header_lenient(&mut bgzf, &self.header, Some("coordinate"))?;
+        let mut bam_writer = bam::io::Writer::from(bgzf);
+        for record in &self.records {
+            bam_writer.write_alignment_record(&self.header, record)?;
+        }
+        bam_writer.finish(&self.header)?;
+        log::info!(
+            "Sorted BAM written ({} records)",
+            self.records.len()
+        );
+        Ok(())
+    }
+}
+
 /// Write a BAM header that tolerates reference sequence names STAR emits
 /// (e.g. `tP(UGG)A`) but that noodles' SAM-spec validator rejects.
 ///
@@ -121,7 +181,14 @@ impl BamWriter {
 /// Binary reference list (after the text block) uses `CString::new` — the
 /// only constraint there is "no interior nul", which is enforced upstream
 /// via the usual UTF-8 input.
-fn write_bam_header_lenient<W: Write>(writer: &mut W, header: &sam::Header) -> Result<(), Error> {
+///
+/// `sort_order`: if `Some("coordinate")`, injects `SO:coordinate` into the
+/// @HD line. Pass `None` for unsorted output.
+fn write_bam_header_lenient<W: Write>(
+    writer: &mut W,
+    header: &sam::Header,
+    sort_order: Option<&str>,
+) -> Result<(), Error> {
     const MAGIC: &[u8; 4] = b"BAM\x01";
 
     writer.write_all(MAGIC)?;
@@ -130,7 +197,7 @@ fn write_bam_header_lenient<W: Write>(writer: &mut W, header: &sam::Header) -> R
     // `sam::io::Writer::write_header` minus the name validator:
     // `@HD`, `@SQ` (one per reference), `@RG` (if any), `@PG` (if any),
     // `@CO` (if any), each line terminated by `\n`.
-    let text = render_sam_text_lenient(header);
+    let text = render_sam_text_lenient(header, sort_order);
     let l_text = i32::try_from(text.len()).map_err(|_| {
         Error::Index(format!(
             "BAM SAM-text header exceeds i32::MAX bytes: {} bytes",
@@ -166,7 +233,7 @@ fn write_bam_header_lenient<W: Write>(writer: &mut W, header: &sam::Header) -> R
     Ok(())
 }
 
-fn render_sam_text_lenient(header: &sam::Header) -> Vec<u8> {
+fn render_sam_text_lenient(header: &sam::Header, sort_order: Option<&str>) -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::new();
 
     // @HD line. noodles' Map<Header> in this version doesn't expose
@@ -175,6 +242,10 @@ fn render_sam_text_lenient(header: &sam::Header) -> Vec<u8> {
     if let Some(hd) = header.header() {
         buf.extend_from_slice(b"@HD\tVN:");
         buf.extend_from_slice(hd.version().to_string().as_bytes());
+        if let Some(so) = sort_order {
+            buf.extend_from_slice(b"\tSO:");
+            buf.extend_from_slice(so.as_bytes());
+        }
         for (tag, value) in hd.other_fields() {
             buf.push(b'\t');
             buf.extend_from_slice(tag.as_ref());

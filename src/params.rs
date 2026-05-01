@@ -150,6 +150,35 @@ impl std::fmt::Display for OutSamType {
 }
 
 // ---------------------------------------------------------------------------
+// Standard output streaming
+// ---------------------------------------------------------------------------
+
+/// STAR's `--outStd` — route primary alignment output to stdout.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum OutStd {
+    #[default]
+    None,
+    Sam,
+    BamUnsorted,
+    BamSortedByCoordinate,
+}
+
+impl std::str::FromStr for OutStd {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "None" => Ok(Self::None),
+            "SAM" => Ok(Self::Sam),
+            "BAM_Unsorted" => Ok(Self::BamUnsorted),
+            "BAM_SortedByCoordinate" => Ok(Self::BamSortedByCoordinate),
+            _ => Err(format!(
+                "unknown outStd value: '{s}'; expected None, SAM, BAM_Unsorted, or BAM_SortedByCoordinate"
+            )),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unmapped reads FASTQ output
 // ---------------------------------------------------------------------------
 
@@ -321,6 +350,11 @@ pub struct Parameters {
     /// Provide as space-separated tokens, e.g. "BAM SortedByCoordinate".
     #[arg(long = "outSAMtype", num_args = 1..=2, default_values_t = vec!["SAM".to_string()])]
     pub out_sam_type_raw: Vec<String>,
+
+    /// Route primary alignment output to stdout instead of a file.
+    /// Values: None (default), SAM, BAM_Unsorted, BAM_SortedByCoordinate.
+    #[arg(long = "outStd", default_value = "None")]
+    pub out_std: OutStd,
 
     /// Strand field: None or intronMotif
     #[arg(long = "outSAMstrandField", default_value = "None")]

@@ -710,6 +710,28 @@ impl SamWriter {
     }
 }
 
+/// SAM writer that streams to stdout.
+pub struct SamStdoutWriter {
+    writer: sam::io::Writer<BufWriter<std::io::Stdout>>,
+    header: sam::Header,
+}
+
+impl SamStdoutWriter {
+    pub fn create(genome: &Genome, params: &Parameters) -> Result<Self, Error> {
+        let header = build_sam_header(genome, params)?;
+        let mut writer = sam::io::Writer::new(BufWriter::new(std::io::stdout()));
+        writer.write_header(&header)?;
+        Ok(Self { writer, header })
+    }
+
+    pub fn write_batch(&mut self, batch: &[RecordBuf]) -> Result<(), Error> {
+        for record in batch {
+            self.writer.write_alignment_record(&self.header, record)?;
+        }
+        Ok(())
+    }
+}
+
 /// Build paired SAM header from genome
 pub fn build_sam_header(genome: &Genome, params: &Parameters) -> Result<sam::Header, Error> {
     build_sam_header_from_refs(

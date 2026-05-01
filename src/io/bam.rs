@@ -112,7 +112,7 @@ impl BamWriter {
     }
 
     /// Flush and close BAM file
-    pub fn finish(mut self) -> Result<(), Error> {
+    pub fn finish(&mut self) -> Result<(), Error> {
         self.writer.finish(&self.header)?;
         log::info!("BAM file written successfully");
         Ok(())
@@ -144,7 +144,7 @@ impl SortedBamWriter {
     ///
     /// Sort key: (reference_sequence_id, alignment_start).
     /// Unmapped records (no reference) sort to the end.
-    pub fn finish(mut self) -> Result<(), Error> {
+    pub fn finish(&mut self) -> Result<(), Error> {
         self.records.sort_by_key(|r| {
             match (r.reference_sequence_id(), r.alignment_start()) {
                 (Some(chr), Some(pos)) => (chr, pos.get()),
@@ -163,6 +163,31 @@ impl SortedBamWriter {
         bam_writer.finish(&self.header)?;
         log::info!(
             "Sorted BAM written ({} records)",
+            self.records.len()
+        );
+        Ok(())
+    }
+
+    /// Sort all buffered records and write to stdout (for `--outStd BAM_SortedByCoordinate`).
+    pub fn finish_to_stdout(&mut self) -> Result<(), Error> {
+        self.records.sort_by_key(|r| {
+            match (r.reference_sequence_id(), r.alignment_start()) {
+                (Some(chr), Some(pos)) => (chr, pos.get()),
+                _ => (usize::MAX, 0),
+            }
+        });
+
+        let stdout = std::io::stdout();
+        let buf_writer = BufWriter::new(stdout.lock());
+        let mut bgzf = noodles::bgzf::Writer::new(buf_writer);
+        write_bam_header_lenient(&mut bgzf, &self.header, Some("coordinate"))?;
+        let mut bam_writer = bam::io::Writer::from(bgzf);
+        for record in &self.records {
+            bam_writer.write_alignment_record(&self.header, record)?;
+        }
+        bam_writer.finish(&self.header)?;
+        log::info!(
+            "Sorted BAM written to stdout ({} records)",
             self.records.len()
         );
         Ok(())
@@ -302,6 +327,76 @@ fn render_sam_text_lenient(header: &sam::Header, sort_order: Option<&str>) -> Ve
     }
 
     buf
+}
+
+/// Streaming unsorted BAM writer that writes to stdout.
+pub struct BamStdoutWriter {
+    writer: bam::io::Writer<noodles::bgzf::Writer<BufWriter<std::io::Stdout>>>,
+    header: sam::Header,
+}
+
+impl BamStdoutWriter {
+    pub fn create(genome: &crate::genome::Genome, params: &Parameters) -> Result<Self, Error> {
+        let header = crate::io::sam::build_sam_header(genome, params)?;
+        let mut bgzf = noodles::bgzf::Writer::new(BufWriter::new(std::io::stdout()));
+        write_bam_header_lenient(&mut bgzf, &header, None)?;
+        let writer = bam::io::Writer::from(bgzf);
+        Ok(Self { writer, header })
+    }
+
+    pub fn write_batch(&mut self, batch: &[RecordBuf]) -> Result<(), Error> {
+        for record in batch {
+            self.writer.write_alignment_record(&self.header, record)?;
+        }
+        Ok(())
+    }
+
+    pub fn finish(&mut self) -> Result<(), Error> {
+        self.writer.finish(&self.header)?;
+        Ok(())
+    }
+}
+
+/// Coordinate-sorted BAM writer that writes to stdout on `finish()`.
+pub struct SortedBamStdoutWriter {
+    records: Vec<RecordBuf>,
+    header: sam::Header,
+}
+
+impl SortedBamStdoutWriter {
+    pub fn create(genome: &crate::genome::Genome, params: &Parameters) -> Result<Self, Error> {
+        let header = crate::io::sam::build_sam_header(genome, params)?;
+        Ok(Self {
+            records: Vec::new(),
+            header,
+        })
+    }
+
+    pub fn write_batch(&mut self, batch: &[RecordBuf]) -> Result<(), Error> {
+        self.records.extend_from_slice(batch);
+        Ok(())
+    }
+
+    pub fn finish(&mut self) -> Result<(), Error> {
+        self.records.sort_by_key(|r| {
+            match (r.reference_sequence_id(), r.alignment_start()) {
+                (Some(chr), Some(pos)) => (chr, pos.get()),
+                _ => (usize::MAX, 0),
+            }
+        });
+        let mut bgzf = noodles::bgzf::Writer::new(BufWriter::new(std::io::stdout()));
+        write_bam_header_lenient(&mut bgzf, &self.header, Some("coordinate"))?;
+        let mut bam_writer = bam::io::Writer::from(bgzf);
+        for record in &self.records {
+            bam_writer.write_alignment_record(&self.header, record)?;
+        }
+        bam_writer.finish(&self.header)?;
+        log::info!(
+            "Sorted BAM written to stdout ({} records)",
+            self.records.len()
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]

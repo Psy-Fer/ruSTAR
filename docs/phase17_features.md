@@ -2,7 +2,7 @@
 
 # Phase 17: Features + Polish
 
-**Status**: In Progress (17.1, 17.5, 17.8, 17.A, 17.B, 17.C, 17.D complete)
+**Status**: In Progress (17.1, 17.5, 17.8, 17.A, 17.B, 17.C, 17.D, 17.2, 17.4, 17.6 complete)
 
 **Goal**: Production-ready features and quality-of-life improvements.
 
@@ -15,11 +15,11 @@
 | 17.B | Per-mate seeding (fix `.18919121`, `.6302610` arch failures) | ✅ Complete — `.18919121` fixed; regressions under investigation |
 | 17.C | STAR-faithful SCORE-GATE + mappedFilter for PE (fix 4 MAPQ inflations) | ✅ Complete |
 | 17.D | PE combined-span penalty + dedup-before-score-range ordering (248→236 half-mapped) | ✅ Complete |
-| 17.2 | Coordinate-sorted BAM (`--outSAMtype BAM SortedByCoordinate`) | Planned |
+| 17.2 | Coordinate-sorted BAM (`--outSAMtype BAM SortedByCoordinate`) | ✅ Complete |
 | 17.3 | Paired-end chimeric detection | Planned |
-| 17.4 | `--outReadsUnmapped Fastx` | Planned |
+| 17.4 | `--outReadsUnmapped Fastx` | ✅ Complete |
 | 17.5 | Fix clippy warnings (0 warnings) | ✅ Complete |
-| 17.6 | `--outStd SAM/BAM` (stdout output for piping) | Planned |
+| 17.6 | `--outStd SAM/BAM` (stdout output for piping) | ✅ Complete |
 | 17.7 | GTF tag parameters (`sjdbGTFchrPrefix`, etc.) | Planned |
 | 17.8 | `--quantMode GeneCounts` | ✅ Complete |
 | 17.9 | `--outBAMcompression` / `--limitBAMsortRAM` | Planned |

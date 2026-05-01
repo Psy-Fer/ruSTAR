@@ -60,12 +60,16 @@ fn genome_generate(params: &Parameters) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Trait for alignment output writers (SAM or BAM)
+/// Trait for alignment output writers (SAM or BAM).
+/// `finish` flushes/sorts/closes the output; default is a no-op for streaming writers.
 trait AlignmentWriter {
     fn write_batch(
         &mut self,
         batch: &[noodles::sam::alignment::record_buf::RecordBuf],
     ) -> Result<(), error::Error>;
+    fn finish(&mut self) -> Result<(), error::Error> {
+        Ok(())
+    }
 }
 
 /// Null writer that discards all output (for two-pass mode pass 1)
@@ -96,6 +100,9 @@ impl AlignmentWriter for crate::io::bam::BamWriter {
     ) -> Result<(), error::Error> {
         self.write_batch(batch)
     }
+    fn finish(&mut self) -> Result<(), error::Error> {
+        self.finish()
+    }
 }
 
 impl AlignmentWriter for crate::io::bam::SortedBamWriter {
@@ -104,6 +111,42 @@ impl AlignmentWriter for crate::io::bam::SortedBamWriter {
         batch: &[noodles::sam::alignment::record_buf::RecordBuf],
     ) -> Result<(), error::Error> {
         self.write_batch(batch)
+    }
+    fn finish(&mut self) -> Result<(), error::Error> {
+        self.finish()
+    }
+}
+
+impl AlignmentWriter for crate::io::sam::SamStdoutWriter {
+    fn write_batch(
+        &mut self,
+        batch: &[noodles::sam::alignment::record_buf::RecordBuf],
+    ) -> Result<(), error::Error> {
+        self.write_batch(batch)
+    }
+}
+
+impl AlignmentWriter for crate::io::bam::BamStdoutWriter {
+    fn write_batch(
+        &mut self,
+        batch: &[noodles::sam::alignment::record_buf::RecordBuf],
+    ) -> Result<(), error::Error> {
+        self.write_batch(batch)
+    }
+    fn finish(&mut self) -> Result<(), error::Error> {
+        self.finish()
+    }
+}
+
+impl AlignmentWriter for crate::io::bam::SortedBamStdoutWriter {
+    fn write_batch(
+        &mut self,
+        batch: &[noodles::sam::alignment::record_buf::RecordBuf],
+    ) -> Result<(), error::Error> {
+        self.write_batch(batch)
+    }
+    fn finish(&mut self) -> Result<(), error::Error> {
+        self.finish()
     }
 }
 
@@ -280,143 +323,107 @@ fn run_single_pass(
             None
         };
 
-    // 4. Route to SAM or BAM output based on --outSAMtype
+    // 4. Route to SAM or BAM output based on --outSAMtype / --outStd
+    use crate::params::{OutSamSortOrder, OutStd};
+
     let out_type = params
         .out_sam_type()
         .map_err(|e| anyhow::anyhow!("Invalid --outSAMtype: {}", e))?;
 
-    match out_type.format {
-        OutSamFormat::Sam => {
-            let output_path = params.out_file_name_prefix.join("Aligned.out.sam");
-            info!("Writing SAM to {}", output_path.display());
-
-            // Create output directory if it doesn't exist
-            if let Some(parent) = output_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-
-            let mut writer = SamWriter::create(&output_path, &index.genome, params)?;
-
-            // Route to single-end or paired-end mode
-            match params.read_files_in.len() {
-                1 => align_reads_single_end(
-                    params,
-                    index,
-                    &mut writer,
-                    &stats,
-                    &sj_stats,
-                    quant.as_ref(),
-                    tr.as_ref(),
-                    tr_writer.as_mut(),
-                    unmapped_w1.as_mut(),
-                ),
-                2 => align_reads_paired_end(
-                    params,
-                    index,
-                    &mut writer,
-                    &stats,
-                    &sj_stats,
-                    quant.as_ref(),
-                    tr.as_ref(),
-                    tr_writer.as_mut(),
-                    unmapped_w1.as_mut(),
-                    unmapped_w2.as_mut(),
-                ),
-                n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
-            }?;
+    // Build boxed writer — stdout takes precedence over file output.
+    let mut writer: Box<dyn AlignmentWriter> = match params.out_std {
+        OutStd::Sam => {
+            info!("Writing SAM to stdout (--outStd SAM)");
+            Box::new(crate::io::sam::SamStdoutWriter::create(
+                &index.genome,
+                params,
+            )?)
         }
-        OutSamFormat::Bam => {
-            use crate::params::OutSamSortOrder;
-
-            let sorted = out_type.sort_order == Some(OutSamSortOrder::SortedByCoordinate);
-            let output_path = if sorted {
-                params
-                    .out_file_name_prefix
-                    .join("Aligned.sortedByCoord.out.bam")
-            } else {
-                params.out_file_name_prefix.join("Aligned.out.bam")
-            };
-            info!("Writing BAM to {}", output_path.display());
-
-            if let Some(parent) = output_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-
-            if sorted {
-                let mut writer =
-                    SortedBamWriter::create(&output_path, &index.genome, params)?;
-                match params.read_files_in.len() {
-                    1 => align_reads_single_end(
-                        params,
-                        index,
-                        &mut writer,
-                        &stats,
-                        &sj_stats,
-                        quant.as_ref(),
-                        tr.as_ref(),
-                        tr_writer.as_mut(),
-                        unmapped_w1.as_mut(),
-                    ),
-                    2 => align_reads_paired_end(
-                        params,
-                        index,
-                        &mut writer,
-                        &stats,
-                        &sj_stats,
-                        quant.as_ref(),
-                        tr.as_ref(),
-                        tr_writer.as_mut(),
-                        unmapped_w1.as_mut(),
-                        unmapped_w2.as_mut(),
-                    ),
-                    n => anyhow::bail!(
-                        "Invalid number of read files: {} (expected 1 or 2)",
-                        n
-                    ),
-                }?;
-                writer.finish()?;
-            } else {
-                let mut writer = BamWriter::create(&output_path, &index.genome, params)?;
-                match params.read_files_in.len() {
-                    1 => align_reads_single_end(
-                        params,
-                        index,
-                        &mut writer,
-                        &stats,
-                        &sj_stats,
-                        quant.as_ref(),
-                        tr.as_ref(),
-                        tr_writer.as_mut(),
-                        unmapped_w1.as_mut(),
-                    ),
-                    2 => align_reads_paired_end(
-                        params,
-                        index,
-                        &mut writer,
-                        &stats,
-                        &sj_stats,
-                        quant.as_ref(),
-                        tr.as_ref(),
-                        tr_writer.as_mut(),
-                        unmapped_w1.as_mut(),
-                        unmapped_w2.as_mut(),
-                    ),
-                    n => anyhow::bail!(
-                        "Invalid number of read files: {} (expected 1 or 2)",
-                        n
-                    ),
-                }?;
-                writer.finish()?;
-            }
+        OutStd::BamUnsorted => {
+            info!("Writing unsorted BAM to stdout (--outStd BAM_Unsorted)");
+            Box::new(crate::io::bam::BamStdoutWriter::create(
+                &index.genome,
+                params,
+            )?)
         }
-        OutSamFormat::None => {
-            info!("Output format set to None, skipping alignment output");
-            anyhow::bail!("Output format 'None' not yet implemented");
+        OutStd::BamSortedByCoordinate => {
+            info!("Writing coordinate-sorted BAM to stdout (--outStd BAM_SortedByCoordinate)");
+            Box::new(crate::io::bam::SortedBamStdoutWriter::create(
+                &index.genome,
+                params,
+            )?)
         }
-    }
+        OutStd::None => match out_type.format {
+            OutSamFormat::Sam => {
+                let output_path = params.out_file_name_prefix.join("Aligned.out.sam");
+                info!("Writing SAM to {}", output_path.display());
+                if let Some(parent) = output_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                Box::new(SamWriter::create(&output_path, &index.genome, params)?)
+            }
+            OutSamFormat::Bam => {
+                let sorted =
+                    out_type.sort_order == Some(OutSamSortOrder::SortedByCoordinate);
+                let output_path = if sorted {
+                    params
+                        .out_file_name_prefix
+                        .join("Aligned.sortedByCoord.out.bam")
+                } else {
+                    params.out_file_name_prefix.join("Aligned.out.bam")
+                };
+                info!("Writing BAM to {}", output_path.display());
+                if let Some(parent) = output_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                if sorted {
+                    Box::new(SortedBamWriter::create(
+                        &output_path,
+                        &index.genome,
+                        params,
+                    )?)
+                } else {
+                    Box::new(BamWriter::create(&output_path, &index.genome, params)?)
+                }
+            }
+            OutSamFormat::None => {
+                anyhow::bail!("Output format 'None' not yet implemented");
+            }
+        },
+    };
+
+    // Align reads through the boxed writer.
+    match params.read_files_in.len() {
+        1 => align_reads_single_end(
+            params,
+            index,
+            writer.as_mut(),
+            &stats,
+            &sj_stats,
+            quant.as_ref(),
+            tr.as_ref(),
+            tr_writer.as_mut(),
+            unmapped_w1.as_mut(),
+        ),
+        2 => align_reads_paired_end(
+            params,
+            index,
+            writer.as_mut(),
+            &stats,
+            &sj_stats,
+            quant.as_ref(),
+            tr.as_ref(),
+            tr_writer.as_mut(),
+            unmapped_w1.as_mut(),
+            unmapped_w2.as_mut(),
+        ),
+        n => anyhow::bail!("Invalid number of read files: {} (expected 1 or 2)", n),
+    }?;
+
+    writer.finish()?;
 
     // Flush transcriptome BAM.
-    if let Some(w) = tr_writer {
+    if let Some(ref mut w) = tr_writer {
         w.finish()?;
     }
 
@@ -808,7 +815,7 @@ fn extract_junction_keys(
 
 /// Align single-end reads
 #[allow(clippy::too_many_arguments)]
-fn align_reads_single_end<W: AlignmentWriter>(
+fn align_reads_single_end<W: AlignmentWriter + ?Sized>(
     params: &Parameters,
     index: &std::sync::Arc<crate::index::GenomeIndex>,
     writer: &mut W,
@@ -1181,7 +1188,7 @@ fn align_reads_single_end<W: AlignmentWriter>(
 
 /// Align paired-end reads
 #[allow(clippy::too_many_arguments)]
-fn align_reads_paired_end<W: AlignmentWriter>(
+fn align_reads_paired_end<W: AlignmentWriter + ?Sized>(
     params: &Parameters,
     index: &std::sync::Arc<crate::index::GenomeIndex>,
     writer: &mut W,

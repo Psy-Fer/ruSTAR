@@ -54,7 +54,7 @@ Paired-end (Phase 8) builds on threaded infrastructure. GTF/junctions (Phase 7) 
 | [13](docs/phase13_accuracy.md) | Performance + Accuracy | ✅ | 205 | 94.5% pos, 97.8% CIGAR, 2.1% splice |
 | [15](docs/phase15_sam_tags.md) | SAM Tags + PE Fix | ✅ | 235 | NH/HI/AS/NM/nM/XS/jM/jI/MD, PE fix |
 | [16](docs/phase16_algorithm.md) | Algorithm Parity | ✅* | 268 | SE: **8613/8926 (0 STAR-only, 99.815% tie-adj)**, 2.2% splice; PE: **8390/8390 exact**, **99.883% tie-adj PE faithfulness**, 0 MAPQ inflate/deflate, 0 NH diffs (Phase G2) |
-| [17](docs/phase17_features.md) | Features + Polish | ✅* | 364 | Log.final.out, GeneCounts, TranscriptomeSAM, SJDB insertion, --outSAMattrRGline, --runRNGseed, combined-read PE seeding (Phase E2), scoreSeedBest (17.A), sorted BAM (17.2), outReadsUnmapped (17.4); PE chimeric, outStd planned |
+| [17](docs/phase17_features.md) | Features + Polish | ✅* | 379 | Log.final.out, GeneCounts, TranscriptomeSAM, SJDB insertion, --outSAMattrRGline, --runRNGseed, combined-read PE seeding (Phase E2), scoreSeedBest (17.A), sorted BAM (17.2), outReadsUnmapped (17.4), outStd (17.6), PE chimeric (17.3), WithinBAM (17.11), GTF tag params (17.7) |
 | 14 | STARsolo | DEFERRED | — | Waiting for accuracy parity |
 
 *Partially complete — see linked docs for sub-phase status.

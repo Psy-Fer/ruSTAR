@@ -2,7 +2,7 @@
 
 # Phase 17: Features + Polish
 
-**Status**: In Progress (17.1, 17.5, 17.8, 17.A, 17.B, 17.C, 17.D, 17.2, 17.4, 17.6 complete)
+**Status**: In Progress (17.1, 17.5, 17.8, 17.A, 17.B, 17.C, 17.D, 17.2, 17.3, 17.4, 17.6, 17.7, 17.11 complete)
 
 **Goal**: Production-ready features and quality-of-life improvements.
 
@@ -16,15 +16,15 @@
 | 17.C | STAR-faithful SCORE-GATE + mappedFilter for PE (fix 4 MAPQ inflations) | ✅ Complete |
 | 17.D | PE combined-span penalty + dedup-before-score-range ordering (248→236 half-mapped) | ✅ Complete |
 | 17.2 | Coordinate-sorted BAM (`--outSAMtype BAM SortedByCoordinate`) | ✅ Complete |
-| 17.3 | Paired-end chimeric detection | Planned |
+| 17.3 | Paired-end chimeric detection | ✅ Complete |
 | 17.4 | `--outReadsUnmapped Fastx` | ✅ Complete |
 | 17.5 | Fix clippy warnings (0 warnings) | ✅ Complete |
 | 17.6 | `--outStd SAM/BAM` (stdout output for piping) | ✅ Complete |
-| 17.7 | GTF tag parameters (`sjdbGTFchrPrefix`, etc.) | Planned |
+| 17.7 | GTF tag parameters (`sjdbGTFchrPrefix`, etc.) | ✅ Complete |
 | 17.8 | `--quantMode GeneCounts` | ✅ Complete |
 | 17.9 | `--outBAMcompression` / `--limitBAMsortRAM` | Planned |
 | 17.10 | Chimeric Tier 3 (re-map soft-clipped regions) | Planned |
-| 17.11 | `--chimOutType WithinBAM` (supplementary FLAG 0x800) | Planned |
+| 17.11 | `--chimOutType WithinBAM` (supplementary FLAG 0x800) | ✅ Complete |
 | 17.12 | BySJout memory optimization (disk buffering for 100M+ reads) | Planned |
 | 17.13 | Phase 9 integration test fixes (realistic test genomes) | Planned |
 
@@ -228,11 +228,78 @@ where `p1 = genomic_length_penalty(t1_span)`, `p2 = genomic_length_penalty(t2_sp
 
 ---
 
-## Phase 17.2: Coordinate-Sorted BAM — Planned
+## Phase 17.3: Paired-End Chimeric Detection ✅ (2026-05-01)
 
-High user value. STAR outputs `--outSAMtype BAM SortedByCoordinate` natively. Options:
-1. In-memory sort during write (requires buffering all records)
-2. Wrapper calling `samtools sort` (simpler, already documented as workaround)
+**Goal**: Detect chimeric alignments for paired-end reads.
+
+**Implementation**:
+
+- `PairedAlignResult` type alias in `read_align.rs` resolves clippy::type_complexity for `align_paired_read`'s 4-tuple return.
+- Two detection paths:
+  1. **Intra-mate**: When a mate has ≥2 clusters, split by `wa.mate_id` + adjust mate2 `read_pos -= len1+1` → `ChimericDetector::detect_from_multi_clusters`.
+  2. **Inter-mate**: `detect_inter_mate_chimeric` on best single-mate transcripts (before half-mapped fallback). Detects diff-chr, same-strand, or >1Mb discordant pairs.
+- `detect_inter_mate_chimeric` re-exported from `chimeric/mod.rs`.
+- No benchmark regression (8390 both-mapped, 0 half-mapped).
+
+**Files**: `src/align/read_align.rs`, `src/chimeric/detect.rs`, `src/chimeric/mod.rs`
+
+---
+
+## Phase 17.11: `--chimOutType WithinBAM` ✅ (2026-05-01)
+
+**Goal**: Write chimeric alignments as supplementary SAM/BAM records (FLAG 0x800) in the primary output file.
+
+**Implementation**:
+
+- `build_within_bam_records(alignment, genome, mapq)` in `chimeric/output.rs`: returns 2 `RecordBuf`s.
+  - Donor: normal FLAGS + full SEQ (RC'd if is_reverse) + SA tag.
+  - Acceptor: FLAG 0x800 supplementary + empty SEQ + SA tag.
+  - SA tag format: `chr,pos,strand,CIGAR,mapQ,NM;` (pos = 1-based per-chromosome).
+- `chim_out_junctions()` / `chim_out_within_bam()` helpers in `params.rs`.
+- Junction file creation gated on `chim_out_junctions()` (allows `WithinBAM`-only mode).
+- All 4 `lib.rs` write paths (SE normal, SE bysj, PE normal, PE bysj) emit WithinBAM records.
+- Supports `--chimOutType Junctions WithinBAM` simultaneously.
+- `convert_cigar` changed to `pub(crate)` in `sam.rs` for use by `output.rs`.
+
+**Files**: `src/chimeric/output.rs`, `src/chimeric/mod.rs`, `src/params.rs`, `src/io/sam.rs`, `src/lib.rs`
+
+---
+
+## Phase 17.7: GTF Tag Parameters ✅ (2026-05-01)
+
+**Goal**: Support non-standard GTF files via STAR's four GTF configuration parameters.
+
+**Parameters added** (`src/params.rs`):
+
+| Parameter | Default | Purpose |
+|-----------|---------|---------|
+| `--sjdbGTFchrPrefix` | `""` | Prefix to add to GTF chromosome names (e.g. `"chr"` when GTF uses bare `1,2,3`) |
+| `--sjdbGTFfeatureExon` | `"exon"` | Feature column value to use as exons |
+| `--sjdbGTFtagExonParentTranscript` | `"transcript_id"` | GTF attribute for grouping exons into transcripts |
+| `--sjdbGTFtagExonParentGene` | `"gene_id"` | GTF attribute for gene grouping in quantification |
+
+**Implementation strategy**: `_configured` variant functions carry the params; original functions remain as backward-compatible wrappers (`parse_gtf`, `extract_junctions_from_exons`, `from_gtf_exons`) calling with defaults. Zero test disruption (~50 test call sites unchanged).
+
+- `parse_gtf_configured(path, feature_exon, chr_prefix)` — filters by `feature_exon`, prepends `chr_prefix` to seqnames.
+- `extract_junctions_configured(exons, genome, transcript_tag)` — groups transcripts by `transcript_tag`.
+- `GeneAnnotation::from_gtf_exons_configured(exons, genome, gene_tag)` — uses `gene_tag` for quant.
+- `TranscriptomeIndex::from_gtf_exons_configured(exons, genome, transcript_tag, gene_tag)`.
+- `SpliceJunctionDb::from_gtf_configured(path, genome, feature_exon, chr_prefix, transcript_tag)`.
+- `QuantContext::build(path, genome, feature_exon, chr_prefix, gene_tag)` — updated signature.
+
+All 4 production paths thread params: `index/mod.rs` (genomeGenerate), `index/io.rs` (load-time fallback), `lib.rs` (quantMode GeneCounts), `junction/mod.rs` (junction DB).
+
+**Tests added** (3 new in `gtf.rs`): `test_parse_gtf_configured_chr_prefix`, `test_parse_gtf_configured_custom_feature`, `test_extract_junctions_configured_custom_transcript_tag`.
+
+**Files**: `src/params.rs`, `src/junction/gtf.rs`, `src/junction/mod.rs`, `src/quant/mod.rs`, `src/quant/transcriptome.rs`, `src/index/mod.rs`, `src/index/io.rs`, `src/lib.rs`
+
+**Result**: 379/379 tests, 0 clippy warnings.
+
+---
+
+## Phase 17.2: Coordinate-Sorted BAM ✅ (2026-04-29)
+
+`SortedBamWriter` in `src/io/bam.rs` buffers all `RecordBuf` records, sorts by `(reference_sequence_id, alignment_start)` on `finish()`, writes one BAM with `SO:coordinate` in `@HD`. Output filename: `Aligned.sortedByCoord.out.bam`. Verified with `samtools quickcheck` + `samtools index`.
 
 ---
 

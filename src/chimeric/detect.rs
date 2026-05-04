@@ -51,10 +51,7 @@ impl<'a> ChimericDetector<'a> {
         let overhang_min = params.chim_junction_overhang_min as usize;
 
         // Try right clip first, then left (match STAR's ordering)
-        let candidates = [
-            (right_clip as usize, true),
-            (left_clip as usize, false),
-        ];
+        let candidates = [(right_clip as usize, true), (left_clip as usize, false)];
 
         for (clip_len, is_right) in candidates {
             if clip_len < min_seg {
@@ -111,12 +108,11 @@ impl<'a> ChimericDetector<'a> {
             // Determine donor / acceptor by read order
             let primary_rs = transcript.exons[0].read_start;
             let clip_rs = clip_tr.exons[0].read_start;
-            let (tr_donor, tr_acceptor): (&Transcript, &Transcript) =
-                if primary_rs <= clip_rs {
-                    (transcript, &clip_tr)
-                } else {
-                    (&clip_tr, transcript)
-                };
+            let (tr_donor, tr_acceptor): (&Transcript, &Transcript) = if primary_rs <= clip_rs {
+                (transcript, &clip_tr)
+            } else {
+                (&clip_tr, transcript)
+            };
 
             // Overhang: each segment must cover >= chimJunctionOverhangMin at junction boundary
             let donor_overhang =
@@ -273,8 +269,7 @@ impl<'a> ChimericDetector<'a> {
             } else {
                 Some(&index.junction_db)
             };
-            let clip_trs =
-                stitch_seeds_with_jdb(&clusters[0], clip_seq, index, &scorer, jdb, 1)?;
+            let clip_trs = stitch_seeds_with_jdb(&clusters[0], clip_seq, index, &scorer, jdb, 1)?;
 
             let Some(clip_tr_raw) = clip_trs.into_iter().next() else {
                 continue;
@@ -343,7 +338,9 @@ impl<'a> ChimericDetector<'a> {
                     let span = if donor_seg.genome_end <= acceptor_seg.genome_start {
                         acceptor_seg.genome_start - donor_seg.genome_end
                     } else {
-                        donor_seg.genome_start.saturating_sub(acceptor_seg.genome_end)
+                        donor_seg
+                            .genome_start
+                            .saturating_sub(acceptor_seg.genome_end)
                     };
                     intron_max > 0 && span > intron_max
                 };

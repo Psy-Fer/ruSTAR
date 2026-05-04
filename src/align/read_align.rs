@@ -581,9 +581,7 @@ pub fn align_read(
     {
         use crate::chimeric::ChimericDetector;
         let detector = ChimericDetector::new(params);
-        if let Some(chim) =
-            detector.detect_from_soft_clips(tr_best, read_seq, read_name, index)?
-        {
+        if let Some(chim) = detector.detect_from_soft_clips(tr_best, read_seq, read_name, index)? {
             chimeric_alignments.push(chim);
         }
     }

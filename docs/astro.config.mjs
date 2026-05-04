@@ -12,6 +12,17 @@ export default defineConfig({
         src: './src/assets/rustar-icon.svg',
       },
       favicon: '/favicon.svg',
+      head: [
+        { tag: 'link', attrs: { rel: 'preconnect', href: 'https://fonts.googleapis.com' } },
+        { tag: 'link', attrs: { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' } },
+        {
+          tag: 'link',
+          attrs: {
+            rel: 'stylesheet',
+            href: 'https://fonts.googleapis.com/css2?family=Archivo+Narrow:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap',
+          },
+        },
+      ],
       components: {
         Header: './src/components/Header.astro',
       },

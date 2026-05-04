@@ -1,10 +1,10 @@
-# ruSTAR
+# rustar-aligner
 
 A Rust reimplementation of [STAR](https://github.com/alexdobin/STAR) (Spliced Transcripts Alignment to a Reference), the widely-used RNA-seq aligner originally written in C++ by Alexander Dobin.
 
 ## Overview
 
-ruSTAR aims to be a faithful port of STAR, matching the original behavior as closely as possible. It uses the same genome index format, accepts the same `--camelCase` command-line parameters, and produces compatible SAM/BAM output.
+rustar-aligner aims to be a faithful port of STAR, matching the original behavior as closely as possible. It uses the same genome index format, accepts the same `--camelCase` command-line parameters, and produces compatible SAM/BAM output.
 
 **Current status**: End-to-end single-end and paired-end RNA-seq alignment with splice junction detection, two-pass mode, chimeric alignment detection (including multi-junction Tier 3), gene-level quantification, and multi-threaded parallel processing. 396 tests passing (383 unit + 8 integration + others), 0 clippy warnings.
 
@@ -19,7 +19,7 @@ cargo build --release
 ### Generate genome index
 
 ```bash
-target/release/ruSTAR --runMode genomeGenerate \
+target/release/rustar-aligner --runMode genomeGenerate \
   --genomeDir /path/to/genome_index \
   --genomeFastaFiles /path/to/genome.fa
 ```
@@ -27,7 +27,7 @@ target/release/ruSTAR --runMode genomeGenerate \
 ### Align reads
 
 ```bash
-target/release/ruSTAR \
+target/release/rustar-aligner \
   --genomeDir /path/to/genome_index \
   --readFilesIn reads.fq \
   --outSAMtype SAM \
@@ -38,7 +38,7 @@ target/release/ruSTAR \
 ### Paired-end alignment
 
 ```bash
-target/release/ruSTAR \
+target/release/rustar-aligner \
   --genomeDir /path/to/genome_index \
   --readFilesIn reads_1.fq reads_2.fq \
   --outSAMtype SAM \
@@ -48,7 +48,7 @@ target/release/ruSTAR \
 ### BAM output
 
 ```bash
-target/release/ruSTAR \
+target/release/rustar-aligner \
   --genomeDir /path/to/genome_index \
   --readFilesIn reads.fq \
   --outSAMtype BAM Unsorted \
@@ -58,7 +58,7 @@ target/release/ruSTAR \
 ### Coordinate-sorted BAM output
 
 ```bash
-target/release/ruSTAR \
+target/release/rustar-aligner \
   --genomeDir /path/to/genome_index \
   --readFilesIn reads.fq \
   --outSAMtype BAM SortedByCoordinate \
@@ -68,7 +68,7 @@ target/release/ruSTAR \
 ### Two-pass mode
 
 ```bash
-target/release/ruSTAR \
+target/release/rustar-aligner \
   --genomeDir /path/to/genome_index \
   --readFilesIn reads.fq \
   --twopassMode Basic \
@@ -78,7 +78,7 @@ target/release/ruSTAR \
 ### Gene-level counts
 
 ```bash
-target/release/ruSTAR \
+target/release/rustar-aligner \
   --genomeDir /path/to/genome_index \
   --readFilesIn reads.fq \
   --sjdbGTFfile /path/to/annotation.gtf \
@@ -92,22 +92,22 @@ Benchmarked on 10,000 yeast RNA-seq reads (150 bp, ERR12389696), compared to STA
 
 ### Single-End (10k reads, 150 bp SE)
 
-| Metric | ruSTAR | STAR |
-|--------|--------|------|
+| Metric | rustar-aligner | STAR |
+|--------|----------------|------|
 | Unique mapped | 82.6% | 82.6% |
 | Multi-mapped | 7.4% | 7.4% |
 | Total mapped | 90.0% | 90.0% |
 | Position agreement | 96.5% raw / **99.815% tie-adjusted** | — |
 | STAR-only reads | **0** | — |
-| ruSTAR-only reads | **0** | — |
+| rustar-aligner-only reads | **0** | — |
 | CIGAR-only diffs | 1 (seed-level tie in homopolymer) | — |
 
 > **Tie-adjusted**: 299 of 313 disagreements are verified genuine ties — both tools find identical alignment sets but select different copies due to SA-order or RNG tie-breaking differences. Excluding these, faithfulness is 99.815% (8,611/8,627 non-tie reads exact).
 
 ### Paired-End (10k read pairs, 150 bp)
 
-| Metric | ruSTAR | STAR |
-|--------|--------|------|
+| Metric | rustar-aligner | STAR |
+|--------|----------------|------|
 | Both mates mapped | **8,390** | 8,390 |
 | Half-mapped pairs | **0** | 0 |
 | Unmapped pairs | 0 | 0 |
@@ -163,7 +163,7 @@ cargo fmt                # Format
 
 ## Development
 
-The majority of ruSTAR's code was written by [Claude Code](https://claude.ai/code) (Anthropic's AI coding assistant), with technical direction, architecture decisions, and validation by the project maintainer.
+The majority of rustar-aligner's code was written by [Claude Code](https://claude.ai/code) (Anthropic's AI coding assistant), with technical direction, architecture decisions, and validation by the project maintainer.
 
 ## License
 

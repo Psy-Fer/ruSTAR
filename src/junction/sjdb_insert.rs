@@ -5,7 +5,7 @@
 //! bases on each side of every GTF-derived splice junction, concatenates
 //! them into a `Gsj` buffer, appends that buffer to the `Genome` binary,
 //! and extends the suffix array to index the new bases. This module
-//! provides the same machinery for ruSTAR so that the generated
+//! provides the same machinery for rustar-aligner so that the generated
 //! `Genome` / `SA` / `SAindex` / `sjdbInfo.txt` / `sjdbList.out.tab` files
 //! match STAR's byte-for-byte.
 //!
@@ -167,7 +167,7 @@ pub fn prepare_junction(
 ///
 /// STAR's first-pass (intra-strand) dedup collapses duplicate sjdb
 /// entries from the same source at the same `(start, end, strand)`.
-/// ruSTAR's `SpliceJunctionDb` already deduplicates on that key at the
+/// rustar-aligner's `SpliceJunctionDb` already deduplicates on that key at the
 /// HashMap level, so those first-pass branches never trigger here; the
 /// second-pass cross-strand collision dedup does.
 ///

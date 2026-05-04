@@ -3,7 +3,7 @@
 # stitchWindowAligns.cpp vs stitch_recurse()
 
 **STAR file**: `source/stitchWindowAligns.cpp`
-**ruSTAR files**: `src/align/stitch.rs` — `stitch_recurse()` (recursion) + finalization in `finalize_transcript()` + score-range check in `stitch_seeds_core()`
+**rustar-aligner files**: `src/align/stitch.rs` — `stitch_recurse()` (recursion) + finalization in `finalize_transcript()` + score-range check in `stitch_seeds_core()`
 
 ---
 
@@ -13,7 +13,7 @@ STAR's `stitchWindowAligns` is a single monolithic recursive function that handl
 1. The recursive include/exclude branching over WA entries
 2. Finalization of complete transcripts (extension, overhang checks, dedup, score-range check, insertion into the sorted list)
 
-ruSTAR splits this into:
+rustar-aligner splits this into:
 - `stitch_recurse`: recursion + dedup at base case
 - `finalize_transcript`: extension (extendAlign), CIGAR building, genomic length penalty
 - Score-range filter in `stitch_seeds_core` after all recursion
@@ -44,7 +44,7 @@ void stitchWindowAligns(uint iA, uint nA, int Score, ...) {
 }
 ```
 
-**ruSTAR** (`stitch_recurse`):
+**rustar-aligner** (`stitch_recurse`):
 ```rust
 fn stitch_recurse(i_a, wt, wa_entries, ...) {
     if i_a >= wa_entries.len() {
@@ -66,9 +66,9 @@ fn stitch_recurse(i_a, wt, wa_entries, ...) {
 ```
 
 **Assessment**: Structure is equivalent. Key differences:
-1. STAR's `dScore > -1000000` vs ruSTAR's `Some(new_wt)` — both gates on successful stitching. ✅
-2. STAR's anchor constraint: `WA_Anchor != 2 || trA.nAnchor > 0`. ruSTAR: `WA[i].is_anchor && i_a == last_anchor → wt.n_anchor > 0`. This checks only the LAST anchor entry. STAR uses `WA_Anchor == 2` to mark the "last anchor" (value 2 vs 1). Needs verification.
-3. STAR initializes the transcript from the FIRST included seed using special code (`trAi.rStart = WA[iA][WA_rStart]`). ruSTAR's first-seed case creates a `WorkingTranscript` with a single exon and score = `wa.length`. Equivalent.
+1. STAR's `dScore > -1000000` vs rustar-aligner's `Some(new_wt)` — both gates on successful stitching. ✅
+2. STAR's anchor constraint: `WA_Anchor != 2 || trA.nAnchor > 0`. rustar-aligner: `WA[i].is_anchor && i_a == last_anchor → wt.n_anchor > 0`. This checks only the LAST anchor entry. STAR uses `WA_Anchor == 2` to mark the "last anchor" (value 2 vs 1). Needs verification.
+3. STAR initializes the transcript from the FIRST included seed using special code (`trAi.rStart = WA[iA][WA_rStart]`). rustar-aligner's first-seed case creates a `WorkingTranscript` with a single exon and score = `wa.length`. Equivalent.
 
 ---
 
@@ -76,13 +76,13 @@ fn stitch_recurse(i_a, wt, wa_entries, ...) {
 
 **STAR**: `Score` is passed as a parameter and accumulated during recursion. Each step adds `dScore` from `stitchAlignToTranscript`. The base-case score includes all contributions.
 
-**ruSTAR**: `wt.score` is accumulated in `stitch_align_to_transcript` — the score is embedded in the `WorkingTranscript` struct rather than passed as a parameter. Equivalent result.
+**rustar-aligner**: `wt.score` is accumulated in `stitch_align_to_transcript` — the score is embedded in the `WorkingTranscript` struct rather than passed as a parameter. Equivalent result.
 
 **Key difference**: STAR adds `WA[iA][WA_Length] * scoreMatch` when initializing the first seed:
 ```cpp
 for (uint ii=0; ii<WA[iA][WA_Length]; ii++) dScore += scoreMatch;
 ```
-ruSTAR does this in the first-seed branch of `stitch_recurse`:
+rustar-aligner does this in the first-seed branch of `stitch_recurse`:
 ```rust
 new_wt.score = wa.length as i32; // scoreMatch = 1
 ```
@@ -120,12 +120,12 @@ if (iA >= nA) {
 }
 ```
 
-### ruSTAR: Finalization DEFERRED to finalize_transcript()
+### rustar-aligner: Finalization DEFERRED to finalize_transcript()
 
 The base case of `stitch_recurse` only does dedup. The full finalization happens in `finalize_transcript()` called from `stitch_seeds_core()` after all recursion is complete.
 
-**Missing in ruSTAR's base case** (applied later or differently):
-- Overhang checks at finalization time (steps 4, 7) — ruSTAR applies these in `filter_transcripts`
+**Missing in rustar-aligner's base case** (applied later or differently):
+- Overhang checks at finalization time (steps 4, 7) — rustar-aligner applies these in `filter_transcripts`
 - Motif strand consistency (step 5) — applied in `read_align.rs`
 - `outFilterIntronMotifs` (step 6) — applied in `read_align.rs`
 - Mate overlap consistency (step 9) — partially applied
@@ -151,7 +151,7 @@ The list `wTr[]` is sorted by score descending (ties broken by gLength ascending
 - Existing subset of new → remove existing, insert new
 - Overlapping but neither subset → keep both
 
-**ruSTAR** (base case of `stitch_recurse`):
+**rustar-aligner** (base case of `stitch_recurse`):
 ```rust
 let dominated = overlap >= wt_len && existing.score >= wt.score && same_structure;
 let remove = overlap >= ex_len && wt.score >= existing.score && same_structure;
@@ -163,9 +163,9 @@ transcripts.retain(|t| t.score >= max_score - params.out_filter_multimap_score_r
 ```
 
 **Key differences**:
-1. ruSTAR's dedup only removes transcripts with the **same structure** (same number of exons). STAR's `blocksOverlap` dedup has no such restriction — it can remove an unspliced transcript if a spliced one covers the same bases with equal or higher score. This could affect multi-transcript output.
-2. ruSTAR applies score-range filter AFTER all finalization (post-extension scores). STAR applies it BEFORE extension in the base case. The extension can change the score, so these may disagree in edge cases.
-3. ruSTAR doesn't check per-mate score.
+1. rustar-aligner's dedup only removes transcripts with the **same structure** (same number of exons). STAR's `blocksOverlap` dedup has no such restriction — it can remove an unspliced transcript if a spliced one covers the same bases with equal or higher score. This could affect multi-transcript output.
+2. rustar-aligner applies score-range filter AFTER all finalization (post-extension scores). STAR applies it BEFORE extension in the base case. The extension can change the score, so these may disagree in edge cases.
+3. rustar-aligner doesn't check per-mate score.
 
 ---
 
@@ -182,13 +182,13 @@ if (P.scoreGenomicLengthLog2scale != 0) {
 
 Note: `score = max(0, score)` — floored at zero.
 
-**ruSTAR** (`finalize_transcript`):
+**rustar-aligner** (`finalize_transcript`):
 ```rust
 let length_penalty = scorer.genomic_length_penalty(genomic_span);
 let final_score = (adjusted_score + length_penalty).max(0);
 ```
 
-**Assessment**: ✅ Equivalent. The `max(0, ...)` floor is present in ruSTAR.
+**Assessment**: ✅ Equivalent. The `max(0, ...)` floor is present in rustar-aligner.
 
 ---
 
@@ -206,7 +206,7 @@ if (trA.intronMotifs[1] > 0 && trA.intronMotifs[2] > 0
 if (sjN > 0 && trA.sjMotifStrand == 0 && P.outSAMstrandField.type == 1) return;
 ```
 
-**ruSTAR**: Motif strand consistency is checked in `read_align.rs` (`filter_inconsistent_strand_junctions`). The check for `sjMotifStrand == 0` with `outSAMstrandField = intronMotif` is applied. Needs verification of exact conditions.
+**rustar-aligner**: Motif strand consistency is checked in `read_align.rs` (`filter_inconsistent_strand_junctions`). The check for `sjMotifStrand == 0` with `outSAMstrandField = intronMotif` is applied. Needs verification of exact conditions.
 
 ---
 
@@ -217,4 +217,4 @@ STAR uses:
 - `WA_Anchor = 1`: anchor seed (can be excluded if transcript already has one)
 - `WA_Anchor = 2`: LAST anchor seed (can only be excluded if transcript already has an anchor)
 
-ruSTAR uses `wa.is_anchor: bool` and `last_anchor_idx = wa_entries.iter().rposition(|wa| wa.is_anchor)`. The constraint "can only skip the last anchor if `wt.n_anchor > 0`" matches STAR's `WA_Anchor == 2` logic. ✅
+rustar-aligner uses `wa.is_anchor: bool` and `last_anchor_idx = wa_entries.iter().rposition(|wa| wa.is_anchor)`. The constraint "can only skip the last anchor if `wt.n_anchor > 0`" matches STAR's `WA_Anchor == 2` logic. ✅

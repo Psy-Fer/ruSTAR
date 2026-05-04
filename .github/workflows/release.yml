@@ -402,7 +402,7 @@ jobs:
         run: |
           gh release create "${{ needs.check-release.outputs.version }}" \
             --target "${{ github.sha }}" \
-            --title "ruSTAR ${{ needs.check-release.outputs.version }}" \
+            --title "rustar-aligner ${{ needs.check-release.outputs.version }}" \
             --notes-file /tmp/release-notes.md
 
       - name: Create release (auto-generated notes)
@@ -412,7 +412,7 @@ jobs:
         run: |
           gh release create "${{ needs.check-release.outputs.version }}" \
             --target "${{ github.sha }}" \
-            --title "ruSTAR ${{ needs.check-release.outputs.version }}" \
+            --title "rustar-aligner ${{ needs.check-release.outputs.version }}" \
             --generate-notes
 
   # ------------------------------------------------------------------

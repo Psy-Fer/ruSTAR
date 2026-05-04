@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# Byte-for-byte diff of ruSTAR vs STAR for the transcriptome index files
+# Byte-for-byte diff of rustar-aligner vs STAR for the transcriptome index files
 # written at genomeGenerate time.
 #
 # Usage: ./diff_star_transcriptome.sh [WORKDIR]
 #
 # Generates a synthetic 2-chr / 4-transcript / 4-gene test case, runs both
-# ruSTAR and STAR genomeGenerate, then diffs each output file byte-for-byte.
+# rustar-aligner and STAR genomeGenerate, then diffs each output file byte-for-byte.
 #
 # Requires STAR on PATH (`brew install rna-star`, bioconda star, etc.).
-# ruSTAR must already be built — the script expects `target/debug/ruSTAR`
+# rustar-aligner must already be built — the script expects `target/debug/rustar-aligner`
 # in the repo root (or $RUSTAR_BIN set to a compiled binary).
 
 set -euo pipefail
 
-WORKDIR="${1:-/tmp/rustar_diff}"
-RUSTAR_BIN="${RUSTAR_BIN:-$(pwd)/target/debug/ruSTAR}"
+WORKDIR="${1:-/tmp/rustar_aligner_diff}"
+RUSTAR_BIN="${RUSTAR_BIN:-$(pwd)/target/debug/rustar-aligner}"
 
 if [[ ! -x "$RUSTAR_BIN" ]]; then
-    echo "ERROR: ruSTAR binary not found at $RUSTAR_BIN"
-    echo "Build with: cargo build (or set RUSTAR_BIN=/path/to/ruSTAR)"
+    echo "ERROR: rustar-aligner binary not found at $RUSTAR_BIN"
+    echo "Build with: cargo build (or set RUSTAR_BIN=/path/to/rustar-aligner)"
     exit 1
 fi
 
@@ -60,26 +60,26 @@ with open("annotations.gtf", "w") as f:
     f.write('chr2\ttest\texon\t1301\t1400\t.\t+\t.\tgene_id "G4"; transcript_id "T4";\n')
 PYEOF
 
-# STAR and ruSTAR genomeGenerate. Both tools echo `--genomeDir <dir>`
+# STAR and rustar-aligner genomeGenerate. Both tools echo `--genomeDir <dir>`
 # into genomeParameters.txt's commandLineFull comment, so the two must
 # receive the SAME literal path string for that line to match byte-for-byte.
 # Run each in a subshell that symlinks `index` → the per-tool output dir,
 # pass `--genomeDir index` to both, then resolve the symlink away.
-rm -rf star_index rustar_index index
-mkdir star_index rustar_index
+rm -rf star_index rustar_aligner_index index
+mkdir star_index rustar_aligner_index
 
 ln -sfn star_index index
 STAR --runMode genomeGenerate --genomeDir index \
      --genomeFastaFiles genome.fa --sjdbGTFfile annotations.gtf \
      --genomeSAindexNbases 5 --sjdbOverhang 49 --runThreadN 1 >/dev/null 2>&1
-ln -sfn rustar_index index
+ln -sfn rustar_aligner_index index
 "$RUSTAR_BIN" --runMode genomeGenerate --genomeDir index \
      --genomeFastaFiles genome.fa --sjdbGTFfile annotations.gtf \
      --genomeSAindexNbases 5 --sjdbOverhang 49 --runThreadN 1 >/dev/null 2>&1
 rm -f index
 
 # Diff each file. SA / SAindex are excluded because STAR's suffix-array
-# construction algorithm differs from ruSTAR's and produces a different
+# construction algorithm differs from rustar-aligner's and produces a different
 # (but equally-valid) byte layout — the sort itself is deterministic but
 # STAR's bucketed parallel build breaks ties differently. Size parity is
 # verified separately below.
@@ -89,12 +89,12 @@ for f in chrName.txt chrLength.txt chrStart.txt chrNameLength.txt \
          transcriptInfo.tab exonInfo.tab geneInfo.tab exonGeTrInfo.tab \
          sjdbList.fromGTF.out.tab sjdbInfo.txt sjdbList.out.tab \
          Genome genomeParameters.txt; do
-    if diff -q "star_index/$f" "rustar_index/$f" >/dev/null 2>&1; then
+    if diff -q "star_index/$f" "rustar_aligner_index/$f" >/dev/null 2>&1; then
         echo "✓ $f"
         pass=$((pass+1))
     else
         echo "✗ $f DIFFERS"
-        diff "star_index/$f" "rustar_index/$f" | head -20
+        diff "star_index/$f" "rustar_aligner_index/$f" | head -20
         fail=$((fail+1))
     fi
 done
@@ -102,12 +102,12 @@ done
 # SA / SAindex: size-only check (see comment above).
 for f in SA SAindex; do
     star_size=$(wc -c <"star_index/$f")
-    rustar_size=$(wc -c <"rustar_index/$f")
-    if [[ "$star_size" == "$rustar_size" ]]; then
+    rustar_aligner_size=$(wc -c <"rustar_aligner_index/$f")
+    if [[ "$star_size" == "$rustar_aligner_size" ]]; then
         echo "~ $f size-only match ($star_size bytes) — content differs (expected, different SA algorithm)"
         pass=$((pass+1))
     else
-        echo "✗ $f size mismatch: STAR=$star_size ruSTAR=$rustar_size"
+        echo "✗ $f size mismatch: STAR=$star_size rustar-aligner=$rustar_aligner_size"
         fail=$((fail+1))
     fi
 done

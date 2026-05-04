@@ -62,7 +62,7 @@ impl GenomeIndex {
 
         // Prefer STAR-compatible transcriptInfo.tab / exonInfo.tab /
         // geneInfo.tab over re-parsing the GTF at align time. If the files
-        // aren't present (legacy ruSTAR index), fall back to on-the-fly
+        // aren't present (legacy rustar-aligner index), fall back to on-the-fly
         // construction from the GTF when one is supplied — this matches
         // STAR's behavior in `sjdbInsertJunctions.cpp` (re-parse and regenerate).
         let transcriptome = if genome_dir.join("transcriptInfo.tab").exists() {
@@ -287,7 +287,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         let args = vec![
-            "ruSTAR",
+            "rustar-aligner",
             "--runMode",
             "genomeGenerate",
             "--genomeFastaFiles",

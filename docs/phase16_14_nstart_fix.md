@@ -4,7 +4,7 @@
 
 ## Summary
 
-Fixed a critical bug in the sparse seed search where `seedSearchStartLmax` was used as the **number of starting positions** (Nstart) instead of the **maximum spacing between starting positions**. This caused ruSTAR to search at ~17x more positions than STAR, finding spurious short seeds that produced false splice junctions.
+Fixed a critical bug in the sparse seed search where `seedSearchStartLmax` was used as the **number of starting positions** (Nstart) instead of the **maximum spacing between starting positions**. This caused rustar-aligner to search at ~17x more positions than STAR, finding spurious short seeds that produced false splice junctions.
 
 ## The Bug
 
@@ -73,7 +73,7 @@ With 50 starting positions (instead of 3), the R→L sparse search was exploring
 | False splices | 20 | **23** | — |
 | Missed splices | 22 | **10** | — |
 | Shared junctions | 64 | **62** | 67 total |
-| ruSTAR-only junctions | 4 | **1** | — |
+| rustar-aligner-only junctions | 4 | **1** | — |
 | MAPQ inflation | 36 | **28** | — |
 | Total disagreements | 175 | **48** | — |
 | Diff-chr ties | 98 | **0** | — |
@@ -84,7 +84,7 @@ With 50 starting positions (instead of 3), the R→L sparse search was exploring
 - **Diff-chr multi-mapper ties**: 98 → 0 (eliminated)
 - **Actionable disagreements**: 128 → 52 (−59%)
 - **Missed splices**: 22 → 10 (−55%)
-- **ruSTAR-only junctions**: 4 → 1 (−75%)
+- **rustar-aligner-only junctions**: 4 → 1 (−75%)
 - **MAPQ inflation**: 36 → 28 (−22%)
 - **Seeds per read**: ~145 → ~10 (dramatic reduction, matches STAR)
 
@@ -114,8 +114,8 @@ The Nstart fix dramatically reduces the number of seeds found per read (e.g., 14
 
 ## Remaining Issues
 
-1. **23 false splices** — reads where ruSTAR adds N in CIGAR but STAR doesn't (was 20, +3 from changed position-agree set)
-2. **10 missed splices** — reads where STAR has N but ruSTAR doesn't (was 22, −12 improvement)
-3. **5 STAR-only junctions** — junctions STAR finds but ruSTAR doesn't (seed search differences?)
+1. **23 false splices** — reads where rustar-aligner adds N in CIGAR but STAR doesn't (was 20, +3 from changed position-agree set)
+2. **10 missed splices** — reads where STAR has N but rustar-aligner doesn't (was 22, −12 improvement)
+3. **5 STAR-only junctions** — junctions STAR finds but rustar-aligner doesn't (seed search differences?)
 4. **48 position disagreements** — 41 same-chr + 7 diff-chr
-5. **28 MAPQ inflation reads** — ruSTAR=255, STAR<255 (multi-mapper resolution)
+5. **28 MAPQ inflation reads** — rustar-aligner=255, STAR<255 (multi-mapper resolution)

@@ -7,7 +7,7 @@
 //! This module mirrors STAR's `Transcriptome` / `alignToTranscript` /
 //! `quantAlign` logic (see `source/Transcriptome.cpp` and
 //! `source/Transcriptome_quantAlign.cpp` in the upstream repo), with the
-//! only substantive divergence that ruSTAR builds the transcript tables on
+//! only substantive divergence that rustar-aligner builds the transcript tables on
 //! the fly from the input GTF instead of loading persisted
 //! `transcriptInfo.tab`/`exonInfo.tab` files.
 use std::collections::HashMap;
@@ -233,7 +233,7 @@ impl TranscriptomeIndex {
             let mut tr_exons: Vec<TrExon> = Vec::with_capacity(recs.len());
             let mut ex_len_cum: u32 = 0;
             for r in &recs {
-                // GTF is 1-based inclusive; ruSTAR uses 0-based half-open.
+                // GTF is 1-based inclusive; rustar-aligner uses 0-based half-open.
                 let abs_start = chr_offset + r.start.saturating_sub(1);
                 let abs_end = chr_offset + r.end;
                 if abs_end <= abs_start {
@@ -373,7 +373,7 @@ impl TranscriptomeIndex {
     /// Load from STAR-compatible index files in `dir`.
     ///
     /// Requires `transcriptInfo.tab`, `exonInfo.tab`, `geneInfo.tab` to be
-    /// present — all written by either STAR's `genomeGenerate` or ruSTAR's
+    /// present — all written by either STAR's `genomeGenerate` or rustar-aligner's
     /// `write_*` methods. Returns a fully-populated index equivalent to
     /// what `from_gtf_exons` would produce, except transcripts come back
     /// in STAR's SORTED `(tr_start, tr_end)` order (not GTF insertion
@@ -400,7 +400,7 @@ impl TranscriptomeIndex {
         // Reconstruct per-transcript TrExon lists + tr_length from flat exon
         // arrays. `ex_start_rel[k]` is transcript-relative; add tr_start[i] to
         // get absolute 0-based coords. `ex_end_rel_incl` is inclusive; add 1
-        // for ruSTAR's exclusive convention.
+        // for rustar-aligner's exclusive convention.
         let mut tr_exons: Vec<Vec<TrExon>> = Vec::with_capacity(n_tr);
         let mut tr_length: Vec<u32> = Vec::with_capacity(n_tr);
         for i in 0..n_tr {
@@ -553,7 +553,7 @@ impl TranscriptomeIndex {
                 let e0 = &pair[0];
                 let e1 = &pair[1];
                 // STAR: if e1.start <= e0.end+1, exons touch (no intron). In
-                // ruSTAR's 0-based half-open: e1.genome_start <= e0.genome_end.
+                // rustar-aligner's 0-based half-open: e1.genome_start <= e0.genome_end.
                 if e1.genome_start <= e0.genome_end {
                     continue;
                 }
@@ -715,7 +715,7 @@ impl TranscriptomeIndex {
         for &i in &self.tr_order {
             let tr_s = self.tr_start[i];
             for ex in &self.tr_exons[i] {
-                // STAR's exEnd is 0-based INCLUSIVE; ruSTAR stores exclusive.
+                // STAR's exEnd is 0-based INCLUSIVE; rustar-aligner stores exclusive.
                 let ex_start_rel = ex.genome_start - tr_s;
                 let ex_end_rel = ex.genome_end.saturating_sub(1) - tr_s;
                 writeln!(out, "{}\t{}\t{}", ex_start_rel, ex_end_rel, ex.ex_len_cum)
@@ -748,7 +748,7 @@ type TrInfoColumns = (
 );
 
 /// Read `transcriptInfo.tab` back into column vectors. Converts STAR's
-/// 0-based-inclusive `trEnd` to ruSTAR's 0-based-exclusive convention.
+/// 0-based-inclusive `trEnd` to rustar-aligner's 0-based-exclusive convention.
 /// Ignores the `trEmax` column (reconstructed from `tr_end` + sort order).
 fn read_transcript_info(path: &Path) -> Result<TrInfoColumns, Error> {
     let body = std::fs::read_to_string(path).map_err(|e| Error::io(e, path))?;
@@ -793,7 +793,7 @@ fn read_transcript_info(path: &Path) -> Result<TrInfoColumns, Error> {
         };
         tr_ids.push(fields[0].to_string());
         tr_start.push(parse_u64(fields[1], "trStart")?);
-        // STAR's trEnd is 0-based INCLUSIVE; ruSTAR stores exclusive.
+        // STAR's trEnd is 0-based INCLUSIVE; rustar-aligner stores exclusive.
         tr_end.push(parse_u64(fields[2], "trEnd")? + 1);
         tr_strand.push(parse_u64(fields[4], "trStrand")? as u8);
         tr_exn.push(parse_u64(fields[5], "trExN")? as u32);
@@ -1143,7 +1143,7 @@ fn align_to_one_transcript(
 ///
 /// Mirrors STAR `ReadAlign::quantTranscriptome` (see
 /// `source/ReadAlign_quantTranscriptome.cpp:9-66`): reject indels if banned,
-/// reject single-mate-only PE hits (caller enforces — ruSTAR lacks per-block
+/// reject single-mate-only PE hits (caller enforces — rustar-aligner lacks per-block
 /// mate tags), extend leading/trailing soft-clips if requested, then project.
 ///
 /// `read_bases_align_orientation` is the read in genome base encoding
@@ -1352,7 +1352,7 @@ fn find_containing_exon(tr_exons: &[TrExon], pos: u64) -> Option<usize> {
 /// Return true if the boundary between `align.exons[iab-1]` and
 /// `align.exons[iab]` is a splice (`RefSkip`) rather than an indel.
 ///
-/// ruSTAR's `Transcript.exons` is a list of read-contiguous match blocks;
+/// rustar-aligner's `Transcript.exons` is a list of read-contiguous match blocks;
 /// splices / insertions / deletions all create block boundaries.  We
 /// discriminate based on the read-side gap:
 ///   * `read_end_prev == read_start_curr` AND `genome gap` → deletion OR splice.
@@ -1361,7 +1361,7 @@ fn find_containing_exon(tr_exons: &[TrExon], pos: u64) -> Option<usize> {
 ///   * read gap (insertion) → not a splice (coalesce).
 ///   * Pure deletion (read contiguous, small genome gap that does NOT match a
 ///     transcript junction) → handled by the caller rejecting the alignment
-///     when the junction check fails.  In practice ruSTAR produces `Del` ops
+///     when the junction check fails.  In practice rustar-aligner produces `Del` ops
 ///     inside a single exon (no block split for pure deletions because the
 ///     stitch merge coalesces across Del), so this branch rarely fires.
 fn is_splice_boundary_before(align: &Transcript, iab: usize) -> bool {
@@ -2180,7 +2180,7 @@ mod tests {
 
     fn default_params() -> Parameters {
         use clap::Parser;
-        Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "r.fq"])
+        Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "r.fq"])
     }
 
     #[test]

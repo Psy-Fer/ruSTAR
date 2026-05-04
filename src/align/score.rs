@@ -277,8 +277,8 @@ impl AlignmentScorer {
     pub fn find_best_junction_position(
         &self,
         read_seq: &[u8],
-        r_a_end: usize, // prev.read_end (exclusive, ruSTAR convention)
-        g_a_end: u64,   // prev.genome_end (exclusive, ruSTAR convention)
+        r_a_end: usize, // prev.read_end (exclusive, rustar-aligner convention)
+        g_a_end: u64,   // prev.genome_end (exclusive, rustar-aligner convention)
         r_gap: i64,     // read gap between seeds
         g_gap: i64,     // genome gap between seeds
         genome: &Genome,
@@ -291,7 +291,7 @@ impl AlignmentScorer {
         debug_assert!(del > 0);
 
         // Convert to STAR-style inclusive coordinates for the scanning algorithm
-        // ruSTAR: r_a_end is exclusive (one past last base of seed A)
+        // rustar-aligner: r_a_end is exclusive (one past last base of seed A)
         // STAR:   rAend is inclusive (last base of seed A)
         let g_a_end_inc = g_a_end - 1; // last genome base of seed A (inclusive)
         let r_a_end_inc = r_a_end - 1; // last read base of seed A (inclusive)
@@ -1048,7 +1048,7 @@ mod tests {
         // STAR's stitchAlignToTranscript.cpp: `if (Del>alignIntronMax && alignIntronMax>0)`
         // meaning alignIntronMax=0 disables the check entirely.
         use clap::Parser;
-        let params = crate::params::Parameters::try_parse_from(vec!["ruSTAR"]).unwrap();
+        let params = crate::params::Parameters::try_parse_from(vec!["rustar-aligner"]).unwrap();
         assert_eq!(params.align_intron_max, 0);
         let scorer = AlignmentScorer::from_params(&params);
         assert_eq!(scorer.align_intron_max, u32::MAX);
@@ -1059,7 +1059,7 @@ mod tests {
         // Custom alignIntronMax should be passed through directly
         use clap::Parser;
         let params =
-            crate::params::Parameters::try_parse_from(vec!["ruSTAR", "--alignIntronMax", "100000"])
+            crate::params::Parameters::try_parse_from(vec!["rustar-aligner", "--alignIntronMax", "100000"])
                 .unwrap();
         assert_eq!(params.align_intron_max, 100_000);
         let scorer = AlignmentScorer::from_params(&params);

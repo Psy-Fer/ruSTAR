@@ -111,7 +111,7 @@
 
 ## Phase 15.6: nM Tag (Mismatch Count) ✅ (2026-02-13)
 
-STAR outputs `nM:i:N` (mismatches only). ruSTAR also outputs `NM:i:N` (edit distance = mismatches + indels). Both emitted by default.
+STAR outputs `nM:i:N` (mismatches only). rustar-aligner also outputs `NM:i:N` (edit distance = mismatches + indels). Both emitted by default.
 
 - `Tag::new(b'n', b'M')` with value `transcript.n_mismatch`
 - nM = NM for reads without indels; nM < NM for reads with indels

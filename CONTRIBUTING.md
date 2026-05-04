@@ -1,4 +1,4 @@
-# Contributing to ruSTAR
+# Contributing to rustar-aligner
 
 ## Building and testing
 
@@ -20,7 +20,7 @@ Small synthetic and yeast test data lives in `test/`. Integration tests in `test
 
 ## Project history
 
-ruSTAR was written as a faithful port of [STAR](https://github.com/alexdobin/STAR) by Alexander Dobin. Up to the initial release, the goal was behavioral parity with STAR — matching its algorithms, thresholds, and output formats as closely as possible. Notes from that development phase are in `docs/dev/`.
+rustar-aligner was written as a faithful port of [STAR](https://github.com/alexdobin/STAR) by Alexander Dobin. Up to the initial release, the goal was behavioral parity with STAR — matching its algorithms, thresholds, and output formats as closely as possible. Notes from that development phase are in `docs/dev/`.
 
 Future development is not bound by that constraint. Adding STARsolo, new features, or diverging from STAR behavior is entirely welcome.
 

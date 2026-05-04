@@ -3,7 +3,7 @@
 # extendAlign.cpp vs extend_alignment()
 
 **STAR file**: `source/extendAlign.cpp`
-**ruSTAR file**: `src/align/stitch.rs`, function `extend_alignment()`
+**rustar-aligner file**: `src/align/stitch.rs`, function `extend_alignment()`
 **Purpose**: Extend a seed alignment into unaligned read bases at one end (left or right), stopping when the score would drop too far below the best seen.
 
 ---
@@ -48,7 +48,7 @@ if (extendToEnd) {
 
 **Key**: Doesn't track `maxScore` during extension — extends ALL the way to the spacer or length limit, reporting the total score. No score-based stopping.
 
-**ruSTAR**: Needs verification that the `extendToEnd` path (used for PE mate gap extension in `stitch_align_to_transcript`) is implemented this way.
+**rustar-aligner**: Needs verification that the `extendToEnd` path (used for PE mate gap extension in `stitch_align_to_transcript`) is implemented this way.
 
 ---
 
@@ -92,7 +92,7 @@ return extDone;
 
 ---
 
-## ruSTAR: extend_alignment()
+## rustar-aligner: extend_alignment()
 
 The function in `stitch.rs` was updated in Phase 16.11b to match STAR exactly. Key aspects to verify:
 
@@ -132,13 +132,13 @@ extendAlign(R, G, tR2+1, tG2+1, +1, +1,
     Lread-tR2-1, 100000, scoreSeedBestMM, nMMmax, pMMmax, alignEndsType, &trAstep1)
 ```
 
-**ruSTAR** (`finalize_transcript`): The extension order is controlled by `original_is_reverse` (Phase 16.28):
+**rustar-aligner** (`finalize_transcript`): The extension order is controlled by `original_is_reverse` (Phase 16.28):
 - Forward reads: extend left first (case 0), then right (case 1)
 - Reverse reads: extend right first (case 1), then left (case 0)
 
 The `nMMprev` for the right extension is `trA.nMM` (accumulated mismatches from left extension). In STAR it's `scoreSeedBestMM[iS1]`. For the left extension, STAR uses `nMMprev = 0`.
 
-**Potential issue**: For the right extension, STAR uses `scoreSeedBestMM[chain endpoint]` as `nMMprev`. This is the mismatch count from the DP chain (not from any prior extension). ruSTAR uses `wt.n_mismatch_total` or similar. This needs verification.
+**Potential issue**: For the right extension, STAR uses `scoreSeedBestMM[chain endpoint]` as `nMMprev`. This is the mismatch count from the DP chain (not from any prior extension). rustar-aligner uses `wt.n_mismatch_total` or similar. This needs verification.
 
 ---
 
@@ -161,6 +161,6 @@ extendAlign(R, G, rBstart-1, gBstart-1, -1, -1, extlen,
 
 The `extendToEnd` flag (`P.alignEndsType.ext[iFrag][...]`) controls whether extension stops at score-max or forces to the boundary.
 
-**ruSTAR** (`stitch_align_to_transcript`, mate boundary): Does NOT do these inward extensions when processing the mate boundary. Just appends the mate2 seed with `new_wt.score += wa.length`. The final `finalize_transcript` call extends outward (away from mates) not inward.
+**rustar-aligner** (`stitch_align_to_transcript`, mate boundary): Does NOT do these inward extensions when processing the mate boundary. Just appends the mate2 seed with `new_wt.score += wa.length`. The final `finalize_transcript` call extends outward (away from mates) not inward.
 
-**Impact**: 🟡 For PE reads, if there's a gap between the mates (fragment size > 2×read_length), the inter-mate region won't be scored in ruSTAR's intermediate step. The STAR approach may produce slightly better final scores for these reads by extending inward during stitch processing.
+**Impact**: 🟡 For PE reads, if there's a gap between the mates (fragment size > 2×read_length), the inter-mate region won't be scored in rustar-aligner's intermediate step. The STAR approach may produce slightly better final scores for these reads by extending inward during stitch processing.

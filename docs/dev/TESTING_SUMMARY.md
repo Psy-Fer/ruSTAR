@@ -62,7 +62,7 @@
 
 ### Performance Analysis
 
-| Metric | STAR | ruSTAR (observed) | Ratio |
+| Metric | STAR | rustar-aligner (observed) | Ratio |
 |--------|------|-------------------|-------|
 | Reads/second | ~16,000 | <2 | **~10,000x slower** |
 | 100 reads | <0.01s | >60s | 6000x+ |
@@ -76,7 +76,7 @@
 
 ### Index Generation (SUCCESSFUL)
 ```bash
-ruSTAR --runMode genomeGenerate \
+rustar-aligner --runMode genomeGenerate \
   --genomeDir indices_rustar \
   --genomeFastaFiles reference/Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa \
   --genomeSAindexNbases 10 \
@@ -85,7 +85,7 @@ ruSTAR --runMode genomeGenerate \
 
 ### Alignment Test 1: 100K reads (FAILED - too slow)
 ```bash
-ruSTAR --runMode alignReads \
+rustar-aligner --runMode alignReads \
   --genomeDir indices_rustar \
   --readFilesIn reads/ERR12389696_sub_1.fastq.gz \
   --readFilesCommand zcat \
@@ -96,7 +96,7 @@ ruSTAR --runMode alignReads \
 
 ### Alignment Test 2: 100 reads (FAILED - too slow)
 ```bash
-ruSTAR --runMode alignReads \
+rustar-aligner --runMode alignReads \
   --genomeDir indices_rustar \
   --readFilesIn reads/ERR12389696_sub_1_100.fastq.gz \
   --readFilesCommand zcat \
@@ -123,7 +123,7 @@ ruSTAR --runMode alignReads \
 ### Files Created During Testing
 ```
 test/data/small/yeast/
-  indices_rustar/                    - ruSTAR-generated index (18s)
+  indices_rustar/                    - rustar-aligner-generated index (18s)
   outputs/rustar_test/
     noChim/Aligned.out.sam          - Created but empty (0 bytes)
     tiny100_/Aligned.out.sam        - Created but empty (0 bytes)
@@ -155,7 +155,7 @@ cargo build --release
 
 # Profile on tiny dataset (100 reads)
 cd test/data/small/yeast
-perf record -g ../../../../target/release/ruSTAR \
+perf record -g ../../../../target/release/rustar-aligner \
   --runMode alignReads \
   --genomeDir indices_rustar \
   --readFilesIn reads/ERR12389696_sub_1_100.fastq.gz \

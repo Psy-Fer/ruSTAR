@@ -6,11 +6,11 @@
 
 ## Executive Summary
 
-Fixed critical bugs preventing alignments from working. ruSTAR now successfully aligns reads to the genome with valid SAM output, though performance and unique/multi classification need improvement.
+Fixed critical bugs preventing alignments from working. rustar-aligner now successfully aligns reads to the genome with valid SAM output, though performance and unique/multi classification need improvement.
 
 ### Test Results (Yeast, 100 reads)
 
-| Metric | STAR | ruSTAR | Status |
+| Metric | STAR | rustar-aligner | Status |
 |--------|------|--------|--------|
 | Time | <0.1s | ~5s | ⚠️ 50x slower |
 | Uniquely mapped | 88% | 0% | ⚠️ Classification broken |
@@ -215,7 +215,7 @@ if alignment_end < read_seq.len() {
 
 **Profiling Needed**:
 ```bash
-perf record -g ./target/release/ruSTAR --runMode alignReads ...
+perf record -g ./target/release/rustar-aligner --runMode alignReads ...
 perf report
 ```
 
@@ -239,7 +239,7 @@ perf report
 ### Working Test (100 reads):
 ```bash
 cd test/data/small/yeast
-ruSTAR --runMode alignReads \
+rustar-aligner --runMode alignReads \
   --genomeDir indices_rustar \
   --readFilesIn reads/ERR12389696_sub_1_100.fastq.gz \
   --readFilesCommand zcat \

@@ -52,7 +52,7 @@
 
 **Differential Test** (10k SE):
 
-| Field | ruSTAR | STAR |
+| Field | rustar-aligner | STAR |
 |-------|--------|------|
 | Input reads | 10000 | 10000 |
 | Avg read length | 150 | 150 |
@@ -99,7 +99,7 @@
 
 **Results vs STAR (10k SE yeast)**:
 
-| Metric | STAR | ruSTAR |
+| Metric | STAR | rustar-aligner |
 |--------|------|--------|
 | N_unmapped | 1073 | 1074 (+1) |
 | N_multimapping | 661 | 661 |
@@ -173,17 +173,17 @@ The ±1 discrepancies (N_unmapped + N_ambiguous) are a single read at a gene ove
 
 ## Phase 17.C: STAR-faithful SCORE-GATE + mappedFilter ✅ (2026-04-17)
 
-**Problem**: 4 PE MAPQ inflations for rDNA/repeat multi-mappers. ruSTAR NH=2 vs STAR NH=3 for reads with cross-rDNA-copy pairs (M1@copy1 + M2@copy2, 9037bp gap), causing MAPQ=3 vs STAR's MAPQ=1.
+**Problem**: 4 PE MAPQ inflations for rDNA/repeat multi-mappers. rustar-aligner NH=2 vs STAR NH=3 for reads with cross-rDNA-copy pairs (M1@copy1 + M2@copy2, 9037bp gap), causing MAPQ=3 vs STAR's MAPQ=1.
 
 **Root cause**: Two distinct bugs:
 
 1. **Per-WT absolute threshold too strict** (`read_align.rs` forward/reverse cluster processing):
-   - ruSTAR used `if adjusted_score < combined_score_threshold { continue; }` (hard cutoff at `outFilterScoreMinOverLread * (Lread-1)`)
+   - rustar-aligner used `if adjusted_score < combined_score_threshold { continue; }` (hard cutoff at `outFilterScoreMinOverLread * (Lread-1)`)
    - STAR's `stitchWindowAligns.cpp:324` SCORE-GATE uses a RELATIVE criterion: `Score + outFilterMultimapScoreRange >= wTr[0]->maxScore` (within `scoreRange=1` of window best)
-   - For cross-copy pairs: same-copy score=198 (g_span=100bp, penalty=-2), cross-copy score=197 (g_span=9237bp, penalty=-3). ruSTAR rejected cross-copy (197 < 198); STAR accepted it (197+1 ≥ 198)
+   - For cross-copy pairs: same-copy score=198 (g_span=100bp, penalty=-2), cross-copy score=197 (g_span=9237bp, penalty=-3). rustar-aligner rejected cross-copy (197 < 198); STAR accepted it (197+1 ≥ 198)
 
 2. **filter_paired_transcripts applied absolute threshold per-pair** (not just to best):
-   - ruSTAR checked every pair's `combined_wt_score < absolute_threshold` → removed cross-copy (197 < 198)
+   - rustar-aligner checked every pair's `combined_wt_score < absolute_threshold` → removed cross-copy (197 < 198)
    - STAR's `ReadAlign_mappedFilter.cpp` checks only `trBest->maxScore >= threshold` — if the best passes, ALL pairs in the score window are kept
 
 **Fix**:
@@ -224,7 +224,7 @@ where `p1 = genomic_length_penalty(t1_span)`, `p2 = genomic_length_penalty(t2_sp
 
 **Result**: 278/278 tests, 0 warnings. **248 → 236 half-mapped** (12 pairs fixed by correct ordering). PE diff-AS dropped from 99.6% → 3.1%. PE both-mapped: 8767 (STAR: 8390). SE 8796/8926 maintained.
 
-**Investigation note**: Attempted quality-filter fallback (retry with pre-score-range pool when score-range winner fails quality) to recover additional half-mapped reads. The specific root cause of remaining 236 half-mapped: STAR's combined-read DP finds correct mate2 alignment with 0 mismatches; ruSTAR's per-mate DP finds a different alignment at the same position with 8 mismatches (combined_nm=14 > outFilterMismatchNmax=10). The fallback recovers 35 pairs but introduces ~100 position regressions (pairs at wrong positions passing individual quality checks). Reverted.
+**Investigation note**: Attempted quality-filter fallback (retry with pre-score-range pool when score-range winner fails quality) to recover additional half-mapped reads. The specific root cause of remaining 236 half-mapped: STAR's combined-read DP finds correct mate2 alignment with 0 mismatches; rustar-aligner's per-mate DP finds a different alignment at the same position with 8 mismatches (combined_nm=14 > outFilterMismatchNmax=10). The fallback recovers 35 pairs but introduces ~100 position regressions (pairs at wrong positions passing individual quality checks). Reverted.
 
 ---
 
@@ -414,23 +414,23 @@ All 4 production paths thread params: `index/mod.rs` (genomeGenerate), `index/io
 
 **Starting state**: 6 PE AS diffs → **4 after Phase G3 SA fix**.
 
-**All 4 remaining diffs are ruSTAR improvements, not bugs.**
+**All 4 remaining diffs are rustar-aligner improvements, not bugs.**
 
 ### `.844151` (2 mates, AS diff = +12)
-- ruSTAR: VIII:451791 `146M4S`/`3S146M1S` MAPQ=255 AS=290 **nM=0** (perfect match)
+- rustar-aligner: VIII:451791 `146M4S`/`3S146M1S` MAPQ=255 AS=290 **nM=0** (perfect match)
 - STAR:   VII:1001391 `146M4S`/`3S146M1S` MAPQ=255 AS=278 **nM=6** (3 mismatches per mate)
 
 STAR's window-based seeding finds WINDOW[0] at Chr VIII (1 seed per mate: MMP len=146, unique) and WINDOW[1] at Chr VII (2 seeds per mate: shorter seeds from RC direction that also match the no-mismatch region pos 111-149). STAR only forms a combined PE pair score in windows with multiple seeds per mate — WINDOW[0] gets individual mate scores (144/145), WINDOW[1] gets combined pair score=278. Since 278 > max(144,145), STAR picks Chr VII.
 
-ruSTAR's per-mate approach independently finds each mate at VIII (perfect 0mm), `try_pair_transcripts` combines → AS=290 > 278 → picks the objectively better VIII alignment.
+rustar-aligner's per-mate approach independently finds each mate at VIII (perfect 0mm), `try_pair_transcripts` combines → AS=290 > 278 → picks the objectively better VIII alignment.
 
 ### `.4972950` (2 mates, AS diff = +12)
-- ruSTAR mate2: X:120783 `1S33M72N50M186N65M1S` — 148 bases matched, 2 canonical introns, AS=260
+- rustar-aligner mate2: X:120783 `1S33M72N50M186N65M1S` — 148 bases matched, 2 canonical introns, AS=260
 - STAR mate2:   X:120953 `27S122M1S` — 122 bases matched, 10 combined mismatches, AS=248
 
-ruSTAR's stitching finds the proper spliced alignment (GT-AG junctions, more bases covered). STAR settles for a lower-scoring unspliced alignment with 27bp soft-clipping. ruSTAR wins by 12 AS points and 26 more matched bases.
+rustar-aligner's stitching finds the proper spliced alignment (GT-AG junctions, more bases covered). STAR settles for a lower-scoring unspliced alignment with 27bp soft-clipping. rustar-aligner wins by 12 AS points and 26 more matched bases.
 
-**Conclusion**: Fixing these would require replicating STAR's suboptimal window-stitching failure at VIII, and degrading ruSTAR's correct splice detection. Accept as known improvements.
+**Conclusion**: Fixing these would require replicating STAR's suboptimal window-stitching failure at VIII, and degrading rustar-aligner's correct splice detection. Accept as known improvements.
 
 ---
 

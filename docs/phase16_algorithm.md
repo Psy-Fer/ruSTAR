@@ -29,7 +29,7 @@
 
 **Fix**: `zip(junction_motifs, junction_annotated)` — only reject when `NonCanonical && !annotated`.
 
-**GTF Testing**: Established differential baseline. STAR gains 8 more junctions with GTF because it inserts splice sites into genome index at alignment time (ruSTAR does not).
+**GTF Testing**: Established differential baseline. STAR gains 8 more junctions with GTF because it inserts splice sites into genome index at alignment time (rustar-aligner does not).
 
 **Files**: `src/align/read_align.rs`
 
@@ -193,7 +193,7 @@ Removed anchor fallback in `cluster_seeds()` (no longer needed with accurate SA 
 
 ## Phase 16.10: Multi-Transcript DP (MAPQ Fix) ✅ (2026-02-20)
 
-**Problem**: ruSTAR produced exactly **one transcript per window** from DP stitching. For rDNA reads (chrXII tandem repeats), all ~6 copies landed in a single window. STAR found multiple transcripts → NH=6 → MAPQ=0. ruSTAR found one → NH=1 → MAPQ=255. 323 reads had inflated MAPQ.
+**Problem**: rustar-aligner produced exactly **one transcript per window** from DP stitching. For rDNA reads (chrXII tandem repeats), all ~6 copies landed in a single window. STAR found multiple transcripts → NH=6 → MAPQ=0. rustar-aligner found one → NH=1 → MAPQ=255. 323 reads had inflated MAPQ.
 
 **Fix**: Multi-endpoint DP — collect top-N DP endpoints instead of single best:
 
@@ -206,7 +206,7 @@ Removed anchor fallback in `cluster_seeds()` (no longer needed with accurate SA 
 
 | Metric | Before (16.9) | After (16.10) | Improvement |
 |--------|---------------|---------------|-------------|
-| MAPQ inflation (ruSTAR=255, STAR<255) | **323** | **62** | -81% |
+| MAPQ inflation (rustar-aligner=255, STAR<255) | **323** | **62** | -81% |
 | MAPQ agreement | 96.1% | **99.1%** | +3.0pp |
 | Position agreement | 97.9% | **97.4%** | see note |
 | CIGAR agree (of pos-agree) | 98.3% | **98.5%** | +0.2pp |
@@ -230,7 +230,7 @@ Removed anchor fallback in `cluster_seeds()` (no longer needed with accurate SA 
 | Both mates mapped | 8706 (96.6%) | **8761 (97.1%)** | +55 pairs |
 | Half-mapped pairs | 311 (3.4%) | **263 (2.9%)** | -48 pairs |
 | Shared junctions | 76 | **85** | +9 |
-| ruSTAR-only junctions | — | **3** | — |
+| rustar-aligner-only junctions | — | **3** | — |
 
 **Files**: `src/align/stitch.rs`, `src/align/read_align.rs`
 
@@ -238,11 +238,11 @@ Removed anchor fallback in `cluster_seeds()` (no longer needed with accurate SA 
 
 ## Phase 16.11b: Fix extend_alignment() to Match STAR's extendAlign() ✅ (2026-02-20)
 
-**Problem**: ruSTAR's `extend_alignment()` passed actual cumulative alignment length (e.g., seed length ~20) as `len_prev`, activating the proportional mismatch check (`pMMmax * total_length`). STAR always passes `Lprev=100000`, making only the absolute `nMMmax` limit apply.
+**Problem**: rustar-aligner's `extend_alignment()` passed actual cumulative alignment length (e.g., seed length ~20) as `len_prev`, activating the proportional mismatch check (`pMMmax * total_length`). STAR always passes `Lprev=100000`, making only the absolute `nMMmax` limit apply.
 
 **Example**: For a seed of length 20 extending leftward with `pMMmax=0.3`, `nMMmax=10`:
 - STAR: allows up to 10 mismatches (proportional check disabled by Lprev=100000)
-- ruSTAR: allows only `min(0.3*(20+i+1), 10)` ≈ 6 mismatches at start
+- rustar-aligner: allows only `min(0.3*(20+i+1), 10)` ≈ 6 mismatches at start
 
 **Fix**:
 1. **All 4 call sites**: Changed `len_prev` to `100_000` (pre-DP left, endpoint right, post-DP left, post-DP right)
@@ -267,13 +267,13 @@ Removed anchor fallback in `cluster_seeds()` (no longer needed with accurate SA 
 **Infrastructure added**:
 1. **`--readNameFilter` parameter** — when set, produces detailed alignment trace on stderr for a specific read: seed counts, cluster details, DP expanded seeds + endpoints + scores, transcript filtering decisions, final output
 2. **`compare_sam_thorough.py` updated** — new "Adjusted Agreement" section counting diff-chr ties and reporting adjusted metrics
-3. **`extract_disagreement_reads.py`** — parses SAM comparison, categorizes disagreements (false_splice, missed_splice, same_chr_close, same_chr_far, star_only, rustar_only, diff_chr_tie), extracts representative reads for targeted debugging
+3. **`extract_disagreement_reads.py`** — parses SAM comparison, categorizes disagreements (false_splice, missed_splice, same_chr_close, same_chr_far, star_only, rustar_aligner_only, diff_chr_tie), extracts representative reads for targeted debugging
 
 **Adjusted metrics**:
 - Raw position agreement: 97.4% (8620/8793 both-mapped reads)
 - Diff-chr multi-mapper ties: ~100
 - **Adjusted position agreement: 99.2%** (excluding ties)
-- Actionable disagreements: 73 same-chr + 33 STAR-only + 26 ruSTAR-only = 132
+- Actionable disagreements: 73 same-chr + 33 STAR-only + 26 rustar-aligner-only = 132
 
 **Files**: `src/params.rs`, `src/align/read_align.rs`, `src/align/stitch.rs`, `test/compare_sam_thorough.py`, `test/extract_disagreement_reads.py`
 
@@ -334,7 +334,7 @@ Removed anchor fallback in `cluster_seeds()` (no longer needed with accurate SA 
 
 ## Phase 16.PE2: PE Joint DP — Combined-Read Path ✅
 
-**Problem**: ruSTAR aligned each PE mate independently then tried to pair. 263 pairs half-mapped because one mate had no seeds — but the mate had seeds when combined with the other in the correct orientation.
+**Problem**: rustar-aligner aligned each PE mate independently then tried to pair. 263 pairs half-mapped because one mate had no seeds — but the mate had seeds when combined with the other in the correct orientation.
 
 **STAR's approach**: Build a combined read `[mate1_fwd | SPACER=11 | RC(mate2_fwd)]`. Align it as a single SE read. The stitcher produces a joint transcript spanning both mates; split it at the mate boundary into two SAM records. RC(combined) = `[mate2_fwd | RC_SPACER | RC(mate1_fwd)]` — the "stitch read" for reverse clusters.
 
@@ -353,7 +353,7 @@ Removed anchor fallback in `cluster_seeds()` (no longer needed with accurate SA 
 
 ## Phase 16.PE3: PE STAR-Faithful Architecture Refactor ✅
 
-**Problem**: ruSTAR had a hybrid architecture: combined-read DP first, then independent SE alignment of each mate, then cross-product pairing. STAR only uses the combined-read path — no independent SE fallback, no cross-product. This produced ~426 false-positive BothMapped pairs.
+**Problem**: rustar-aligner had a hybrid architecture: combined-read DP first, then independent SE alignment of each mate, then cross-product pairing. STAR only uses the combined-read path — no independent SE fallback, no cross-product. This produced ~426 false-positive BothMapped pairs.
 
 **Fix**: Removed Phase 2 (independent SE via `align_read()`) and cross-product entirely. Decision tree:
 1. Joint pairs from combined-read path → BothMapped
@@ -370,7 +370,7 @@ Note: `adjust_mate2_coords()` helper in `stitch.rs` shifts mate2-only WT coords 
 
 ## Phase 16.28: extendAlign EXTEND_ORDER + Float Comparison Fix ✅ (2026-03-11)
 
-**Problem 1** (EXTEND_ORDER): STAR's `extendAlign` uses `EXTEND_ORDER=1` — extends the 5' end of the **read** first. For forward reads, 5' = left (extend left first). For reverse-strand reads, 5' = **right** end (extend the rightmost coordinate first). ruSTAR always extended left first, so reverse-strand reads extended in the wrong direction.
+**Problem 1** (EXTEND_ORDER): STAR's `extendAlign` uses `EXTEND_ORDER=1` — extends the 5' end of the **read** first. For forward reads, 5' = left (extend left first). For reverse-strand reads, 5' = **right** end (extend the rightmost coordinate first). rustar-aligner always extended left first, so reverse-strand reads extended in the wrong direction.
 
 **STAR source** (`stitchWindowAligns.cpp` lines 23-33):
 ```cpp
@@ -381,7 +381,7 @@ else            { vOrder[0]=1; vOrder[1]=0; } // rev: extend right first
 
 **Fix**: Added `original_is_reverse: bool` to `finalize_transcript`. When true, extend right before left. All callers updated: SE passes `stitch_is_reverse`; PE fwd cluster passes `false`; PE rev cluster passes `cluster_is_reverse`.
 
-**Problem 2** (float comparison): STAR uses `double` for mismatch limit: `min(pMMmax * double(Lprev+L), double(nMMmax))`. ruSTAR truncated to `u32` first, underestimating the limit when the product < 1.0 → premature break on very short extensions.
+**Problem 2** (float comparison): STAR uses `double` for mismatch limit: `min(pMMmax * double(Lprev+L), double(nMMmax))`. rustar-aligner truncated to `u32` first, underestimating the limit when the product < 1.0 → premature break on very short extensions.
 
 **Fix**: Changed `extend_alignment()` to use `f64` throughout.
 
@@ -395,7 +395,7 @@ else            { vOrder[0]=1; vOrder[1]=0; } // rev: extend right first
 
 **Problem**: When a junction shift `jr_shift > 0` but `jr_shift ≤ shared` (e.g., jr_shift=1, shared=2), read bases shifted into seed B territory at the donor side were NOT scored against the donor genome. The old condition `jr_shift > shared as i32` (1 > 2 = FALSE) completely missed this case.
 
-**Root cause**: ruSTAR's `jr_shift` is measured from the **end** of the shared region (at `r_a_end = last_exon.read_end + shared`), while STAR's `jR` is measured from the end of **seed A**. Therefore `STAR_jR = jr_shift + shared`. Extended right triggers when `STAR_jR > rGap` (= `shared`), i.e. `jr_shift > 0`, with `n_extra = STAR_jR - rGap = jr_shift`.
+**Root cause**: rustar-aligner's `jr_shift` is measured from the **end** of the shared region (at `r_a_end = last_exon.read_end + shared`), while STAR's `jR` is measured from the end of **seed A**. Therefore `STAR_jR = jr_shift + shared`. Extended right triggers when `STAR_jR > rGap` (= `shared`), i.e. `jr_shift > 0`, with `n_extra = STAR_jR - rGap = jr_shift`.
 
 **Old code**:
 ```rust
@@ -413,7 +413,7 @@ if jr_shift > 0 {
 
 **Also reverted**: A previous session applied `transcript.score - 2 * n_junction` as a proxy workaround for the AS tag in `sam.rs`. With the real scoring fix, this workaround over-subtracts. Reverted all 3 occurrences back to `transcript.score`.
 
-**Impact**: MAPQ inflation 5→4, actionable disagreements 27→26. Two pre-existing MAPQ deflation cases now visible (ruSTAR correctly lowers primary score → extra unspliced secondary now within score-range threshold). MAPQ deflation 2→4.
+**Impact**: MAPQ inflation 5→4, actionable disagreements 27→26. Two pre-existing MAPQ deflation cases now visible (rustar-aligner correctly lowers primary score → extra unspliced secondary now within score-range threshold). MAPQ deflation 2→4.
 
 **Files**: `src/align/stitch.rs`, `src/io/sam.rs`
 
@@ -433,7 +433,7 @@ if jr_shift > 0 {
 
 ## Phase 16.31: scoreGenomicLengthLog2scale PE Penalty ✅ (2026-03-25)
 
-**Problem**: 144 ruSTAR-only false positive pairs (non-palindromic overlapping pairs). STAR rejects these via `outFilterMatchNminOverLread` because the combined WT nMatch < threshold when only one genomic region is covered (zero-insert / very short insert). ruSTAR's combined WT score was passing the threshold.
+**Problem**: 144 rustar-aligner-only false positive pairs (non-palindromic overlapping pairs). STAR rejects these via `outFilterMatchNminOverLread` because the combined WT nMatch < threshold when only one genomic region is covered (zero-insert / very short insert). rustar-aligner's combined WT score was passing the threshold.
 
 **Fix**: Apply `scoreGenomicLengthLog2scale` penalty to the combined WT score before comparing to `combined_score_threshold`. STAR applies this penalty in `stitchWindowAligns.cpp:262-265`: `Score = max(0, Score + penalty)`. For overlapping pairs, the penalty is typically -2, pushing scores from 200 → 198 (below threshold 198).
 
@@ -445,11 +445,11 @@ if jr_shift > 0 {
 
 ## Phase 16.32: outFilterMultimapNmax PE Check ✅ (2026-03-26)
 
-**Problem**: STAR's `mappedFilter` rejects PE reads where `nTr > outFilterMultimapNmax` even after score-range filtering. ruSTAR was missing this check for the PE joint path.
+**Problem**: STAR's `mappedFilter` rejects PE reads where `nTr > outFilterMultimapNmax` even after score-range filtering. rustar-aligner was missing this check for the PE joint path.
 
 **Fix**: Added check `if joint_pairs.len() > params.out_filter_multimap_nmax → return TooManyLoci` after `filter_paired_transcripts`, mirroring STAR's ordering.
 
-**Status**: Mechanism correct but blocked for all 12 remaining FPs by score inflation (ruSTAR scores 36-106 pts higher than STAR for those pairs).
+**Status**: Mechanism correct but blocked for all 12 remaining FPs by score inflation (rustar-aligner scores 36-106 pts higher than STAR for those pairs).
 
 **Files**: `src/align/read_align.rs`
 
@@ -501,10 +501,10 @@ let extlen = if raw > 0 { (raw as usize).min(wa.read_pos) } else { 0 };
 |----------|-------|-------|
 | Diff-chr multi-mapper ties | ~100 | Unavoidable — same score, different repeat copy |
 | Same-chr repeat ties | ~19 | Unavoidable — rDNA/segmental dups |
-| Wrong intron choice (same chr) | 4 | ruSTAR picks 170kb intron, STAR picks 84kb |
+| Wrong intron choice (same chr) | 4 | rustar-aligner picks 170kb intron, STAR picks 84kb |
 | MAPQ inflation | 4 | Missed splice/indel secondary |
 | MAPQ deflation | 4 | Extra unspliced secondary |
-| ruSTAR-only false splice | 1 | `ERR12389696.18296181` — 279kb intron, adapter contamination |
+| rustar-aligner-only false splice | 1 | `ERR12389696.18296181` — 279kb intron, adapter contamination |
 | STAR-only mapped | 1 | `ERR12389696.13766843` — NM=10, unknown |
 | **Total actionable** | **26** | |
 
@@ -514,7 +514,7 @@ let extlen = if raw > 0 { (raw as usize).min(wa.read_pos) } else { 0 };
 |----------|-------|-------|
 | Diff-chr per-mate disagreements | 75/mate | Unavoidable multi-mapper ties |
 | Same-chr per-mate disagreements | ~21-24/mate | Some fixable |
-| ruSTAR-only FPs | ~2 pairs | Score inflation (combined WT 36-106 pts above STAR) — root cause TBD |
-| ruSTAR vs STAR total pair gap | +2 ruSTAR | ruSTAR maps 2 more pairs than STAR |
+| rustar-aligner-only FPs | ~2 pairs | Score inflation (combined WT 36-106 pts above STAR) — root cause TBD |
+| rustar-aligner vs STAR total pair gap | +2 rustar-aligner | rustar-aligner maps 2 more pairs than STAR |
 
 **Latent stitching/scoring discrepancy**: 35 pairs regressed from Phase 16.31 (raw combined WT scores 198-200 fall below 198 after penalty). STAR's raw scores for the same pairs are slightly higher. Root cause is a stitching or scoring difference not yet identified.

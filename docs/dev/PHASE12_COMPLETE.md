@@ -51,7 +51,7 @@ Phase 12 is now fully functional for single-end reads!
 
 Enable chimeric detection with:
 ```bash
-./target/release/ruSTAR \
+./target/release/rustar-aligner \
   --runMode alignReads \
   --genomeDir /path/to/index \
   --readFilesIn reads.fq \

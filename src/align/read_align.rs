@@ -16,7 +16,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 /// Derive a deterministic per-read RNG seed from `run_rng_seed` + the read name.
 ///
 /// STAR seeds `std::mt19937` once per chunk/thread (`runRNGseed*(iChunk+1)`),
-/// then advances the state sequentially per read. ruSTAR parallelises per-read
+/// then advances the state sequentially per read. rustar-aligner parallelises per-read
 /// via rayon, so we instead fold the read name into the seed — this keeps tie
 /// breaks reproducible regardless of thread count while still honoring the
 /// user's `--runRNGseed` value.
@@ -1485,7 +1485,7 @@ mod tests {
 
     fn make_test_params() -> Parameters {
         // Parse empty args to get default parameters
-        Parameters::try_parse_from(vec!["ruSTAR"]).unwrap()
+        Parameters::try_parse_from(vec!["rustar-aligner"]).unwrap()
     }
 
     fn make_test_index() -> GenomeIndex {

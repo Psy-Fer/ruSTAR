@@ -3,7 +3,7 @@
 # ReadAlign_mappedFilter.cpp vs Quality Filter in read_align.rs
 
 **STAR file**: `source/ReadAlign_mappedFilter.cpp`
-**ruSTAR file**: `src/align/read_align.rs`, filter logic in `align_read()`
+**rustar-aligner file**: `src/align/read_align.rs`, filter logic in `align_read()`
 
 ---
 
@@ -58,7 +58,7 @@ Note: `Lread-1` is used in proportional thresholds (not `Lread`).
 
 ---
 
-## ruSTAR Equivalent
+## rustar-aligner Equivalent
 
 ```rust
 fn filter_transcripts(transcripts: &mut Vec<Transcript>, ..., params: &Parameters) {
@@ -86,25 +86,25 @@ fn filter_transcripts(transcripts: &mut Vec<Transcript>, ..., params: &Parameter
 
 ### `Lread - 1` Usage 🟢
 
-**STAR** uses `(Lread-1)` in both score and match proportional thresholds. Phase 16.12 notes include "Lread-1 filter fix". **Assumed fixed in ruSTAR.**
+**STAR** uses `(Lread-1)` in both score and match proportional thresholds. Phase 16.12 notes include "Lread-1 filter fix". **Assumed fixed in rustar-aligner.**
 
 ### `trBest->nMM / trBest->rLength` — Mismatch Rate 🟡
 
-STAR divides mismatches by `rLength` (the mapped portion of the read, excluding soft-clips). ruSTAR may divide by `read_len` instead. These differ when there are significant soft clips.
+STAR divides mismatches by `rLength` (the mapped portion of the read, excluding soft-clips). rustar-aligner may divide by `read_len` instead. These differ when there are significant soft clips.
 
-**Investigation needed**: Verify ruSTAR uses `mapped_length` (= sum of M/I CIGAR ops) not `read_len` in the mismatch rate denominator.
+**Investigation needed**: Verify rustar-aligner uses `mapped_length` (= sum of M/I CIGAR ops) not `read_len` in the mismatch rate denominator.
 
 ### `nTr` = Number of Transcripts After Score-Range Filter 🟢
 
-STAR's `nTr` is the number of transcripts within `outFilterMultimapScoreRange` of the best. ruSTAR uses `transcripts.len()` after retaining by score range. **Equivalent.**
+STAR's `nTr` is the number of transcripts within `outFilterMultimapScoreRange` of the best. rustar-aligner uses `transcripts.len()` after retaining by score range. **Equivalent.**
 
 ### `nW == 0` → unmapType=0 (Other) 🟡
 
-STAR separately tracks "no good windows" as an unmapped reason. ruSTAR may not distinguish this from general no-alignments case in `UnmappedReason`.
+STAR separately tracks "no good windows" as an unmapped reason. rustar-aligner may not distinguish this from general no-alignments case in `UnmappedReason`.
 
 ### `outFilterMismatchNmaxTotal` 🟢
 
-STAR computes `outFilterMismatchNmaxTotal = min(outFilterMismatchNmax, floor(outFilterMismatchNoverLmax * Lread))`. This pre-computation creates an effective cap. ruSTAR should implement this.
+STAR computes `outFilterMismatchNmaxTotal = min(outFilterMismatchNmax, floor(outFilterMismatchNoverLmax * Lread))`. This pre-computation creates an effective cap. rustar-aligner should implement this.
 
 ---
 
@@ -119,7 +119,7 @@ else { statsRA.unmappedOther++; }
 
 The `outFilterBySJout` pass filters reads where ALL alignments use novel junctions not present in the SJ filter set (when `--outFilterType BySJout`).
 
-**ruSTAR**: Implemented as Phase 15 `BySJout` filter. Applied in `lib.rs` as a post-processing pass. Should be equivalent.
+**rustar-aligner**: Implemented as Phase 15 `BySJout` filter. Applied in `lib.rs` as a post-processing pass. Should be equivalent.
 
 ---
 

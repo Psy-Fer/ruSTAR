@@ -3,7 +3,7 @@
 # stitchAlignToTranscript.cpp vs stitch_align_to_transcript()
 
 **STAR file**: `source/stitchAlignToTranscript.cpp`
-**ruSTAR file**: `src/align/stitch.rs`, function `stitch_align_to_transcript()`
+**rustar-aligner file**: `src/align/stitch.rs`, function `stitch_align_to_transcript()`
 **Purpose**: Given an existing partial transcript (seed A), stitch seed B onto it, scoring the gap between them.
 
 ---
@@ -38,19 +38,19 @@ if (sjAB != ((uint)-1) && trA->exons[trA->nExons-1][EX_sjA] == sjAB
 }
 ```
 
-**ruSTAR**: The annotated SJ fast path is **not implemented**. ruSTAR always goes through the full jR scanning path even for annotated junctions. The junction is looked up in the DB after scanning, but the fast-path score difference (no gap scoring, direct annotation bonus) may not apply.
+**rustar-aligner**: The annotated SJ fast path is **not implemented**. rustar-aligner always goes through the full jR scanning path even for annotated junctions. The junction is looked up in the DB after scanning, but the fast-path score difference (no gap scoring, direct annotation bonus) may not apply.
 
-**STAR difference**: STAR's fast path skips the jR scan and directly assigns the known motif/strand/shift from the DB. ruSTAR's general path finds these via scanning, which should produce equivalent results but with extra work.
+**STAR difference**: STAR's fast path skips the jR scan and directly assigns the known motif/strand/shift from the DB. rustar-aligner's general path finds these via scanning, which should produce equivalent results but with extra work.
 
-**Potential issue**: The repeat check `L <= sjdbShiftRight[sjAB]` in the fast path prevents using an annotated junction when the exon is too short to be unambiguous. ruSTAR may not have this check.
+**Potential issue**: The repeat check `L <= sjdbShiftRight[sjAB]` in the fast path prevents using an annotated junction when the exon is too short to be unambiguous. rustar-aligner may not have this check.
 
 ---
 
 ## Coordinate Mapping
 
-| STAR | ruSTAR | Notes |
+| STAR | rustar-aligner | Notes |
 |------|--------|-------|
-| `rAend` (inclusive) | `last_exon.read_end - 1` | STAR is 0-based inclusive, ruSTAR is exclusive end |
+| `rAend` (inclusive) | `last_exon.read_end - 1` | STAR is 0-based inclusive, rustar-aligner is exclusive end |
 | `gAend` (inclusive) | `last_exon.genome_end - 1` | Same |
 | `rBstart` | `eff_read_pos` | Start of seed B (after overlap trimming) |
 | `gBstart` | `eff_genome_pos` | Genome start of seed B |
@@ -58,7 +58,7 @@ if (sjAB != ((uint)-1) && trA->exons[trA->nExons-1][EX_sjA] == sjAB
 | `rGap = rBstart - rAend - 1` | `read_gap = eff_read_pos - last_exon.read_end` | Number of unshared read bases |
 | `gGap = gBstart - gAend - 1` | `genome_gap = eff_genome_pos - last_exon.genome_end` | Genome gap |
 | `Del = gGap - rGap` | `del = (genome_gap - read_gap) as u32` | Intron/deletion size |
-| `shared` (ruSTAR) | `rGap` (STAR) | Shared gap bases (same value) |
+| `shared` (rustar-aligner) | `rGap` (STAR) | Shared gap bases (same value) |
 | `gBstart1 = gBstart - rGap - 1` | *(computed inline)* | Last intron base when jR=0 |
 
 ---
@@ -76,7 +76,7 @@ if (rBstart <= rAend) {                        // Partial overlap: trim B start
 }
 ```
 
-**ruSTAR**:
+**rustar-aligner**:
 ```rust
 if last_exon.read_end > eff_read_pos {
     let overlap = last_exon.read_end - eff_read_pos;
@@ -92,7 +92,7 @@ if last_exon.genome_end > eff_genome_pos && eff_genome_pos > last_exon.genome_st
 }
 ```
 
-**Assessment**: ✅ Equivalent. ruSTAR handles both read and genome overlap trimming.
+**Assessment**: ✅ Equivalent. rustar-aligner handles both read and genome overlap trimming.
 
 ---
 
@@ -108,7 +108,7 @@ for (int ii=1; ii<=rGap; ii++) {
 }
 ```
 
-**ruSTAR**:
+**rustar-aligner**:
 ```rust
 let shared = read_gap as usize;
 gap_mm = count_mismatches_in_region(read_seq, last_exon.read_end, last_exon.genome_end, shared, ...);
@@ -137,7 +137,7 @@ do {
 
 Starting at jR1=1, moves LEFT (jR1--) while: (score penalty ≤ shift bonus) AND (still within exon A by >1 base). Computes score difference between "use acceptor side" vs "use donor side" for each shifted position.
 
-**ruSTAR** (`find_best_junction_position` in `score.rs`): Implements this scan. Needs verification that the exact termination condition matches, especially the exon length guard `int(EX_L) + jR1 > 1`.
+**rustar-aligner** (`find_best_junction_position` in `score.rs`): Implements this scan. Needs verification that the exact termination condition matches, especially the exon length guard `int(EX_L) + jR1 > 1`.
 
 ### Step 2: Scan Right to Find Best Junction
 
@@ -161,11 +161,11 @@ do {
 
 Key: The scan goes up to `jR1 = rGap + L - 1` (one before `rBend - rAend`). This means the scan extends deep into seed B.
 
-**ruSTAR** (`find_best_junction_position`): The `eff_length` parameter passed as upper bound. If ruSTAR's upper bound is `eff_length` (= L), it matches STAR's `rGap + L - 1` in ruSTAR's local coordinate system (where 0 = start of shared region).
+**rustar-aligner** (`find_best_junction_position`): The `eff_length` parameter passed as upper bound. If rustar-aligner's upper bound is `eff_length` (= L), it matches STAR's `rGap + L - 1` in rustar-aligner's local coordinate system (where 0 = start of shared region).
 
 ### Step 3: Repeat Length Search
 
-**STAR** searches backward and forward from `gAend + jR` to find repeat length `jjL` and `jjR`. **ruSTAR** implements this equivalently.
+**STAR** searches backward and forward from `gAend + jR` to find repeat length `jjL` and `jjR`. **rustar-aligner** implements this equivalently.
 
 ### Step 4: Flush Non-Canonical/Deletions Left
 
@@ -178,7 +178,7 @@ if (jCan <= 0) { // non-canonical or deletion
 }
 ```
 
-**ruSTAR**: Needs verification that non-canonical junctions are flushed left by `jjL`.
+**rustar-aligner**: Needs verification that non-canonical junctions are flushed left by `jjL`.
 
 ### Step 5: Score Donor + Acceptor Bases (The Extended Range)
 
@@ -202,13 +202,13 @@ This loop covers:
 - **Extended right** (`rGap < ii <= jR` when `jR > rGap`): Score seed B bases shifted to donor side. No positive score/match increment (they were already counted as B-seed matches). Mismatches subtract TWICE (cancel the presumed match + penalty).
 - **Extended left** (`jR+1 <= ii < 1` when `jR < 0`): Score exon-A bases shifted to intron. Same cancel-and-penalize logic.
 
-**ruSTAR** has three separate code blocks for these cases:
+**rustar-aligner** has three separate code blocks for these cases:
 1. Donor-side shared bases (`junction_offset > 0`)
 2. Acceptor-side shared bases (`acceptor_bases > 0`)
 3. Extended left range (`jr_shift < -(shared)`)
 4. Extended right range (`jr_shift > 0`) — **Fixed in Phase 16.29**
 
-**Potential remaining issue** (D6 in DIFFERENCES.md): When `0 > jr_shift > -(shared)` (junction shifted left within the shared region), ruSTAR's `junction_offset = (shared + jr_shift)` and `acceptor_bases = shared - junction_offset = -jr_shift`. This means some shared bases are scored against the acceptor genome side. Let's verify this gives the same result as STAR's unified loop for this case:
+**Potential remaining issue** (D6 in DIFFERENCES.md): When `0 > jr_shift > -(shared)` (junction shifted left within the shared region), rustar-aligner's `junction_offset = (shared + jr_shift)` and `acceptor_bases = shared - junction_offset = -jr_shift`. This means some shared bases are scored against the acceptor genome side. Let's verify this gives the same result as STAR's unified loop for this case:
 
 For `jr_shift = -1`, `shared = 3`:
 - STAR: jR = jr_shift + shared = 2. Loop ii: min(1,3)=1 to max(3,2)=3.
@@ -216,11 +216,11 @@ For `jr_shift = -1`, `shared = 3`:
   - ii=2: g1 = gAend+2 (donor). ii <= jR=2, so donor.
   - ii=3: g1 = gBstart1+3 (acceptor). ii > jR=2, so acceptor.
   - All within [1,3] range → normal score logic
-- ruSTAR: junction_offset = (3-1) = 2, acceptor_bases = 1.
+- rustar-aligner: junction_offset = (3-1) = 2, acceptor_bases = 1.
   - Score 2 bases against donor genome, then 1 base against acceptor.
   - Same as STAR's loop ✓
 
-**Conclusion on D6**: For the in-range left-shift case, ruSTAR's split donor/acceptor scoring is equivalent to STAR's unified loop. **D6 severity downgraded to 🟢.**
+**Conclusion on D6**: For the in-range left-shift case, rustar-aligner's split donor/acceptor scoring is equivalent to STAR's unified loop. **D6 severity downgraded to 🟢.**
 
 ---
 
@@ -236,9 +236,9 @@ For `jr_shift = -1`, `shared = 3`:
     trA->canonSJ[trA->nExons-1] = -3;
 ```
 
-**ruSTAR** (`stitch_align_to_transcript`, mate boundary block): Just scores the new seed directly (`new_wt.score += wa.length as i32`) without extending into the inter-mate gap. The extensions happen later in `finalize_transcript`.
+**rustar-aligner** (`stitch_align_to_transcript`, mate boundary block): Just scores the new seed directly (`new_wt.score += wa.length as i32`) without extending into the inter-mate gap. The extensions happen later in `finalize_transcript`.
 
-**Assessment**: ruSTAR skips the inter-mate extension in `stitch_align_to_transcript`. STAR extends both mates inward toward the gap when processing the mate boundary. This could affect how many bases are "soft-clipped" vs. matched in the inter-mate region for PE reads. The final extensions at `finalize_transcript` time may or may not replicate this.
+**Assessment**: rustar-aligner skips the inter-mate extension in `stitch_align_to_transcript`. STAR extends both mates inward toward the gap when processing the mate boundary. This could affect how many bases are "soft-clipped" vs. matched in the inter-mate region for PE reads. The final extensions at `finalize_transcript` time may or may not replicate this.
 
 **Impact**: 🟡 Possible PE soft-clip difference for reads where the mates don't overlap.
 
@@ -256,9 +256,9 @@ Two conditions:
 1. Total mismatches cumulative over whole read must not exceed `outFilterMismatchNmaxTotal`
 2. For junctions (jCan ≥ 0), local gap mismatches must not exceed `alignSJstitchMismatchNmax[motif_category]`
 
-**ruSTAR** (`scorer.stitch_mismatch_allowed(&motif, gap_mm)`): Implements the per-junction stitch mismatch check. Needs verification that the cumulative total mismatch check is also applied in the right place.
+**rustar-aligner** (`scorer.stitch_mismatch_allowed(&motif, gap_mm)`): Implements the per-junction stitch mismatch check. Needs verification that the cumulative total mismatch check is also applied in the right place.
 
-**Assessment**: 🟡 Verify that ruSTAR also checks the cumulative `trA->nMM + nMM` condition.
+**Assessment**: 🟡 Verify that rustar-aligner also checks the cumulative `trA->nMM + nMM` condition.
 
 ---
 
@@ -272,7 +272,7 @@ trA->exons[trA->nExons][EX_R] = rAend+jR+1;      // New exon B read-start
 trA->exons[trA->nExons][EX_G] = gBstart1+jR+1;   // New exon B genome-start
 ```
 
-**ruSTAR**:
+**rustar-aligner**:
 ```rust
 last.read_end = (last.read_end as i64 + shared as i64 + jr_shift as i64) as usize;
 ...
@@ -280,8 +280,8 @@ let b_read_start = (eff_read_pos as i64 + jr_shift as i64) as usize;
 let b_len = (eff_length as i64 - jr_shift as i64).max(0) as usize;
 ```
 
-**Assessment**: Converting STAR's `rAend+jR+1` to ruSTAR notation:
+**Assessment**: Converting STAR's `rAend+jR+1` to rustar-aligner notation:
 - `rAend+jR+1 = (last_exon.read_end-1) + (jr_shift + shared) + 1 = last_exon.read_end + jr_shift + shared`
-- ruSTAR: `b_read_start = eff_read_pos + jr_shift = (last_exon.read_end + shared) + jr_shift` ✓
+- rustar-aligner: `b_read_start = eff_read_pos + jr_shift = (last_exon.read_end + shared) + jr_shift` ✓
 
 Both give the same B start position. ✅

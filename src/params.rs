@@ -274,13 +274,13 @@ impl std::str::FromStr for TwopassMode {
 // Parameters struct
 // ---------------------------------------------------------------------------
 
-/// ruSTAR command-line parameters, matching STAR's `--camelCase` argument names.
+/// rustar-aligner command-line parameters, matching STAR's `--camelCase` argument names.
 ///
 /// Only the ~40 most important parameters are included; more will be added
 /// incrementally as later phases need them.
 #[derive(Debug, Clone, Parser)]
 #[command(
-    name = "ruSTAR",
+    name = "rustar-aligner",
     about = "RNA-seq aligner (Rust reimplementation of STAR)",
     version,
     long_version = concat!(env!("CARGO_PKG_VERSION"), "\n", env!("VERSION_BODY")),
@@ -992,7 +992,7 @@ mod tests {
 
     /// Helper: parse a STAR-style command line (without program name).
     fn parse(args: &[&str]) -> Parameters {
-        let mut full = vec!["ruSTAR"];
+        let mut full = vec!["rustar-aligner"];
         full.extend_from_slice(args);
         Parameters::parse_from(full)
     }

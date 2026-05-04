@@ -1,7 +1,7 @@
 # STAR Suffix Array Implementation Research
 
 **Research Date:** 2026-02-06
-**Purpose:** Port STAR's suffix array construction to Rust for ruSTAR Phase 3
+**Purpose:** Port STAR's suffix array construction to Rust for rustar-aligner Phase 3
 
 This document provides a detailed analysis of STAR's suffix array construction implementation based on examination of the STAR source code (https://github.com/alexdobin/STAR).
 

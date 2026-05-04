@@ -976,7 +976,7 @@ fn stitch_align_to_transcript(
         // STAR allows at most ONE mate-boundary crossing per combined PE transcript.
         // stitchAlignToTranscript.cpp returns -1000007/-1000008 for the 3rd+ seed when
         // mates overlap (genome positions interleaved), naturally limiting WTs to 2 exons.
-        // ruSTAR's overlap-trimming allows continued stitching, inflating combined_n_match.
+        // rustar-aligner's overlap-trimming allows continued stitching, inflating combined_n_match.
         // Fix: if the WT already has exons from BOTH mates, a second crossing is invalid.
         let has_m0 = wt.exons.iter().any(|e| e.mate_id == 0);
         let has_m1 = wt.exons.iter().any(|e| e.mate_id == 1);
@@ -987,7 +987,7 @@ fn stitch_align_to_transcript(
         // gBstart + trA->exons[0][EX_R] + nBasesMax >= trA->exons[0][EX_G] || EX_G < EX_R
         // For forward clusters: checked in forward genome space.
         // For reverse clusters: checked in STAR's encoded genome space, then converted to
-        // ruSTAR's forward-position representation (Phase 16.27 convention).
+        // rustar-aligner's forward-position representation (Phase 16.27 convention).
         if cluster.is_reverse {
             // Reverse cluster: stitch_read = RC(combined) = [mate2|SPACER|RC(mate1)].
             // wt.exons[0] is the first mate2 exon; wa is the new mate1 seed.
@@ -3034,7 +3034,7 @@ mod tests {
         // Bin-based windowing with default parameters
         let params = {
             use clap::Parser;
-            crate::params::Parameters::parse_from(vec!["ruSTAR"])
+            crate::params::Parameters::parse_from(vec!["rustar-aligner"])
         };
         let clusters = cluster_seeds(&seeds, &index, &params, 150, false);
 

@@ -22,7 +22,7 @@ use crate::params::{Parameters, RunMode};
 pub fn run(params: &Parameters) -> anyhow::Result<()> {
     params.validate()?;
 
-    info!("ruSTAR {}", env!("CARGO_PKG_VERSION"));
+    info!("rustar-aligner {}", env!("CARGO_PKG_VERSION"));
     info!("{}", env!("VERSION_BODY"));
     info!("{}", cpu::cpu_detected_line());
     if let Some(hint) = cpu::upgrade_hint() {

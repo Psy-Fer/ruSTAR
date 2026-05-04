@@ -1,6 +1,6 @@
 //! Integration test for `--quantMode TranscriptomeSAM`.
 //!
-//! Builds a tiny genome + 2-transcript GTF + a small FASTQ, runs ruSTAR
+//! Builds a tiny genome + 2-transcript GTF + a small FASTQ, runs rustar-aligner
 //! with `--quantMode TranscriptomeSAM`, and asserts that
 //! `Aligned.toTranscriptome.out.bam` is produced, is a valid BAM file,
 //! and contains at least one record.  Acts as a smoke test for the
@@ -148,7 +148,7 @@ fn transcriptome_sam_end_to_end_smoke_test() {
     let output_dir = tmpdir.path().join("output");
     fs::create_dir_all(&output_dir).unwrap();
     // STAR's prefix semantics: if prefix ends with `/`, it is treated as a
-    // directory and files are placed inside it.  ruSTAR's `PathBuf::join`
+    // directory and files are placed inside it.  rustar-aligner's `PathBuf::join`
     // also handles the trailing slash convention.
     let output_prefix = format!("{}/", output_dir.display());
 

@@ -89,7 +89,7 @@ fn write_gtf(dir: &TempDir) -> PathBuf {
     path
 }
 
-/// Build the ruSTAR genome index.
+/// Build the rustar-aligner genome index.
 /// `sa_nbases` should be "7" for this 20 kb genome.
 /// If `gtf` is `Some`, passes `--sjdbGTFfile` + `--sjdbOverhang`.
 fn build_index(fasta: &Path, genome_dir: &Path, sa_nbases: &str, gtf: Option<&Path>) {
@@ -536,7 +536,7 @@ fn test_bysj_filtering() {
 
     assert!(
         output.status.success(),
-        "ruSTAR failed: {}",
+        "rustar-aligner failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 

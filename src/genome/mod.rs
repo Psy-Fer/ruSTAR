@@ -138,7 +138,7 @@ impl Genome {
         new_seq[old_n as usize..new_n as usize].copy_from_slice(gsj);
 
         // Rebuild RC over the extended forward range (STAR stores Gsj_RC
-        // implicitly — ruSTAR keeps the explicit `[fwd | RC]` layout).
+        // implicitly — rustar-aligner keeps the explicit `[fwd | RC]` layout).
         for i in 0..new_n as usize {
             let base = new_seq[i];
             let complement = if base < 4 { 3 - base } else { base };
@@ -348,7 +348,7 @@ mod tests {
 
     fn make_params(fasta_paths: Vec<std::path::PathBuf>, bin_nbits: u32) -> Parameters {
         use clap::Parser;
-        let mut args = vec!["ruSTAR", "--runMode", "genomeGenerate"];
+        let mut args = vec!["rustar-aligner", "--runMode", "genomeGenerate"];
 
         for path in &fasta_paths {
             args.push("--genomeFastaFiles");

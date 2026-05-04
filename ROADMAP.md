@@ -1,4 +1,4 @@
-# ruSTAR Implementation Roadmap
+# rustar-aligner Implementation Roadmap
 
 Tracks implementation progress across sessions. Each phase lists its deliverables, files touched, and completion status. Detailed notes for later phases are in `docs/`.
 
@@ -197,18 +197,18 @@ See [docs/phase16_algorithm.md](docs/phase16_algorithm.md) for sub-phase notes (
 | Fixable algorithm differences | 26 | 0.29% | Yes |
 | **Parity excl. unavoidable ties** | **8800/8826** | **99.70%** | — |
 
-**Adjusted SE summary (post Phase 16.29)**: 99.7% position agreement, 99.9% CIGAR, 2.2% splice rate (= STAR), 99.9% MAPQ, 26 actionable disagreements, 1 STAR-only / 1 ruSTAR-only. MAPQ inflation: 4 reads, MAPQ deflation: 4 reads.
+**Adjusted SE summary (post Phase 16.29)**: 99.7% position agreement, 99.9% CIGAR, 2.2% splice rate (= STAR), 99.9% MAPQ, 26 actionable disagreements, 1 STAR-only / 1 rustar-aligner-only. MAPQ inflation: 4 reads, MAPQ deflation: 4 reads.
 
 **PE parity (10k yeast pairs, 150 bp, post Phase G2):**
 
-| Metric | ruSTAR | STAR |
+| Metric | rustar-aligner | STAR |
 |--------|--------|------|
 | Both-mapped pairs | **8390** | 8390 |
 | Half-mapped pairs | **0** | 0 |
 | Net gap | **0 (exact match)** | — |
 | PE faithfulness (tie-adj, pos+CIGAR+MAPQ+proper+NH) | **99.883%** (16,284/16,306) | — |
 | Tie-breaking diffs (excluded) | 475 | — |
-| ruSTAR-only false positives | 1 (`.6302610`) | — |
+| rustar-aligner-only false positives | 1 (`.6302610`) | — |
 | STAR-only missed | 1 (`.18919121`) | — |
 | MAPQ inflations | **0** | — |
 | MAPQ deflations | **0** | — |
@@ -248,7 +248,7 @@ All 127 SE position disagreements (100 diff-chr + 27 same-chr) verified as **gen
 | Issue | Count | Difficulty |
 |-------|-------|------------|
 | SE CIGAR insertion placement | 1 | Hard — `ERR12389696.13573895` (AS=133 both, same pos, homopolymer seed-level tie) |
-| PE ruSTAR-only FP | 1 | `.6302610` — adapter contamination at mate2 pos 40, seeding-level |
+| PE rustar-aligner-only FP | 1 | `.6302610` — adapter contamination at mate2 pos 40, seeding-level |
 | PE STAR-only | 1 | `.18919121` — SA construction diff (EX_R=0 vs 1), SA-level |
 | PE AS diffs | 6 | Residual combined-score parity gaps |
 
@@ -268,7 +268,7 @@ STAR ... 2>star_debug.log
 
 Helper script: `test/debug_star.sh`
 ```bash
-./debug_star.sh pe <rustar.sam> <star.sam> [n_reads]  # extract & trace false positives
+./debug_star.sh pe <rustar-aligner.sam> <star.sam> [n_reads]  # extract & trace false positives
 ./debug_star.sh reads "read1,read2"                    # trace specific reads
 ```
 

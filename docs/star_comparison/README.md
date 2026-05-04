@@ -1,8 +1,8 @@
 [← Back to docs/](../)
 
-# STAR vs ruSTAR: Source Code Comparison
+# STAR vs rustar-aligner: Source Code Comparison
 
-This directory contains detailed comparisons of each pipeline step between the original STAR C++ source and the ruSTAR Rust port. The goal is to identify any remaining divergences and track their expected impact on alignment output.
+This directory contains detailed comparisons of each pipeline step between the original STAR C++ source and the rustar-aligner Rust port. The goal is to identify any remaining divergences and track their expected impact on alignment output.
 
 All STAR source references are from the STAR master branch at https://github.com/alexdobin/STAR
 
@@ -11,21 +11,21 @@ All STAR source references are from the STAR master branch at https://github.com
 ```
 FASTQ Input
     ↓
-Seed Finding         (STAR: ReadAlign.cpp / seed functions)         → ruSTAR: src/align/seed.rs
+Seed Finding         (STAR: ReadAlign.cpp / seed functions)         → rustar-aligner: src/align/seed.rs
     ↓
-Seed Clustering      (STAR: ReadAlign_stitchWindowSeeds context)    → ruSTAR: cluster_seeds() in stitch.rs
+Seed Clustering      (STAR: ReadAlign_stitchWindowSeeds context)    → rustar-aligner: cluster_seeds() in stitch.rs
     ↓
-Pre-DP Seed Eval     (STAR: stitchWindowSeeds.cpp)                  → ruSTAR: stitch_seeds_with_jdb_debug()
+Pre-DP Seed Eval     (STAR: stitchWindowSeeds.cpp)                  → rustar-aligner: stitch_seeds_with_jdb_debug()
     ↓
-Recursive Stitching  (STAR: stitchWindowAligns.cpp)                 → ruSTAR: stitch_recurse() + stitch_seeds_core()
+Recursive Stitching  (STAR: stitchWindowAligns.cpp)                 → rustar-aligner: stitch_recurse() + stitch_seeds_core()
     ↓
-Per-Step Stitching   (STAR: stitchAlignToTranscript.cpp)            → ruSTAR: stitch_align_to_transcript()
+Per-Step Stitching   (STAR: stitchAlignToTranscript.cpp)            → rustar-aligner: stitch_align_to_transcript()
     ↓
-Seed Extension       (STAR: extendAlign.cpp)                        → ruSTAR: extend_alignment() / finalize_transcript()
+Seed Extension       (STAR: extendAlign.cpp)                        → rustar-aligner: extend_alignment() / finalize_transcript()
     ↓
-Quality Filter       (STAR: ReadAlign_mappedFilter.cpp)             → ruSTAR: filter in read_align.rs
+Quality Filter       (STAR: ReadAlign_mappedFilter.cpp)             → rustar-aligner: filter in read_align.rs
     ↓
-SAM Output           (STAR: ReadAlign_outputAlignments.cpp)         → ruSTAR: src/io/sam.rs
+SAM Output           (STAR: ReadAlign_outputAlignments.cpp)         → rustar-aligner: src/io/sam.rs
 ```
 
 ## Documents
@@ -41,7 +41,7 @@ SAM Output           (STAR: ReadAlign_outputAlignments.cpp)         → ruSTAR: 
 
 ## Quick Reference: STAR Source Files
 
-| STAR file | Purpose | ruSTAR equivalent |
+| STAR file | Purpose | rustar-aligner equivalent |
 |-----------|---------|-------------------|
 | `stitchWindowAligns.cpp` | Recursive include/exclude stitcher | `stitch_recurse` + base case in `stitch_seeds_core` |
 | `stitchAlignToTranscript.cpp` | Per-step gap/splice/indel scoring | `stitch_align_to_transcript` |
@@ -54,9 +54,9 @@ SAM Output           (STAR: ReadAlign_outputAlignments.cpp)         → ruSTAR: 
 ## Key Conventions
 
 - **STAR coordinate**: `rAend` = last base of seed A (0-based, inclusive). `gAend` = same for genome.
-- **ruSTAR coordinate**: `last_exon.read_end` = first base AFTER seed A (exclusive). `last_exon.genome_end` = same.
-- Therefore: `STAR rAend = ruSTAR last_exon.read_end - 1`; `STAR rBstart = ruSTAR eff_read_pos`.
+- **rustar-aligner coordinate**: `last_exon.read_end` = first base AFTER seed A (exclusive). `last_exon.genome_end` = same.
+- Therefore: `STAR rAend = rustar-aligner last_exon.read_end - 1`; `STAR rBstart = rustar-aligner eff_read_pos`.
 - **STAR jR**: distance from `rAend` into the gap/beyond; `jR=0` means junction right at `rAend` (no shift relative to seed end).
-- **ruSTAR jr_shift**: distance from end of shared region; `jr_shift=0` means junction at start of seed B.
+- **rustar-aligner jr_shift**: distance from end of shared region; `jr_shift=0` means junction at start of seed B.
 - **Relationship**: `STAR_jR = jr_shift + shared` (where `shared = rGap = STAR's read gap`).
-- **STAR WA_gStart**: stored in FORWARD genome coordinates (even for reverse-strand seeds), converted via `a1 = nGenome - (aLength + a1)`. ruSTAR follows the same convention after Phase 16.27.
+- **STAR WA_gStart**: stored in FORWARD genome coordinates (even for reverse-strand seeds), converted via `a1 = nGenome - (aLength + a1)`. rustar-aligner follows the same convention after Phase 16.27.

@@ -329,7 +329,7 @@ fn render_sam_text_lenient(header: &sam::Header, sort_order: Option<&str>) -> Ve
         buf.extend_from_slice(b"\tLN:");
         buf.extend_from_slice(usize::from(rs.length()).to_string().as_bytes());
         // Other optional @SQ fields (AH, AN, AS, DS, M5, SP, TP, UR) —
-        // ruSTAR doesn't set any today, so skip.
+        // rustar-aligner doesn't set any today, so skip.
         buf.push(b'\n');
     }
 
@@ -347,7 +347,7 @@ fn render_sam_text_lenient(header: &sam::Header, sort_order: Option<&str>) -> Ve
     }
 
     // @PG lines — noodles' map doesn't guarantee insertion order; for
-    // ruSTAR we emit a single @PG with id "ruSTAR". If more are added
+    // rustar-aligner we emit a single @PG with id "rustar-aligner". If more are added
     // later, pipe them in here.
     for (id, pg) in header.programs().as_ref() {
         buf.extend_from_slice(b"@PG\tID:");
@@ -477,7 +477,7 @@ mod tests {
     }
 
     fn create_test_params() -> Parameters {
-        Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "test.fq"])
+        Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "test.fq"])
     }
 
     #[test]

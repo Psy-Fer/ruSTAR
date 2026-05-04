@@ -198,7 +198,7 @@ Added secondary sort keys for equal-score transcripts: smallest chr_idx → smal
 | Position agreement | 95.3% | **96.3%** | — |
 | CIGAR agreement | 96.5% | **97.4%** | — |
 | Splice rate | 4.1% | **0.4%** | 2.5% |
-| ruSTAR-only junctions | 33 | **3** | — |
+| rustar-aligner-only junctions | 33 | **3** | — |
 
 **Files**: `src/align/stitch.rs`, `src/align/read_align.rs`, `src/align/seed.rs`, `src/params.rs`, `src/junction/sj_output.rs`
 

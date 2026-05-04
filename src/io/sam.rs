@@ -844,7 +844,7 @@ where
     }
 
     // @PG line
-    builder = builder.add_program("ruSTAR", Map::<Program>::default());
+    builder = builder.add_program("rustar-aligner", Map::<Program>::default());
 
     Ok(builder.build())
 }
@@ -1132,7 +1132,7 @@ fn build_md_tag(
     md
 }
 
-/// Convert ruSTAR CigarOp to noodles Cigar
+/// Convert rustar-aligner CigarOp to noodles Cigar
 pub(crate) fn convert_cigar(ops: &[CigarOp]) -> Result<sam::alignment::record_buf::Cigar, Error> {
     use sam::alignment::record::cigar::op::Kind;
 
@@ -1362,7 +1362,7 @@ mod tests {
     #[test]
     fn test_build_sam_header() {
         let genome = make_test_genome();
-        let params = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "test.fq"]);
+        let params = Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "test.fq"]);
 
         let header = build_sam_header(&genome, &params).unwrap();
 
@@ -1377,7 +1377,7 @@ mod tests {
     fn test_build_sam_header_with_rg() {
         let genome = make_test_genome();
         let params = Parameters::parse_from(vec![
-            "ruSTAR",
+            "rustar-aligner",
             "--readFilesIn",
             "test.fq",
             "--outSAMattrRGline",
@@ -1406,7 +1406,7 @@ mod tests {
 
         let genome = make_test_genome();
         let params = Parameters::parse_from(vec![
-            "ruSTAR",
+            "rustar-aligner",
             "--readFilesIn",
             "test.fq",
             "--outSAMattrRGline",
@@ -1470,7 +1470,7 @@ mod tests {
     #[test]
     fn test_sam_writer_creation() {
         let genome = make_test_genome();
-        let params = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "test.fq"]);
+        let params = Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "test.fq"]);
 
         let tmpfile = NamedTempFile::new().unwrap();
         let writer = SamWriter::create(tmpfile.path(), &genome, &params);
@@ -1530,7 +1530,7 @@ mod tests {
         let mate1_qual = vec![30, 30, 30, 30];
         let mate2_seq = vec![3, 2, 1, 0]; // TGCA
         let mate2_qual = vec![30, 30, 30, 30];
-        let params = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "t.fq"]);
+        let params = Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "t.fq"]);
 
         let records = SamWriter::build_paired_unmapped_records(
             "read1",
@@ -1987,7 +1987,7 @@ mod tests {
     #[test]
     fn test_secondary_flag() {
         let genome = make_test_genome();
-        let params = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "test.fq"]);
+        let params = Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "test.fq"]);
 
         let transcripts = vec![
             Transcript {
@@ -2304,7 +2304,7 @@ mod tests {
     fn test_out_sam_mult_nmax() {
         let genome = make_test_genome();
         let params = Parameters::parse_from(vec![
-            "ruSTAR",
+            "rustar-aligner",
             "--readFilesIn",
             "test.fq",
             "--outSAMmultNmax",
@@ -3262,7 +3262,7 @@ mod tests {
         use crate::params::Parameters;
 
         // Standard
-        let p = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "r.fq"]);
+        let p = Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "r.fq"]);
         let attrs = p.sam_attribute_set();
         assert_eq!(attrs.len(), 5);
         assert!(attrs.contains("NH"));
@@ -3273,7 +3273,7 @@ mod tests {
 
         // All
         let p = Parameters::parse_from(vec![
-            "ruSTAR",
+            "rustar-aligner",
             "--readFilesIn",
             "r.fq",
             "--outSAMattributes",
@@ -3289,7 +3289,7 @@ mod tests {
 
         // None
         let p = Parameters::parse_from(vec![
-            "ruSTAR",
+            "rustar-aligner",
             "--readFilesIn",
             "r.fq",
             "--outSAMattributes",
@@ -3300,7 +3300,7 @@ mod tests {
 
         // Explicit subset
         let p = Parameters::parse_from(vec![
-            "ruSTAR",
+            "rustar-aligner",
             "--readFilesIn",
             "r.fq",
             "--outSAMattributes",
@@ -3379,7 +3379,7 @@ mod tests {
         use crate::align::transcript::Exon;
 
         let genome = make_test_genome();
-        let params = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "r1.fq", "r2.fq"]);
+        let params = Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "r1.fq", "r2.fq"]);
 
         let mapped_transcript = Transcript {
             chr_idx: 0,
@@ -3447,7 +3447,7 @@ mod tests {
         use crate::align::transcript::Exon;
 
         let genome = make_test_genome();
-        let params = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "r1.fq", "r2.fq"]);
+        let params = Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "r1.fq", "r2.fq"]);
 
         let mapped_transcript = Transcript {
             chr_idx: 0,
@@ -3528,7 +3528,7 @@ mod tests {
         use crate::align::transcript::Exon;
 
         let genome = make_test_genome();
-        let params = Parameters::parse_from(vec!["ruSTAR", "--readFilesIn", "r1.fq", "r2.fq"]);
+        let params = Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "r1.fq", "r2.fq"]);
 
         let mapped_transcript = Transcript {
             chr_idx: 0,

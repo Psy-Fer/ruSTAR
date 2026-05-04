@@ -1,0 +1,60 @@
+---
+title: rustar-aligner
+description: A Rust reimplementation of STAR — the widely-used RNA-seq aligner — built for behavioural parity with the original.
+hero:
+  title: A Rust port of STAR
+  tagline: Faithful, byte-compatible RNA-seq alignment in modern Rust. Same index format, same <code>--camelCase</code> flags, same SAM/BAM output.
+  image:
+    file: ../../assets/rustar-logo.svg
+  actions:
+    - text: Quick start
+      link: /rustar-aligner/getting-started/quick-start/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/Psy-Fer/rustar-aligner
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+<CardGrid stagger>
+  <Card title="Drop-in compatible" icon="approve-check">
+    Same genome index format, same `--camelCase` parameters, same SAM/BAM output as STAR. Existing pipelines work without changes.
+  </Card>
+  <Card title="99.88% byte-identical" icon="seti:rust">
+    Tie-adjusted faithfulness vs STAR on yeast benchmark: 99.815% single-end, 99.883% paired-end. The suffix array is byte-for-byte identical.
+  </Card>
+  <Card title="Full feature set" icon="puzzle">
+    Single-end, paired-end, two-pass, chimeric detection (4-tier), gene quantification, transcriptome SAM, GTF junctions, multi-threaded.
+  </Card>
+  <Card title="Built in Rust" icon="rocket">
+    Modern toolchain, memory-safe, no manual memory management. 396 tests, zero clippy warnings, runs on Linux, macOS, and Windows.
+  </Card>
+</CardGrid>
+
+## Get going
+
+<CardGrid>
+  <LinkCard
+    title="Migrating from STAR"
+    href="/rustar-aligner/guides/migrating-from-star/"
+    description="Already using STAR? See what's identical, what differs, and how to swap one for the other."
+  />
+  <LinkCard
+    title="CLI parameters"
+    href="/rustar-aligner/reference/cli-parameters/"
+    description="Every flag rustar-aligner accepts, grouped by category and matching STAR's naming."
+  />
+  <LinkCard
+    title="STAR compatibility"
+    href="/rustar-aligner/reference/star-compatibility/"
+    description="A detailed scoreboard of how identical the outputs are vs STAR, with the known edge cases listed."
+  />
+  <LinkCard
+    title="Quick start"
+    href="/rustar-aligner/getting-started/quick-start/"
+    description="Index a genome, align some reads, look at the output. Five commands."
+  />
+</CardGrid>

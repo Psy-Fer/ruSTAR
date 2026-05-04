@@ -1,0 +1,50 @@
+/* Site title in the navbar — monospace, otherwise default styling */
+.site-title {
+  font-family: var(--__sl-font-mono);
+}
+
+/* Keep inline code on a single line. Excludes <code> inside <pre> (fenced
+   code blocks), which still wraps/scrolls per Starlight's defaults. */
+:not(pre) > code {
+  white-space: nowrap;
+}
+
+/* Homepage: doc template (so Starlight's mobile drawer is reused) with the
+   desktop sidebar/TOC and footer chrome visually hidden. The .hero element
+   is rendered by Starlight only on pages with `hero` frontmatter, so
+   `:has(.hero)` scopes these rules to the home page. The .sidebar element
+   on desktop holds the sidebar pane; on mobile it holds the menu toggle and
+   a hidden drawer — we only hide the desktop layout, never the mobile
+   toggle, so mobile users still get the navigation drawer. */
+:root:has(.hero) .right-sidebar-container,
+:root:has(.hero) .pagination-links,
+:root:has(.hero) .meta,
+:root:has(.hero) main > footer {
+  display: none !important;
+}
+:root:has(.hero) {
+  --sl-mobile-toc-height: 0rem;
+}
+@media (min-width: 50rem) {
+  /* Desktop only: collapse the sidebar column and widen the content column
+     for the home page. Starlight sets --sl-content-margin-inline: auto 0
+     (flush-right within main-pane) when both sidebar and TOC are present;
+     override to auto so content centres within the main-pane. */
+  :root:has(.hero) {
+    --sl-content-width: 72rem;
+    --sl-sidebar-width: 0rem;
+  }
+  :root:has(.hero) .page > nav.sidebar {
+    display: none !important;
+  }
+  :root:has(.hero) .main-frame {
+    padding-inline-start: 0 !important;
+  }
+  :root:has(.hero) .main-pane {
+    width: 100% !important;
+    --sl-content-margin-inline: auto !important;
+  }
+  :root:has(.hero) .content-panel > .sl-container {
+    margin-inline: auto !important;
+  }
+}

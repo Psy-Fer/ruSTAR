@@ -1058,9 +1058,12 @@ mod tests {
     fn test_align_intron_max_custom() {
         // Custom alignIntronMax should be passed through directly
         use clap::Parser;
-        let params =
-            crate::params::Parameters::try_parse_from(vec!["rustar-aligner", "--alignIntronMax", "100000"])
-                .unwrap();
+        let params = crate::params::Parameters::try_parse_from(vec![
+            "rustar-aligner",
+            "--alignIntronMax",
+            "100000",
+        ])
+        .unwrap();
         assert_eq!(params.align_intron_max, 100_000);
         let scorer = AlignmentScorer::from_params(&params);
         assert_eq!(scorer.align_intron_max, 100_000);

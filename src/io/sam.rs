@@ -3379,7 +3379,8 @@ mod tests {
         use crate::align::transcript::Exon;
 
         let genome = make_test_genome();
-        let params = Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "r1.fq", "r2.fq"]);
+        let params =
+            Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "r1.fq", "r2.fq"]);
 
         let mapped_transcript = Transcript {
             chr_idx: 0,
@@ -3447,7 +3448,8 @@ mod tests {
         use crate::align::transcript::Exon;
 
         let genome = make_test_genome();
-        let params = Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "r1.fq", "r2.fq"]);
+        let params =
+            Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "r1.fq", "r2.fq"]);
 
         let mapped_transcript = Transcript {
             chr_idx: 0,
@@ -3528,7 +3530,8 @@ mod tests {
         use crate::align::transcript::Exon;
 
         let genome = make_test_genome();
-        let params = Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "r1.fq", "r2.fq"]);
+        let params =
+            Parameters::parse_from(vec!["rustar-aligner", "--readFilesIn", "r1.fq", "r2.fq"]);
 
         let mapped_transcript = Transcript {
             chr_idx: 0,
